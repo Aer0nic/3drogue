@@ -18,7 +18,7 @@ pub const LOGO: &[&str] = &[
     r" \____|_| \_\/_/   \_\/____/____/_/   \_\_| \_\_|\_\",
 ];
 
-pub const TITLE_ITEMS: [&str; 5] = ["New Descent", "Soul Altar", "Hall of the Dead", "How to Play", "Quit"];
+pub const TITLE_ITEMS: [&str; 7] = ["Continue Descent", "New Descent", "Soul Altar", "Bestiary", "Hall of the Dead", "How to Play", "Quit"];
 
 // ================================================================ fire
 
@@ -108,7 +108,7 @@ pub fn fire_color(f: f32, tint: u8) -> Rgb {
 
 // ================================================================ title
 
-pub fn draw_title(c: &mut Canvas, fire: &Fire, t: f32, sel: usize, prof: &Profile) {
+pub fn draw_title(c: &mut Canvas, fire: &Fire, t: f32, sel: usize, prof: &Profile, has_save: bool) {
     let w = c.w as i32;
     let h = c.h as i32;
     for y in 0..h {
@@ -137,8 +137,9 @@ pub fn draw_title(c: &mut Canvas, fire: &Fire, t: f32, sel: usize, prof: &Profil
     c.center(ly + 6, "~ the Descent for the Amulet ~", Rgb(200, 170, 130));
 
     let my = ly + 9;
-    for (i, item) in TITLE_ITEMS.iter().enumerate() {
-        let y = my + i as i32 * 2;
+    let first = if has_save { 0 } else { 1 };
+    for (i, item) in TITLE_ITEMS.iter().enumerate().skip(first) {
+        let y = my + (i - first) as i32 * 2;
         if i == sel {
             let s = format!(">>  {}  <<", item);
             let col = Rgb(255, 230, 150).lerp(Rgb::WHITE, 0.5 + 0.5 * (t * 4.0).sin());
@@ -151,7 +152,11 @@ pub fn draw_title(c: &mut Canvas, fire: &Fire, t: f32, sel: usize, prof: &Profil
         "Soul Points: {}    Descents: {}    Victories: {}    Deepest: {}",
         prof.points, prof.runs, prof.wins, prof.best_depth
     );
-    c.center(my + 11, &stats, Rgb(190, 140, 255));
+    let rows = (TITLE_ITEMS.len() - first) as i32;
+    c.center(my + rows * 2 + 1, &stats, Rgb(190, 140, 255));
+    if has_save && sel == 1 {
+        c.center(my + rows * 2 + 2, "(a new descent abandons your saved run)", Rgb(200, 120, 100));
+    }
     c.center(h - 1, "Up/Down + Enter to choose", Rgb(120, 100, 90));
 }
 
@@ -197,8 +202,15 @@ pub fn draw_class_select(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
         c.text(px + 4, y, &format!("[{}] {} ({} mp) - {}", i + 1, s.name(), s.mp(), s.desc()), Rgb(170, 230, 170));
         y += 1;
     }
-    for (i, s) in b.skills.iter().enumerate() {
-        c.text(px + 4, y, &format!("[{}] {} (altar) - {}", i + 3, s.name(), s.desc()), Rgb(200, 160, 255));
+    let mut slot = 3;
+    for u in UPGRADES.iter().filter(|u| u.cat == UCat::Skill(sel)) {
+        let Some(s) = u.skill else { continue };
+        if b.skills.contains(&s) {
+            c.text(px + 4, y, &format!("[{}] {} ({} mp) - {}", slot, s.name(), s.mp(), s.desc()), Rgb(200, 160, 255));
+            slot += 1;
+        } else {
+            c.text(px + 4, y, &format!("[-] {} - learn at the Soul Altar ({} pts)", s.name(), u.cost), Rgb(100, 90, 110));
+        }
         y += 1;
     }
     y += 1;
@@ -206,9 +218,9 @@ pub fn draw_class_select(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
         let cost = UPGRADES.iter().find(|u| Some(u.id) == cd.unlock).map(|u| u.cost).unwrap_or(0);
         c.text(px + 2, y, &format!("LOCKED - unlock at the Soul Altar for {} soul points.", cost), Rgb(255, 100, 100));
     } else {
-        c.text(px + 2, y, "Press Enter to begin your descent.", Rgb(255, 230, 150));
+        c.text(px + 2, y, "Press Enter to choose a difficulty.", Rgb(255, 230, 150));
     }
-    c.center(h - 2, "Up/Down: choose   Enter: begin   Esc: back", Rgb(120, 110, 100));
+    c.center(h - 2, "Up/Down: choose   Enter: next   Esc: back", Rgb(120, 110, 100));
 }
 
 pub fn wrap(s: &str, width: usize) -> Vec<String> {
@@ -231,6 +243,16 @@ pub fn wrap(s: &str, width: usize) -> Vec<String> {
 
 // ================================================================ altar
 
+/// Heading for an altar section.
+fn ucat_title(cat: UCat) -> String {
+    match cat {
+        UCat::Stat => "STRENGTHS".to_string(),
+        UCat::Boon => "BOONS".to_string(),
+        UCat::Class => "CLASSES".to_string(),
+        UCat::Skill(k) => format!("{} SKILLS", CLASSES[k].name.to_uppercase()),
+    }
+}
+
 pub fn draw_altar(c: &mut Canvas, sel: usize, prof: &Profile, t: f32, note: &str, fire: &Fire) {
     let w = c.w as i32;
     let h = c.h as i32;
@@ -239,15 +261,34 @@ pub fn draw_altar(c: &mut Canvas, sel: usize, prof: &Profile, t: f32, note: &str
     fire.draw(c, 0, h - fh, 3);
     c.center(1, "~ THE SOUL ALTAR ~", Rgb(200, 150, 255).lerp(Rgb::WHITE, 0.3 + 0.3 * (t * 2.0).sin()));
     c.center(2, &format!("Soul Points: {}", prof.points), Rgb(230, 200, 255));
+
+    // Rows: Some(i) is upgrade i, None(k) a section heading for upgrade k.
+    let mut rows: Vec<(bool, usize)> = Vec::new();
+    for (i, u) in UPGRADES.iter().enumerate() {
+        if i == 0 || UPGRADES[i - 1].cat != u.cat {
+            rows.push((false, i));
+        }
+        rows.push((true, i));
+    }
     let top = 4;
-    let rows = (h - top - fh - 3).max(4);
-    let start = if sel as i32 >= rows { sel as i32 - rows + 1 } else { 0 };
+    let avail = (h - top - fh - 4).max(4);
+    let sel_row = rows.iter().position(|&(it, i)| it && i == sel).unwrap_or(0) as i32;
+    let start = if sel_row - 1 >= avail { sel_row - avail + 1 } else { 0 }.max(0);
     let lx = 3;
-    for (row, i) in (start as usize..UPGRADES.len()).enumerate() {
-        if row as i32 >= rows {
+    for (row, &(is_item, i)) in rows.iter().enumerate().skip(start as usize) {
+        let y = top + row as i32 - start;
+        if y >= top + avail {
             break;
         }
         let u = &UPGRADES[i];
+        if !is_item {
+            let col = match u.cat {
+                UCat::Skill(k) => CLASSES[k].color,
+                _ => Rgb(190, 150, 255),
+            };
+            c.text(lx, y, &format!("-- {} --", ucat_title(u.cat)), col);
+            continue;
+        }
         let r = prof.rank(u.id);
         let mut pips = String::from("[");
         for k in 0..u.max {
@@ -255,11 +296,10 @@ pub fn draw_altar(c: &mut Canvas, sel: usize, prof: &Profile, t: f32, note: &str
         }
         pips.push(']');
         let cost = match prof.next_cost(i) {
-            Some(cst) => format!("{:>4} pts", cst),
-            None => "  MAX   ".to_string(),
+            Some(cst) => format!("{:>5} pts", cst),
+            None => "   MAX   ".to_string(),
         };
-        let line = format!("{:<24} {:<8} {}", u.name, pips, cost);
-        let y = top + row as i32;
+        let line = format!("{:<22} {:<8} {}", u.title(), pips, cost);
         let affordable = prof.next_cost(i).map_or(false, |cst| cst <= prof.points);
         if i == sel {
             c.text_bg(lx, y, &format!("> {}", line), Rgb::BLACK, Rgb(200, 150, 255));
@@ -274,13 +314,262 @@ pub fn draw_altar(c: &mut Canvas, sel: usize, prof: &Profile, t: f32, note: &str
             c.text(lx + 2, y, &line, col);
         }
     }
+    if start > 0 {
+        c.text(lx + 48, top, "^ more", Rgb(140, 120, 160));
+    }
+    if (rows.len() as i32 - start) > avail {
+        c.text(lx + 48, top + avail - 1, "v more", Rgb(140, 120, 160));
+    }
     let u = &UPGRADES[sel];
     let dy = h - fh - 2;
-    c.text(lx, dy, u.desc, Rgb(220, 200, 255));
+    let mut desc = u.text();
+    if let UCat::Skill(k) = u.cat {
+        let cd = &CLASSES[k];
+        desc = format!("{} only. {}", cd.name, desc);
+        if !prof.class_unlocked(cd) {
+            desc.push_str(&format!("  ({} is not unlocked yet.)", cd.name));
+        }
+    }
+    let lines = wrap(&desc, (w - lx * 2).max(10) as usize);
+    for (k, line) in lines.iter().take(2).enumerate() {
+        c.text(lx, dy + k as i32, line, Rgb(220, 200, 255));
+    }
     if !note.is_empty() {
         c.text(lx, dy - 1, note, Rgb(255, 230, 150));
     }
     c.center(h - 1, "Up/Down: choose   Enter: buy   Esc: back", Rgb(160, 140, 180));
+}
+
+// ================================================================ difficulty
+
+pub fn draw_difficulty(c: &mut Canvas, sel: usize, class: usize, prof: &Profile, t: f32) {
+    let w = c.w as i32;
+    let h = c.h as i32;
+    c.fill(0, 0, w, h, ' ', Rgb::WHITE, Rgb(10, 5, 8));
+    let cd = &CLASSES[class];
+    c.center(1, "CHOOSE YOUR FATE", Rgb(255, 170, 110));
+    c.center(2, &format!("as the {}", cd.name), cd.color);
+    let lx = 4;
+    for (i, d) in DIFFICULTIES.iter().enumerate() {
+        let y = 5 + i as i32 * 2;
+        let open = prof.diff_unlocked(i);
+        let label = if open { d.name.to_string() } else { format!("{} (locked)", d.name) };
+        if i == sel {
+            let col = if open { d.color.lerp(Rgb::WHITE, 0.3 + 0.2 * (t * 4.0).sin()) } else { Rgb(150, 110, 110) };
+            c.text(lx, y, &format!("> {}", label), col);
+        } else {
+            c.text(lx + 2, y, &label, if open { d.color.scale(0.8) } else { Rgb(90, 80, 80) });
+        }
+    }
+    let d = &DIFFICULTIES[sel];
+    let px = 26.min(w / 3);
+    let pw = w - px - 3;
+    c.frame(px, 4, pw, 13, d.color.scale(0.6), Rgb(16, 8, 12));
+    let mut y = 6;
+    c.text(px + 2, y, d.name, d.color);
+    y += 2;
+    for line in wrap(d.desc, (pw - 4) as usize) {
+        c.text(px + 2, y, &line, Rgb(210, 210, 210));
+        y += 1;
+    }
+    y += 1;
+    c.text(px + 2, y, &format!("Monster health  x{:.1}", d.hp), Rgb(230, 160, 160));
+    y += 1;
+    c.text(px + 2, y, &format!("Monster damage  x{:.1}", d.dmg), Rgb(230, 160, 160));
+    y += 1;
+    c.text(px + 2, y, &format!("Soul points     x{:.1}", d.souls), Rgb(200, 160, 255));
+    y += 2;
+    if prof.diff_unlocked(sel) {
+        c.text(px + 2, y, "Press Enter to begin your descent.", Rgb(255, 230, 150));
+    } else {
+        let prev = DIFFICULTIES[sel - 1].name;
+        c.text(px + 2, y, &format!("LOCKED - escape with the Amulet on {} to unlock.", prev), Rgb(255, 100, 100));
+    }
+    c.center(h - 2, "Up/Down: choose   Enter: begin   Esc: back", Rgb(120, 110, 100));
+}
+
+// ================================================================ bestiary
+
+fn speed_word(ticks: f64) -> &'static str {
+    match ticks as i32 {
+        i32::MIN..=70 => "very fast",
+        71..=89 => "fast",
+        90..=105 => "average",
+        106..=125 => "slow",
+        _ => "very slow",
+    }
+}
+
+fn faction_word(f: crate::entity::Faction) -> &'static str {
+    use crate::entity::Faction::*;
+    match f {
+        Vermin => "vermin",
+        Beast => "beast",
+        Greenskin => "greenskin",
+        Undead => "undead",
+        Dark => "dark folk",
+        Demon => "demon",
+        _ => "other",
+    }
+}
+
+pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
+    let w = c.w as i32;
+    let h = c.h as i32;
+    c.fill(0, 0, w, h, ' ', Rgb::WHITE, Rgb(8, 8, 6));
+    c.center(1, "THE BESTIARY", Rgb(230, 210, 150));
+    let known = MONSTERS.iter().filter(|m| prof.kills_of(m.name) >= LORE_NAME).count();
+    let stars = MONSTERS.iter().filter(|m| prof.kills_of(m.name) >= LORE_MASTER).count();
+    c.center(2, &format!("{} of {} creatures known   {} mastered", known, MONSTERS.len(), stars), Rgb(160, 150, 120));
+
+    let lw = 38.min(w / 2 - 2);
+    let top = 4;
+    let rows = (h - top - 2).max(4);
+    let start = if sel as i32 >= rows { sel as i32 - rows + 1 } else { 0 };
+    for (row, i) in (start as usize..MONSTERS.len()).enumerate() {
+        if row as i32 >= rows {
+            break;
+        }
+        let m = &MONSTERS[i];
+        let k = prof.kills_of(m.name);
+        let y = top + row as i32;
+        let star = if k >= LORE_MASTER { '*' } else { ' ' };
+        let name = if k >= LORE_NAME { m.name.to_string() } else { "???".to_string() };
+        let name: String = name.chars().take((lw - 10).max(4) as usize).collect();
+        let line = format!("{}{:<w$}{:>6}", star, name, k, w = (lw - 8).max(4) as usize);
+        if i == sel {
+            c.text_bg(1, y, &format!(" {}", line), Rgb::BLACK, Rgb(220, 200, 140));
+        } else {
+            let col = if k >= LORE_MASTER {
+                Rgb(255, 215, 90)
+            } else if k >= LORE_NAME {
+                m.color.lerp(Rgb::WHITE, 0.3)
+            } else {
+                Rgb(80, 76, 70)
+            };
+            c.text(2, y, &line, col);
+        }
+    }
+
+    // Detail panel.
+    let m = &MONSTERS[sel];
+    let k = prof.kills_of(m.name);
+    let px = lw + 3;
+    let pw = w - px - 2;
+    if pw < 20 {
+        return;
+    }
+    c.frame(px, top - 1, pw, h - top, Rgb(120, 110, 80), Rgb(14, 13, 10));
+    let tx = px + 2;
+    let tw = (pw - 4) as usize;
+    let mut y = top;
+    if k < LORE_NAME {
+        c.text(tx, y, "An unknown horror.", Rgb(150, 140, 120));
+        c.text(tx, y + 2, "Slay one to learn its name.", Rgb(120, 110, 100));
+        return;
+    }
+    let title_col = if k >= LORE_MASTER { Rgb(255, 215, 90).lerp(Rgb::WHITE, 0.3 + 0.3 * (t * 3.0).sin()) } else { m.color };
+    let star = if k >= LORE_MASTER { "* " } else { "" };
+    c.text(tx, y, &format!("{}{}", star, cap_first(m.name)), title_col);
+    c.text(tx + pw - 18, y, &format!("{:>5} slain", k), Rgb(180, 170, 140));
+    y += 2;
+    // Portrait.
+    for line in m.art.iter() {
+        if y >= top + 12 {
+            break;
+        }
+        c.text(tx + 2, y, line, m.color);
+        y += 1;
+    }
+    y += 1;
+    let next = |n: u32| format!("({} more kills to learn more)", n.saturating_sub(k));
+    if k < LORE_BASIC {
+        c.text(tx, y, &next(LORE_BASIC), Rgb(120, 110, 100));
+        return;
+    }
+    let hp_txt = if m.hp > 0 { m.hp.to_string() } else { "?".into() };
+    c.text(tx, y, &format!("Health {}   Damage {}-{}   Armour {}   Speed: {}", hp_txt, m.dmg.0, m.dmg.1, m.ac, speed_word(m.speed)), Rgb(220, 200, 160));
+    y += 1;
+    c.text(tx, y, &format!("Kind: {}", faction_word(m.faction)), Rgb(190, 180, 150));
+    y += 2;
+    if k < LORE_FULL {
+        c.text(tx, y, &next(LORE_FULL), Rgb(120, 110, 100));
+        return;
+    }
+    let lore = MONSTER_LORE.get(sel).copied().unwrap_or("");
+    for line in wrap(lore, tw) {
+        if y >= h - 6 {
+            break;
+        }
+        c.text(tx, y, &line, Rgb(200, 195, 180));
+        y += 1;
+    }
+    y += 1;
+    let depth = if m.boss {
+        "depth 10, guarding the Amulet".to_string()
+    } else if m.unique > 0 {
+        format!("depth {} only (a unique)", m.unique)
+    } else {
+        format!("depths {}-{}", m.depth.0, m.depth.1)
+    };
+    let mut adv = vec![
+        format!("Found on {}.  Accuracy +{}.  Sight {}.  {} XP.", depth, m.hit, m.sight, m.xp),
+        if m.revive.1 > 0.0 {
+            format!("Rises again {:.0}-{:.0} turns after death.", m.revive.0, m.revive.1)
+        } else {
+            "Stays dead once slain.".to_string()
+        },
+    ];
+    let mut traits: Vec<String> = Vec::new();
+    if let Some(r) = &m.ranged {
+        traits.push(format!("{} ({}-{}, range {})", r.verb, r.dmg.0, r.dmg.1, r.range));
+    }
+    if m.poison {
+        traits.push("poisonous".into());
+    }
+    if m.regen {
+        traits.push("regenerates".into());
+    }
+    if m.crush {
+        traits.push("crushing blows".into());
+    }
+    if m.ghost {
+        traits.push("passes through walls".into());
+    }
+    if m.erratic {
+        traits.push("erratic flight".into());
+    }
+    for a in m.abil.iter() {
+        traits.push(a.describe());
+    }
+    if !traits.is_empty() {
+        adv.push(format!("Traits: {}.", traits.join(", ")));
+    }
+    for para in adv {
+        for line in wrap(&para, tw) {
+            if y >= h - 3 {
+                break;
+            }
+            c.text(tx, y, &line, Rgb(170, 200, 170));
+            y += 1;
+        }
+    }
+    y += 1;
+    if k < LORE_MASTER {
+        if y < h - 2 {
+            c.text(tx, y, &format!("({} more kills to master it)", LORE_MASTER - k), Rgb(120, 110, 100));
+        }
+    } else if y < h - 2 {
+        c.text(tx, y, "MASTERED: +1.5% crit chance and +2% crit damage against it.", Rgb(255, 215, 90));
+    }
+}
+
+fn cap_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
 }
 
 // ================================================================ hall of the dead
@@ -300,8 +589,9 @@ pub fn draw_hall(c: &mut Canvas, prof: &Profile) {
             break;
         }
         let line = format!(
-            "{:<12} lv{:<3} depth {:<3} {:>4} pts   {}",
+            "{:<12} {:<9} lv{:<3} depth {:<3} {:>5} pts   {}",
             r.class,
+            DIFFICULTIES[(r.difficulty as usize).min(DIFFICULTIES.len() - 1)].name,
             r.level,
             r.depth,
             r.points,

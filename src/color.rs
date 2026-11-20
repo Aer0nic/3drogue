@@ -1,6 +1,6 @@
 //! Colour type and small deterministic noise helpers used by the renderer.
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 #[inline]

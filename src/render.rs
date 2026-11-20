@@ -5,7 +5,7 @@
 use crate::canvas::Canvas;
 use crate::color::{hash2, hashf, vnoise, Rgb};
 use crate::data::*;
-use crate::entity::Faction;
+use crate::entity::{Faction, Monster};
 use crate::game::*;
 use crate::map::*;
 use std::f32::consts::PI;
@@ -198,7 +198,46 @@ struct Spr {
     float: f32,
     flash: f32,
     glow: bool,
+    /// Champion / unique aura colour.
+    aura: Option<Rgb>,
+    /// Overlords throb with a heavy, pulsing outline.
+    throb: bool,
     d2: f32,
+}
+
+/// Aura colour for champions (gold) and uniques (violet).
+pub fn aura_of(m: &Monster) -> Option<Rgb> {
+    if m.is_unique() {
+        Some(Rgb(200, 90, 255))
+    } else if m.overlord {
+        Some(Rgb(255, 35, 60))
+    } else if m.champion {
+        Some(Rgb(255, 175, 40))
+    } else {
+        None
+    }
+}
+
+/// Should monster `m` be drawn on the maps? Ghosts inside walls are unseen,
+/// unless the player has Deathsight, which reveals everything.
+fn map_shows(g: &Game, m: &Monster) -> bool {
+    if !m.alive {
+        return false;
+    }
+    if g.has(UPower::Deathsight) || g.vision_shows(m) {
+        return true;
+    }
+    g.level.is_visible(m.x, m.y) && !(m.def().ghost && g.level.tile(m.x, m.y).opaque())
+}
+
+fn map_mon_color(m: &Monster) -> Rgb {
+    if m.faction == Faction::Ally {
+        Rgb(120, 255, 120)
+    } else if let Some(a) = aura_of(m) {
+        a
+    } else {
+        Rgb(255, 70, 50)
+    }
 }
 
 pub fn render_game(c: &mut Canvas, g: &Game, t: f32) {
@@ -431,12 +470,15 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             float: 0.0,
             flash: 0.0,
             glow: false,
+            aura: None,
+            throb: false,
             d2: d2(x, y),
         });
     }
     for it in &lv.items {
         let (x, y) = (it.x as f32 + 0.5, it.y as f32 + 0.5);
         let amulet = it.item == Item::Amulet;
+        let special = it.item.unique().is_some();
         sprs.push(Spr {
             x,
             y,
@@ -447,7 +489,9 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             size: if amulet { 0.3 } else { 0.2 },
             float: 0.04 + (t * 2.0 + x).sin() * 0.03 + if amulet { 0.15 } else { 0.0 },
             flash: 0.0,
-            glow: amulet,
+            glow: amulet || special,
+            aura: if special { Some(it.item.color()) } else { None },
+            throb: false,
             d2: d2(x, y),
         });
     }
@@ -475,6 +519,8 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             float: def.float + bob,
             flash: m.flash,
             glow: false,
+            aura: aura_of(m),
+            throb: m.overlord,
             d2: d2(x, y),
         });
     }
@@ -507,7 +553,9 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             let col = scx as i32;
             let row = (bottom - 0.5) as i32;
             if col >= 0 && col < vw && row >= 0 && row < vh && ty < zbuf[col as usize] {
-                if dark {
+                if let Some(a) = s.aura {
+                    c.set(vx + col, vy + row, s.glyph, a.lerp(Rgb::WHITE, 0.3 * pulse), a.scale(0.25 + 0.15 * pulse));
+                } else if dark {
                     if s.eye != Rgb::BLACK && s.size > 0.3 {
                         c.put(vx + col, vy + row, '.', s.eye.scale(0.8));
                     }
@@ -526,6 +574,56 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
         let r1 = (bottom.ceil() as i32).min(vh);
         let lit = s.color.lit([l[0].min(1.6), l[1].min(1.6), l[2].min(1.6)]);
         let shown = if s.glow { s.color.lerp(Rgb::WHITE, 0.2 + 0.2 * pulse) } else { lit.lerp(Rgb::WHITE, s.flash) };
+        if let Some(a) = s.aura {
+            // A flickering halo hugging the outline of the sprite. It glows,
+            // so it shows even in total darkness.
+            let solid = |col: i32, row: i32| -> bool {
+                let fc = (col as f32 + 0.5 - left) / k;
+                let fr = (row as f32 + 0.5 - top) / k;
+                fc >= 0.0 && fr >= 0.0 && art_char(s.art, fr as usize, fc as usize) != ' '
+            };
+            let pad = (k * 0.8).ceil().max(1.0) as i32 + if s.throb { 1 } else { 0 };
+            // Overlords: a slow, heavy heartbeat of light.
+            let beat = if s.throb { (0.5 + 0.5 * (t * 5.0).sin()).powf(2.0) } else { 1.0 };
+            for col in (c0 - pad).max(0)..(c1 + pad).min(vw) {
+                if ty >= zbuf[col as usize] {
+                    continue;
+                }
+                for row in (r0 - pad).max(0)..(r1 + pad).min(vh) {
+                    if solid(col, row) {
+                        continue;
+                    }
+                    let mut near = false;
+                    'n: for oy in -pad..=pad {
+                        for ox in -pad..=pad {
+                            if solid(col + ox, row + oy) {
+                                near = true;
+                                break 'n;
+                            }
+                        }
+                    }
+                    if !near {
+                        continue;
+                    }
+                    let hsh = hash2(col * 31 + (t * 9.0) as i32, row * 17 + (t * 7.0) as i32);
+                    if s.throb {
+                        let k2 = 0.25 + 0.75 * beat;
+                        let ch = ['#', '%', '*', '+'][(hsh % 4) as usize];
+                        c.set(vx + col, vy + row, ch, a.scale(k2).lerp(Rgb::WHITE, 0.25 * beat), a.scale(0.4 * k2));
+                        continue;
+                    }
+                    let flick = 0.55 + 0.45 * ((hsh % 100) as f32 / 100.0) * pulse;
+                    let ch = ['.', '\'', '*', '`', ':'][(hsh % 5) as usize];
+                    c.set(vx + col, vy + row, ch, a.scale(flick).lerp(Rgb::WHITE, 0.15 * pulse), a.scale(0.22 * flick));
+                }
+            }
+        }
+        let shown = match s.aura {
+            Some(a) if dark => a.scale(0.55),
+            Some(a) => shown.lerp(a, 0.25),
+            None => shown,
+        };
+        let dark = dark && s.aura.is_none();
         for col in c0..c1 {
             if ty >= zbuf[col as usize] {
                 continue;
@@ -542,6 +640,40 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                     c.set(vx + col, vy + row, if k > 1.5 { '@' } else { 'o' }, glow, s.eye.scale(0.3));
                 } else if !dark {
                     c.set(vx + col, vy + row, ch, shown, shown.scale(0.18));
+                }
+            }
+        }
+    }
+
+    // ---------- Monster Vision: a marker and a name for every creature nearby,
+    // seen straight through the walls.
+    if g.p.vision > 0 {
+        for m in &lv.monsters {
+            if !g.vision_shows(m) {
+                continue;
+            }
+            let (wx, wy) = (m.rx + 0.5, m.ry + 0.5);
+            let (tx, ty) = project(wx, wy);
+            if ty <= 0.2 {
+                continue;
+            }
+            let col = ((vw as f32 / 2.0) * (1.0 + tx / ty)) as i32;
+            let scale = proj / ty;
+            let def = m.def();
+            let row = (horizon + scale * 0.5 - (def.float + def.size * 0.5) * scale) as i32;
+            if col < 0 || col >= vw || row < 1 || row >= vh {
+                continue;
+            }
+            let mc = map_mon_color(m);
+            let blink = 0.7 + 0.3 * (t * 6.0 + m.id as f32).sin();
+            c.set(vx + col, vy + row, 'o', mc.lerp(Rgb::WHITE, 0.3 * blink), mc.scale(0.35 * blink));
+            let name = m.label();
+            let name = if def.boss || def.unique > 0 { def.name.to_string() } else { name };
+            let x0 = col - name.chars().count() as i32 / 2;
+            for (i, chr) in name.chars().enumerate() {
+                let xx = x0 + i as i32;
+                if xx >= 0 && xx < vw {
+                    c.set(vx + xx, vy + row - 1, chr, mc.scale(0.9), Rgb(10, 5, 5));
                 }
             }
         }
@@ -647,6 +779,11 @@ fn draw_viewmodel(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, 
     let shade = [l[0].min(1.2) * 0.75, l[1].min(1.2) * 0.75, l[2].min(1.2) * 0.75];
     let fade = if g.p.invis > 0 { 0.45 } else { 1.0 };
     let pulse = 0.5 + 0.5 * (t * 3.0).sin();
+    // Unique weapons take their own colour and always glow.
+    let uniq = g.p.wpn.uniq.map(|u| &UNIQUES[u as usize]);
+    let wcolor = uniq.map_or(w.color, |u| u.color);
+    let wglow = w.glow || uniq.is_some();
+    let mut blade: Vec<(i32, i32)> = Vec::new();
     for (r, line) in art.iter().enumerate() {
         for (ci, ch) in line.chars().enumerate() {
             if ch == ' ' {
@@ -658,19 +795,25 @@ fn draw_viewmodel(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, 
                 continue;
             }
             let handle = r as f32 >= ah as f32 * 0.62 && w.art != WArt::Bow;
-            let mut col = if handle { Rgb(150, 105, 60) } else { w.color };
+            if !handle {
+                blade.push((x, y));
+            }
+            let mut col = if handle { Rgb(150, 105, 60) } else { wcolor };
             let mut ch2 = ch;
             if ch == '§' {
                 ch2 = '*';
-                col = w.color.lerp(Rgb(150, 200, 255), 0.5 + 0.5 * pulse);
+                col = wcolor.lerp(Rgb(150, 200, 255), 0.5 + 0.5 * pulse);
             } else {
                 col = col.lit(shade);
-                if w.glow && !handle {
-                    col = col.lerp(w.color.lerp(Rgb::WHITE, 0.3), 0.4 + 0.3 * pulse);
+                if wglow && !handle {
+                    col = col.lerp(wcolor.lerp(Rgb::WHITE, 0.3), 0.4 + 0.3 * pulse);
                 }
             }
             c.set(x, y, ch2, col.scale(fade), col.scale(0.22 * fade));
         }
+    }
+    if let Some(u) = uniq {
+        weapon_aura(c, u.power, &blade, vy, vh, t, fade);
     }
     if swinging && sw > 0.3 {
         for i in 0..6 {
@@ -680,6 +823,91 @@ fn draw_viewmodel(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, 
                 c.put(x, y, '\\', Rgb(255, 255, 255).scale(sw * (1.0 - i as f32 * 0.12)));
             }
         }
+    }
+}
+
+/// Living effects that play over a unique weapon held in view.
+fn weapon_aura(c: &mut Canvas, power: UPower, blade: &[(i32, i32)], vy: i32, vh: i32, t: f32, fade: f32) {
+    if blade.is_empty() {
+        return;
+    }
+    let n = blade.len() as u32;
+    let fract = |v: f32| v - v.floor();
+    let put = |c: &mut Canvas, x: i32, y: i32, ch: char, fg: Rgb| {
+        if y >= vy && y < vy + vh && x >= 0 && x < c.w as i32 {
+            c.put(x, y, ch, fg.scale(fade));
+        }
+    };
+    match power {
+        // Stormcaller: every so often, arcs of lightning dance across the blade.
+        UPower::Storm => {
+            let cycle = t * 0.7;
+            let ph = fract(cycle);
+            if ph < 0.22 {
+                let f = (t * 22.0) as i32;
+                let seed = cycle.floor() as i32;
+                let (mut x, mut y) = blade[(hash2(seed, 7) % n) as usize];
+                for k in 0..9 {
+                    let hh = hash2(f * 13 + k, seed * 31 + k);
+                    x += (hh % 3) as i32 - 1;
+                    y += ((hh / 3) % 3) as i32 - 1;
+                    let ch = ['~', '/', '\\', '-', '*', '\''][(hh % 6) as usize];
+                    let col = Rgb(150, 190, 255).lerp(Rgb::WHITE, ((hh % 10) as f32) / 10.0);
+                    put(c, x, y, ch, col);
+                }
+            } else if hash2((t * 15.0) as i32, 3) % 9 == 0 {
+                let (x, y) = blade[(hash2((t * 15.0) as i32, 5) % n) as usize];
+                put(c, x, y, '\'', Rgb(200, 220, 255));
+            }
+        }
+        // Cinderbrand: embers rise from the blade.
+        UPower::Flame => {
+            for i in 0..7 {
+                let v = t * 0.9 + i as f32 * 0.37;
+                let ph = fract(v);
+                let (bx, by) = blade[(hash2(v.floor() as i32, i * 11) % n) as usize];
+                let x = bx + ((ph * 6.0 + i as f32).sin() * 1.2) as i32;
+                let y = by - (ph * 5.0) as i32;
+                let col = Rgb(255, 230, 120).lerp(Rgb(200, 40, 0), ph);
+                put(c, x, y, ['*', '\'', '.', '^'][(i % 4) as usize], col.scale(1.0 - ph * 0.6));
+            }
+        }
+        // Tidecaller: frost glitters and a cold mist drifts down.
+        UPower::Frost => {
+            for i in 0..6 {
+                let v = t * 1.6 + i as f32 * 0.53;
+                let (bx, by) = blade[(hash2(v.floor() as i32, i * 7) % n) as usize];
+                let tw = (fract(v) * PI).sin();
+                if tw > 0.3 {
+                    put(c, bx, by, if tw > 0.8 { '*' } else { '+' }, Rgb(170, 230, 255).lerp(Rgb::WHITE, tw * 0.6));
+                }
+                let m = fract(t * 0.5 + i as f32 * 0.29);
+                let (mx, my) = blade[(hash2((t * 0.5 + i as f32 * 0.29).floor() as i32, i) % n) as usize];
+                put(c, mx + (i % 3) - 1, my + (m * 4.0) as i32, '.', Rgb(140, 200, 240).scale(1.0 - m));
+            }
+        }
+        // Vyrmatha's Fang: drops of blood slide off and fall.
+        UPower::Vampiric => {
+            for i in 0..4 {
+                let v = t * 0.6 + i as f32 * 0.5;
+                let ph = fract(v);
+                let (bx, by) = blade[(hash2(v.floor() as i32, i * 5) % n) as usize];
+                let y = by + (ph * ph * 6.0) as i32;
+                put(c, bx, y, if ph < 0.3 { ',' } else { '.' }, Rgb(220, 20, 40).scale(1.0 - ph * 0.5));
+            }
+        }
+        // Grutch's Cleaver: a cruel glint sweeps along the edge.
+        UPower::Executioner => {
+            let ph = fract(t * 0.45);
+            if ph < 0.35 {
+                let i = ((ph / 0.35) * n as f32) as usize;
+                let (x, y) = blade[i.min(blade.len() - 1)];
+                put(c, x, y, '*', Rgb::WHITE);
+                put(c, x + 1, y, '-', Rgb(255, 240, 200));
+                put(c, x - 1, y, '-', Rgb(255, 240, 200));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -747,11 +975,10 @@ fn draw_minimap(c: &mut Canvas, g: &Game, x0: i32, y0: i32, w: i32, h: i32) {
         }
     }
     for m in &lv.monsters {
-        if m.alive && lv.is_visible(m.x, m.y) {
+        if map_shows(g, m) {
             let (i, j) = (m.x - px + w / 2, m.y - py + h / 2);
             if i >= 0 && i < w && j >= 0 && j < h {
-                let col = if m.faction == Faction::Ally { Rgb(120, 255, 120) } else { Rgb(255, 70, 50) };
-                c.set(x0 + i, y0 + j, m.def().glyph, col, bg);
+                c.set(x0 + i, y0 + j, m.def().glyph, map_mon_color(m), bg);
             }
         }
     }
@@ -859,7 +1086,7 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
         }
     }
     for m in &lv.monsters {
-        if !m.alive || !lv.is_visible(m.x, m.y) {
+        if !map_shows(g, m) {
             continue;
         }
         let def = m.def();
@@ -870,7 +1097,15 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
             col = col.scale(0.6);
         }
         if sx >= 0 && sx < vw && sy >= 0 && sy < vh {
-            let bg = if m.faction == Faction::Ally { Rgb(0, 60, 0) } else if m.flash > 0.3 { Rgb(120, 0, 0) } else { c.get(vx + sx, vy + sy).bg };
+            let bg = if m.faction == Faction::Ally {
+                Rgb(0, 60, 0)
+            } else if m.flash > 0.3 {
+                Rgb(120, 0, 0)
+            } else if let Some(a) = aura_of(m) {
+                a.scale(0.25 + 0.2 * pulse)
+            } else {
+                c.get(vx + sx, vy + sy).bg
+            };
             c.set(vx + sx, vy + sy, def.glyph, col, bg);
             if !m.awake && ((t * 1.5 + m.id as f32) as i32) % 3 == 0 {
                 put(c, sx + 1, sy, 'z', Rgb(120, 120, 200));
@@ -959,7 +1194,7 @@ fn draw_topbar(c: &mut Canvas, g: &Game, w: i32, t: f32) {
     let cd = g.cdef();
     c.text(11, 0, &format!("{} lv{}", cd.name, g.p.level), cd.color);
     let labels = ["E", "SE", "S", "SW", "W", "NW", "N", "NE"];
-    let strip = 41.min(w - 50).max(0);
+    let strip = 41.min(w - 54).max(0);
     let sx0 = w / 2 - strip / 2;
     let ang = if g.overhead { facing_angle(g.p.facing) } else { g.cam.ang };
     for i in 0..strip {
@@ -978,7 +1213,7 @@ fn draw_topbar(c: &mut Canvas, g: &Game, w: i32, t: f32) {
             c.put(sx0 + i, 0, if i == strip / 2 { '|' } else { '.' }, Rgb(80, 70, 90));
         }
     }
-    let help = "?:help Tab:map R:mode";
+    let help = "?:help M:map Shift+R:mode";
     c.text(w - help.len() as i32 - 1, 0, help, Rgb(110, 100, 120));
 }
 
@@ -998,6 +1233,11 @@ fn draw_hud(c: &mut Canvas, g: &Game, y0: i32, w: i32, t: f32) {
     };
     let view = if g.overhead { " MAP " } else { " 3D " };
     let tag_x = w - mode.len() as i32 - view.len() as i32 - 3;
+    if g.difficulty > 0 {
+        let dd = g.diff();
+        let tag = format!(" {} ", dd.name.to_uppercase());
+        c.text_bg(tag_x - tag.len() as i32 - 1, y0, &tag, Rgb::BLACK, dd.color);
+    }
     c.text_bg(tag_x, y0, mode, Rgb::BLACK, mcol);
     c.text_bg(tag_x + mode.len() as i32 + 1, y0, view, Rgb::BLACK, Rgb(180, 170, 140));
 
@@ -1028,15 +1268,27 @@ fn draw_hud(c: &mut Canvas, g: &Game, y0: i32, w: i32, t: f32) {
     }
     if g.p.invis > 0 && sx < w - 10 {
         c.text(sx, y, "HIDDEN", Rgb(150, 150, 220));
+        sx += 7;
+    }
+    if g.p.vision > 0 && sx < w - 10 {
+        c.text(sx, y, &format!("VISION {}", g.p.vision), Rgb(255, 120, 100));
+        sx += 10;
+    }
+    if g.p.fury > 0 && sx < w - 8 {
+        c.text(sx, y, &format!("FURY {}", g.p.fury), Rgb(255, 110, 60).lerp(Rgb(255, 220, 120), 0.5 + 0.5 * (t * 6.0).sin()));
+        sx += 8;
+    }
+    if g.last_stand() && sx < w - 11 {
+        c.text(sx, y, "LAST STAND", Rgb(255, 60, 60));
     }
 
     // row 2: gear
     let y = y0 + 2;
     let wd = g.wdef();
-    let wname = gear_name(wd.name, g.p.wpn.bonus);
+    let wname = gear_label(wd.name, &g.p.wpn);
     let b = g.dmg_bonus();
     c.text(1, y, &format!("Wpn: {} ({}-{}{})", wname, wd.dmg.0 + b, wd.dmg.1 + b, if wd.range > 0 { " ranged" } else { "" }), Rgb(200, 200, 210));
-    let aname = gear_name(ARMORS[g.p.arm.def].name, g.p.arm.bonus);
+    let aname = gear_label(ARMORS[g.p.arm.def].name, &g.p.arm);
     c.text(42, y, &format!("Arm: {} [AC {}]", aname, g.player_ac()), Rgb(180, 170, 150));
     let pots = g.p.inv.iter().filter(|i| **i == Item::Potion(Potion::Healing)).count();
     c.text(76, y, &format!("Heal:{}", pots), Rgb(255, 100, 100));
@@ -1051,11 +1303,12 @@ fn draw_hud(c: &mut Canvas, g: &Game, y0: i32, w: i32, t: f32) {
     let mut x = 1;
     for (i, s) in g.skills().iter().enumerate() {
         let wait = g.skill_ready_in(*s);
-        let can = wait <= 0.0 && g.p.mp >= s.mp();
+        let cost = g.skill_cost(*s);
+        let can = wait <= 0.0 && g.p.mp >= cost;
         let label = if wait > 0.0 {
             format!("[{}] {} ({})", i + 1, s.name(), wait)
-        } else if s.mp() > 0 {
-            format!("[{}] {} {}mp", i + 1, s.name(), s.mp())
+        } else if cost > 0 {
+            format!("[{}] {} {}mp", i + 1, s.name(), cost)
         } else {
             format!("[{}] {}", i + 1, s.name())
         };
@@ -1089,7 +1342,9 @@ fn draw_hud(c: &mut Canvas, g: &Game, y0: i32, w: i32, t: f32) {
 
 pub fn draw_inventory(c: &mut Canvas, g: &Game) {
     let w = 60.min(c.w as i32 - 4);
-    let h = (g.p.inv.len() as i32 + 7).max(10).min(c.h as i32 - 2);
+    let worn = g.equipped_uniques();
+    let worn_rows = if worn.is_empty() { 0 } else { worn.len() as i32 + 2 };
+    let h = (g.p.inv.len() as i32 + 7 + worn_rows).max(10).min(c.h as i32 - 2);
     let x0 = (c.w as i32 - w) / 2;
     let y0 = (c.h as i32 - h) / 2;
     c.frame(x0, y0, w, h, Rgb(180, 150, 100), Rgb(16, 12, 10));
@@ -1109,11 +1364,26 @@ pub fn draw_inventory(c: &mut Canvas, g: &Game) {
                 format!("  {}-{}{}", d.dmg.0 + gr.bonus, d.dmg.1 + gr.bonus, if d.range > 0 { " ranged" } else { "" })
             }
             Item::Armor(gr) => format!("  AC {}", ARMORS[gr.def].ac + gr.bonus),
+            Item::Trinket(u) => match UNIQUES[*u as usize].slot {
+                USlot::Ring => "  (ring)".to_string(),
+                _ => "  (amulet)".to_string(),
+            },
             _ => String::new(),
         };
         c.text(x0 + 3, y, &format!("{}) ", letter), Rgb(255, 230, 150));
         c.text(x0 + 6, y, &it.glyph().to_string(), it.color());
-        c.text(x0 + 8, y, &format!("{}{}", it.name(), extra), Rgb(220, 220, 220));
+        let name_col = if it.unique().is_some() { it.color() } else { Rgb(220, 220, 220) };
+        c.text(x0 + 8, y, &format!("{}{}", it.name(), extra), name_col);
+    }
+    if !worn.is_empty() {
+        let mut y = y0 + h - 3 - worn.len() as i32;
+        c.text(x0 + 3, y - 1, "UNIQUE POWERS", Rgb(220, 160, 255));
+        for u in worn {
+            let d = &UNIQUES[u];
+            let line: String = format!("{}: {}", d.name, d.desc).chars().take((w - 6).max(0) as usize).collect();
+            c.text(x0 + 3, y, &line, d.color);
+            y += 1;
+        }
     }
     c.text(x0 + 2, y0 + h - 2, "a-r: use/equip   SHIFT+letter: drop   Esc: close", Rgb(150, 140, 120));
 }
@@ -1134,11 +1404,14 @@ pub const HELP_LINES: &[&str] = &[
     "  1 2         class skills               3-6      altar skills",
     "  > < Enter   use stairs                 . or 5   wait / search",
     "  I           inventory                  P        quaff healing potion",
-    "  R           toggle TURN-BASED / REAL-TIME combat",
-    "  Tab or M    toggle first-person / overhead map",
+    "  Shift+R     toggle TURN-BASED / REAL-TIME combat",
+    "  Tab         toggle first-person / overhead map",
+    "  M           show the full map of the floor",
     "  - / +       volume                     Esc      menu",
     "",
-    "Monsters fight each other. The dead rise again over time. Listen:",
+    "Monsters fight each other, and victors may become glowing CHAMPIONS.",
+    "Each floor may hide a unique monster guarding its signature treasure.",
+    "The dead rise again over time. Listen:",
     "sounds bend around corners, so echoes tell you where danger lies.",
     "Dying earns Soul Points: spend them at the Soul Altar for permanent power.",
 ];
@@ -1167,7 +1440,7 @@ pub fn draw_help(c: &mut Canvas) {
     }
 }
 
-pub const PAUSE_ITEMS: [&str; 4] = ["Resume", "How to play", "Abandon run (earn soul points)", "Quit to desktop (run is lost)"];
+pub const PAUSE_ITEMS: [&str; 4] = ["Resume", "How to play", "Abandon run (earn soul points)", "Save and quit to desktop"];
 
 pub fn draw_pause(c: &mut Canvas, sel: usize) {
     let w = 40;
@@ -1184,4 +1457,110 @@ pub fn draw_pause(c: &mut Canvas, sel: usize) {
             c.text(x0 + 4, y, it, Rgb(200, 190, 180));
         }
     }
+}
+
+// ================================================================ full map (M)
+
+/// The whole floor as a plain map: explored tiles, stairs, what you can see,
+/// and you. No lighting or effects, like the minimap.
+pub fn draw_map(c: &mut Canvas, g: &Game) {
+    let lv = &g.level;
+    let (cw, ch) = (c.w as i32, c.h as i32);
+    let bg = Rgb(8, 8, 12);
+    c.fill(0, 0, cw, ch, ' ', Rgb::WHITE, Rgb(4, 4, 7));
+    // Two columns per tile when there is room, so the map is not squashed.
+    let sx = if cw - 4 >= lv.w * 2 { 2 } else { 1 };
+    let vw = (lv.w * sx).min(cw - 4);
+    let vh = lv.h.min(ch - 5);
+    let x0 = (cw - vw) / 2;
+    let y0 = 2 + (ch - 5 - vh) / 2;
+    // Scroll to keep the player in view on small terminals.
+    let ox = (g.p.x - vw / sx / 2).clamp(0, (lv.w - vw / sx).max(0));
+    let oy = (g.p.y - vh / 2).clamp(0, (lv.h - vh).max(0));
+    c.frame(x0 - 1, y0 - 1, vw + 2, vh + 2, Rgb(70, 60, 80), bg);
+    let name = DEPTH_NAMES[((g.depth.max(1) - 1) % 10) as usize];
+    c.center(0, &format!("MAP: Depth {}, {}", g.depth, name), Rgb(220, 200, 150));
+    for j in 0..vh {
+        for i in 0..vw / sx {
+            let (tx, ty) = (ox + i, oy + j);
+            if !lv.inb(tx, ty) || !lv.explored[lv.idx(tx, ty)] {
+                continue;
+            }
+            let vis = lv.visible[lv.idx(tx, ty)];
+            let k = if vis { 1.0 } else { 0.55 };
+            let (chr, col) = match lv.tile(tx, ty) {
+                Tile::Wall => ('#', Rgb(110, 100, 90)),
+                Tile::Floor => ('.', Rgb(80, 80, 80)),
+                Tile::DoorClosed => ('+', Rgb(170, 120, 60)),
+                Tile::DoorOpen => ('\'', Rgb(170, 120, 60)),
+                Tile::StairsUp => ('<', Rgb(120, 180, 255)),
+                Tile::StairsDown => ('>', Rgb(220, 120, 255)),
+            };
+            for s in 0..sx {
+                let ch2 = if s == 0 || chr == '#' { chr } else { ' ' };
+                c.set(x0 + i * sx + s, y0 + j, ch2, col.scale(k), bg);
+            }
+        }
+    }
+    let to_scr = |x: i32, y: i32| -> Option<(i32, i32)> {
+        let (i, j) = (x - ox, y - oy);
+        if i >= 0 && i < vw / sx && j >= 0 && j < vh {
+            Some((x0 + i * sx, y0 + j))
+        } else {
+            None
+        }
+    };
+    for it in &lv.items {
+        if lv.is_visible(it.x, it.y) {
+            if let Some((x, y)) = to_scr(it.x, it.y) {
+                c.set(x, y, it.item.glyph(), it.item.color(), bg);
+            }
+        }
+    }
+    for m in &lv.monsters {
+        if map_shows(g, m) {
+            if let Some((x, y)) = to_scr(m.x, m.y) {
+                c.set(x, y, m.def().glyph, map_mon_color(m), bg);
+            }
+        }
+    }
+    if let Some((x, y)) = to_scr(g.p.x, g.p.y) {
+        c.set(x, y, '@', Rgb(255, 255, 120), Rgb(60, 50, 0));
+        if sx == 2 {
+            c.set(x + 1, y, ARROWS[g.p.facing as usize], Rgb(255, 220, 90), Rgb(60, 50, 0));
+        }
+    }
+    c.center(
+        ch - 2,
+        "@ you   < up   > down   + door   red: foe   gold: champion   violet: unique",
+        Rgb(150, 140, 120),
+    );
+    c.center(ch - 1, "M / Esc: close", Rgb(120, 120, 140));
+}
+
+// ================================================================ pickup menu
+
+pub fn draw_pickup(c: &mut Canvas, g: &Game) {
+    let here = g.items_here();
+    let w = 56.min(c.w as i32 - 4);
+    let h = (here.len() as i32 + 6).min(c.h as i32 - 2);
+    let x0 = (c.w as i32 - w) / 2;
+    let y0 = (c.h as i32 - h) / 2;
+    c.frame(x0, y0, w, h, Rgb(200, 180, 110), Rgb(16, 14, 8));
+    c.text(x0 + 2, y0, " PICK UP ", Rgb(255, 230, 150));
+    for (k, &ii) in here.iter().enumerate() {
+        let y = y0 + 2 + k as i32;
+        if y >= y0 + h - 2 || k >= 26 {
+            break;
+        }
+        let it = &g.level.items[ii].item;
+        let letter = (b'a' + k as u8) as char;
+        c.text(x0 + 3, y, &format!("{}) ", letter), Rgb(255, 230, 150));
+        c.text(x0 + 6, y, &it.glyph().to_string(), it.color());
+        let col = if it.unique().is_some() { it.color() } else { Rgb(220, 220, 220) };
+        let name: String = it.name().chars().take((w - 10).max(0) as usize).collect();
+        c.text(x0 + 8, y, &name, col);
+    }
+    let free = g.inv_cap().saturating_sub(g.p.inv.len());
+    c.text(x0 + 2, y0 + h - 2, &format!("letter: take one   Enter/g: take all (1 turn)   [{} free]", free), Rgb(150, 140, 120));
 }

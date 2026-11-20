@@ -27,9 +27,9 @@ Options: `--no-audio`, `--256` (for terminals without 24-bit colour),
 | Q / E | strafe | | |
 | Z / C | diagonal step | | |
 
-Space/F attack (or shoot) · 1-2 class skills · 3-6 Soul Altar skills ·
+Space/F attack (or shoot) · 1-2 class skills · 3-4 class skills bought at the Soul Altar ·
 G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs ·
-`.` wait/search · **R toggles turn-based / real-time** · Tab/M toggles view ·
+`.` wait/search · **Shift+R toggles turn-based / real-time** · Tab toggles view · M full map ·
 `-`/`+` volume · `?` help · Esc menu
 
 ## Features
@@ -41,7 +41,8 @@ G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs
   trails, explosions, screen shake, damage flashes, low-health vignette,
   floating damage numbers, an animated held weapon and torch, and a melt
   transition between levels.
-- **Turn-based or real-time**: press R at any time to switch.
+- **Turn-based or real-time**: press Shift+R at any time to switch.
+- **Save and continue**: quitting mid-run saves it; choose Continue Descent on the title screen to resume.
 - **6 classes**: Warrior, Rogue, Mage and Cleric are available from the start.
   Ranger (wolf companion) and Necromancer (raise the dead) are unlocked with soul points.
 - **19 monsters in 8 factions that fight each other.** Undead attack the
@@ -64,7 +65,15 @@ G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs
   poisoned (toxic bubbles), impaled (spikes), arcane (rune storm), or burned by
   your own fireball (fire burning down to ash).
 - **Persistent profile** (`~/.local/share/grazzark/profile.json`): every run
-  earns soul points. Spend them at the Soul Altar on passive upgrades (HP,
-  damage, armour, mana, sight/crit, XP, regeneration, starting potions, loot,
-  life-on-kill), active skills (Blink, Soul Burst, Phase Ward, Second Wind) and
-  class unlocks. The Hall of the Dead records your past runs.
+  earns soul points. Spend them at the Soul Altar on stat upgrades, boons that
+  change how a run plays (Bloodlust, Soul Anchor, Blood Magic, Cartographer,
+  Deep Pockets and more), class unlocks, and two extra skills for each class.
+  The Hall of the Dead records your past runs.
+- **Difficulties**: Normal, Hard, Difficult and Chaotic. Escaping with the
+  Amulet unlocks the next one. Higher difficulties give monsters more health and
+  damage, and multiply the soul points you earn.
+- **Bestiary**: every monster you slay is recorded across runs. 1 kill reveals
+  its name, 10 its basic stats, 100 its lore, haunts and full stats. At 200 kills
+  you master it: +1.5% crit chance and +2% crit damage against it in every run.
+- **Monster closets**: some floors hide a big room packed with sleeping
+  monsters, sometimes with champions or even an overlord among them.

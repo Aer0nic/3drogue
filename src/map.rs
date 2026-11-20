@@ -58,7 +58,7 @@ pub fn line(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
     pts
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tile {
     Wall,
     Floor,
@@ -77,7 +77,7 @@ impl Tile {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -97,7 +97,7 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TrapKind {
     Spikes,
     Gas,
@@ -105,7 +105,7 @@ pub enum TrapKind {
     Alarm,
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Trap {
     pub x: i32,
     pub y: i32,
@@ -113,7 +113,7 @@ pub struct Trap {
     pub revealed: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Corpse {
     pub kind: usize,
     pub x: i32,
@@ -122,7 +122,7 @@ pub struct Corpse {
     pub revive_at: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct FloorItem {
     pub x: i32,
     pub y: i32,
@@ -130,7 +130,7 @@ pub struct FloorItem {
 }
 
 /// A wall-mounted torch at (x,y), lighting the floor tile (fx,fy).
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Torch {
     pub x: i32,
     pub y: i32,
@@ -139,6 +139,7 @@ pub struct Torch {
     pub color: [f32; 3],
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Level {
     pub w: i32,
     pub h: i32,
@@ -159,6 +160,14 @@ pub struct Level {
     pub traps: Vec<Trap>,
     /// Set once the amulet-bearer has been hunted on this level.
     pub hunted: bool,
+    /// This floor's unique monster was placed here.
+    pub has_unique: bool,
+    /// A room packed with sleeping monsters.
+    #[serde(default)]
+    pub closet: Option<Rect>,
+    /// The player has laid eyes on the monster closet.
+    #[serde(default)]
+    pub closet_found: bool,
 }
 
 impl Level {
@@ -188,6 +197,9 @@ impl Level {
             corpses: Vec::new(),
             traps: Vec::new(),
             hunted: false,
+            has_unique: false,
+            closet: None,
+            closet_found: false,
         }
     }
 

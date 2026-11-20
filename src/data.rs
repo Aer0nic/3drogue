@@ -83,6 +83,37 @@ pub struct MonsterDef {
     pub sight: i32,
     pub death: DeathKind,
     pub art: &'static [&'static str],
+    /// Drifts through walls and can strike from inside them.
+    pub ghost: bool,
+    /// Floor (1-10) this unique monster haunts; 0 = an ordinary monster.
+    pub unique: u32,
+    /// Special powers (unique monsters).
+    pub abil: &'static [MAbil],
+    /// Signature unique item guaranteed to drop (index into UNIQUES).
+    pub sig: usize,
+}
+
+/// Special powers that unique monsters can have.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MAbil {
+    /// Calls `n` minions of monster kind `k` to its side.
+    Summon(usize, u8),
+    /// Raises nearby corpses as its servants.
+    Raise,
+    /// Teleports beside its target.
+    Blink,
+    /// Charges across the room and strikes with extra force.
+    Charge,
+    /// Its melee blows heal it.
+    Vampiric,
+    /// Below half health it flies into a faster, deadlier rage.
+    Berserk,
+    /// Scorches anything standing next to it.
+    FireAura,
+    /// Its blows freeze you in place.
+    FrostTouch,
+    /// Its blows drain your mana.
+    ManaDrain,
 }
 
 const BASE: MonsterDef = MonsterDef {
@@ -111,6 +142,10 @@ const BASE: MonsterDef = MonsterDef {
     sight: 7,
     death: DeathKind::Beast,
     art: &[],
+    ghost: false,
+    unique: 0,
+    abil: &[],
+    sig: 0,
 };
 
 const ART_RAT: &[&str] = &[
@@ -286,6 +321,16 @@ const ART_WARDEN: &[&str] = &[
     r"  _|   | |   |_  ",
 ];
 
+const ART_RATKING: &[&str] = &[
+    r"   _/\/\/\_     ",
+    r"   |######|     ",
+    r"   ()____()     ",
+    r"  (§      §)___ ",
+    r"   \ ',,' /    )~",
+    r"   /'-''-'\--''  ",
+    r"  ()  ()  ()     ",
+];
+
 pub const M_WOLF: usize = 8;
 pub const M_WARDEN: usize = 18;
 
@@ -363,7 +408,7 @@ pub static MONSTERS: &[MonsterDef] = &[
     MonsterDef {
         name: "wraith", glyph: 'W', color: Rgb(175, 185, 225), eye: Rgb(120, 255, 255), hp: 28, hit: 8,
         dmg: (4, 10), ac: 5, speed: 80.0, xp: 40, faction: Faction::Undead, size: 0.85, float: 0.15,
-        voice: VoiceKind::Wail, depth: (6, 10), revive: (20.0, 40.0), death: DeathKind::Undead, art: ART_WRAITH, ..BASE
+        voice: VoiceKind::Wail, depth: (6, 10), revive: (20.0, 40.0), death: DeathKind::Undead, art: ART_WRAITH, ghost: true, ..BASE
     },
     MonsterDef {
         name: "ogre", glyph: 'O', color: Rgb(175, 135, 95), hp: 55, hit: 8, dmg: (6, 15), ac: 3, speed: 120.0,
@@ -394,7 +439,195 @@ pub static MONSTERS: &[MonsterDef] = &[
         ranged: Some(RangedAtk { verb: "unleashes hellfire", dmg: (8, 16), range: 7, element: Element::Fire, color: Rgb(255, 60, 20), ch: '#', chance: 0.3 }),
         revive: (0.0, 0.0), sight: 10, death: DeathKind::Demon, art: ART_WARDEN, ..BASE
     },
+    // ------------------------------------------------ floor uniques (one per depth)
+    MonsterDef {
+        name: "Gnawbone, the Rat King", glyph: 'R', color: Rgb(185, 150, 110), eye: Rgb(255, 40, 40), hp: 38, hit: 4,
+        dmg: (2, 7), ac: 2, speed: 85.0, xp: 45, faction: Faction::Vermin, size: 0.6, voice: VoiceKind::Squeak,
+        depth: (99, 99), revive: (0.0, 0.0), sight: 8, art: ART_RATKING, unique: 1,
+        abil: &[MAbil::Summon(0, 3)], sig: 0, ..BASE
+    },
+    MonsterDef {
+        name: "Grutch the Warchief", glyph: 'C', color: Rgb(140, 190, 70), eye: Rgb(255, 200, 40), hp: 55, hit: 5,
+        dmg: (3, 9), ac: 3, xp: 70, faction: Faction::Greenskin, size: 0.8, voice: VoiceKind::Growl,
+        depth: (99, 99), revive: (0.0, 0.0), death: DeathKind::Brute, art: ART_GOBLIN, unique: 2,
+        abil: &[MAbil::Berserk, MAbil::Summon(2, 2)], sig: 1, ..BASE
+    },
+    MonsterDef {
+        name: "the Weeping Bride", glyph: 'B', color: Rgb(210, 220, 255), eye: Rgb(160, 230, 255), hp: 60, hit: 6,
+        dmg: (3, 9), ac: 4, speed: 85.0, xp: 95, faction: Faction::Undead, size: 0.85, float: 0.2, voice: VoiceKind::Wail,
+        depth: (99, 99), revive: (0.0, 0.0), sight: 9, death: DeathKind::Undead, art: ART_WRAITH, ghost: true, unique: 3,
+        abil: &[MAbil::FrostTouch, MAbil::Blink], sig: 2, ..BASE
+    },
+    MonsterDef {
+        name: "Old Mossback", glyph: 'Q', color: Rgb(90, 160, 70), eye: Rgb(255, 230, 60), hp: 95, hit: 7,
+        dmg: (4, 11), ac: 4, speed: 110.0, xp: 130, faction: Faction::Beast, size: 1.05, voice: VoiceKind::Roar,
+        depth: (99, 99), regen: true, crush: true, revive: (0.0, 0.0), death: DeathKind::Crushed, art: ART_TROLL, unique: 4,
+        abil: &[MAbil::Vampiric], sig: 3, ..BASE
+    },
+    MonsterDef {
+        name: "Xal'Veth the Drowned", glyph: 'X', color: Rgb(80, 150, 170), eye: Rgb(120, 255, 230), hp: 80, hit: 8,
+        dmg: (4, 10), ac: 5, speed: 90.0, xp: 160, faction: Faction::Dark, size: 0.85, voice: VoiceKind::Chant,
+        depth: (99, 99), revive: (0.0, 0.0), sight: 9, death: DeathKind::Brute, art: ART_DARKELF, unique: 5,
+        ranged: Some(RangedAtk { verb: "hurls a lance of black ice", dmg: (5, 11), range: 7, element: Element::Frost, color: Rgb(140, 220, 255), ch: '*', chance: 0.45 }),
+        abil: &[MAbil::Blink, MAbil::FrostTouch], sig: 4, ..BASE
+    },
+    MonsterDef {
+        name: "Vyrmatha, Queen of Webs", glyph: 'Y', color: Rgb(120, 60, 120), eye: Rgb(255, 60, 200), hp: 90, hit: 9,
+        dmg: (4, 10), ac: 5, speed: 75.0, xp: 190, faction: Faction::Vermin, size: 0.7, voice: VoiceKind::Hiss,
+        depth: (99, 99), poison: true, revive: (0.0, 0.0), art: ART_SPIDER, unique: 6,
+        abil: &[MAbil::Summon(6, 2), MAbil::Vampiric], sig: 5, ..BASE
+    },
+    MonsterDef {
+        name: "Kragh the Obsidian Colossus", glyph: 'K', color: Rgb(70, 60, 85), eye: Rgb(255, 120, 40), hp: 150, hit: 10,
+        dmg: (7, 16), ac: 8, speed: 115.0, xp: 240, faction: Faction::Greenskin, size: 1.2, voice: VoiceKind::Roar,
+        depth: (99, 99), crush: true, revive: (0.0, 0.0), death: DeathKind::Crushed, art: ART_OGRE, unique: 7,
+        abil: &[MAbil::Charge], sig: 6, ..BASE
+    },
+    MonsterDef {
+        name: "Ignar the Cinderlord", glyph: 'I', color: Rgb(255, 110, 40), eye: Rgb(255, 255, 160), hp: 120, hit: 10,
+        dmg: (5, 12), ac: 6, speed: 80.0, xp: 270, faction: Faction::Demon, size: 0.8, float: 0.15, voice: VoiceKind::Cackle,
+        depth: (99, 99), revive: (0.0, 0.0), sight: 9, death: DeathKind::Demon, art: ART_IMP, unique: 8,
+        ranged: Some(RangedAtk { verb: "hurls a gout of cinders", dmg: (6, 13), range: 7, element: Element::Fire, color: Rgb(255, 150, 40), ch: '*', chance: 0.4 }),
+        abil: &[MAbil::FireAura, MAbil::Summon(11, 2)], sig: 7, ..BASE
+    },
+    MonsterDef {
+        name: "Asterion the Tormentor", glyph: 'A', color: Rgb(170, 70, 50), eye: Rgb(255, 40, 40), hp: 170, hit: 12,
+        dmg: (8, 18), ac: 6, speed: 95.0, xp: 320, faction: Faction::Dark, size: 1.2, voice: VoiceKind::Roar,
+        depth: (99, 99), crush: true, revive: (0.0, 0.0), sight: 10, death: DeathKind::Crushed, art: ART_MINOTAUR, unique: 9,
+        abil: &[MAbil::Charge, MAbil::Berserk], sig: 8, ..BASE
+    },
+    MonsterDef {
+        name: "Malzareth the Undying", glyph: 'Z', color: Rgb(150, 120, 220), eye: Rgb(255, 80, 255), hp: 150, hit: 12,
+        dmg: (6, 13), ac: 7, xp: 380, faction: Faction::Undead, size: 1.0, float: 0.1, voice: VoiceKind::Chant,
+        depth: (99, 99), revive: (0.0, 0.0), sight: 10, death: DeathKind::Undead, art: ART_LICH, unique: 10,
+        ranged: Some(RangedAtk { verb: "unleashes a soulfire bolt", dmg: (8, 16), range: 8, element: Element::Magic, color: Rgb(220, 120, 255), ch: '*', chance: 0.5 }),
+        abil: &[MAbil::Raise, MAbil::Blink, MAbil::ManaDrain], sig: 9, ..BASE
+    },
 ];
+
+/// Index of the first floor unique in MONSTERS; floor N's unique is at M_UNIQUE0 + N - 1.
+pub const M_UNIQUE0: usize = 19;
+
+/// Bestiary lore, one entry per monster in MONSTERS.
+pub static MONSTER_LORE: &[&str] = &[
+    "Bloated cellar rats grown fat on the dungeon's dead. Alone they are a nuisance; in a pack they can strip a careless adventurer to the bone. They die easily, but never stay dead for long.",
+    "Leathery bats that flit in erratic loops, too quick for most blades. Their bites are shallow, but they are hard to pin down and harder to escape.",
+    "Small, cowardly reptilian scavengers that sling stones from a distance before closing in. They hate goblins only slightly less than they hate you.",
+    "Wiry greenskins with notched blades and no fear of a fair fight, because they never fight one. They hunt alongside kobolds and orcs, and quarrel with beasts and dark elves.",
+    "Bones bound together by GRAZZARK's will. Their armoured frames turn blades, and smashed skeletons knit themselves back together surprisingly quickly.",
+    "Shambling corpses that soak up punishment and keep coming. They are slow, which is the only mercy they offer, and they rise again soon after falling.",
+    "Bristling hunters that lurk in the dark between rooms. Their venom lingers in the blood long after the bite, and they move faster than they look.",
+    "Brutal greenskin warriors that hit hard and hold their ground. They war with beasts and dark elves, and they bear grudges for a very long time.",
+    "Grey wolves the size of ponies, with eyes that catch the torchlight. They see far, run fast, and hunt in silence until the moment they strike.",
+    "Corpse-eaters with poisoned claws, quick for undead. They feed on the fallen and rise again from their own remains before long.",
+    "Pale-eyed archers from the Underdark who fire crossbow bolts from the shadows. They see far, strike from range, and despise greenskins.",
+    "Cackling fire-sprites that dart about and hurl firebolts. Their erratic flight makes them maddening to corner, and they hate everything that lives.",
+    "Hulking regenerating brutes whose wounds close as you watch. A troll's blow can crush a skull, and it must be killed quickly or not at all.",
+    "Hateful spirits that drift through solid stone. A wraith will follow you through walls and strike from inside them, unseen.",
+    "Towering, dim-witted greenskins with clubs the size of a man. Slow, but a single hit can shatter armour and bone alike.",
+    "Infernal dogs with molten eyes that breathe gouts of fire. They are fast and see far, and they are never alone for long.",
+    "Bull-headed giants that guard the deepest halls. Their crushing blows are among the deadliest in GRAZZARK's domain.",
+    "Dead sorcerers bound to GRAZZARK's service, casting necrotic bolts from afar. Destroy one and it will gather itself again in the dark.",
+    "Vorth, the Warden of GRAZZARK, guardian of the Amulet. A demon of fire and iron that hurls hellfire and crushes all who come near.",
+    "A monstrous rat grown from a knot of a hundred tails. It calls its children to its side and never, ever fights alone.",
+    "The warlord of the goblin warrens. When wounded, Grutch flies into a berserk rage and summons his warband to the fight.",
+    "A drowned bride who weeps cold tears through the crypt walls. Her touch freezes the blood, and she steps through shadow to reach her prey.",
+    "An ancient troll overgrown with moss and fungus. Every blow it lands feeds its wounds, and it regenerates relentlessly.",
+    "A sorcerer drowned in the sunken galleries who returned with a heart of black ice. Xal'Veth blinks between shadows and casts lances of frost.",
+    "The spider queen of the fungal deep. She drinks the life of her victims and calls her brood to swarm the unwary.",
+    "A living statue of volcanic glass that charges across rooms with unstoppable force. Its obsidian hide turns aside all but the hardest blows.",
+    "Lord of the molten stair, wreathed in flame. Everything near Ignar burns, and imps flock to his call.",
+    "The minotaur jailer of the halls of torment. Asterion charges headlong at its prey and flies into a berserk frenzy when wounded.",
+    "A lich-king who has cheated death a thousand times. Malzareth raises the fallen, drains the minds of the living, and steps through space at will.",
+];
+
+impl MAbil {
+    pub fn describe(self) -> String {
+        match self {
+            MAbil::Summon(k, n) => format!("summons {} {}s", n, MONSTERS[k].name),
+            MAbil::Raise => "raises the dead".to_string(),
+            MAbil::Blink => "teleports beside its prey".to_string(),
+            MAbil::Charge => "charges across rooms".to_string(),
+            MAbil::Vampiric => "heals by hitting you".to_string(),
+            MAbil::Berserk => "goes berserk when wounded".to_string(),
+            MAbil::FireAura => "burns everything adjacent".to_string(),
+            MAbil::FrostTouch => "freezing touch slows you".to_string(),
+            MAbil::ManaDrain => "drains your mana".to_string(),
+        }
+    }
+}
+
+/// Kills needed for each tier of bestiary knowledge.
+pub const LORE_NAME: u32 = 1;
+pub const LORE_BASIC: u32 = 10;
+pub const LORE_FULL: u32 = 100;
+pub const LORE_MASTER: u32 = 200;
+
+// ---------------------------------------------------------------- unique items
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum USlot {
+    Weapon,
+    Armor,
+    Ring,
+    Amulet,
+}
+
+/// Special powers granted by unique gear for the rest of the run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UPower {
+    Soulfeast,
+    Executioner,
+    Undying,
+    Regrowth,
+    Frost,
+    Vampiric,
+    Stoneskin,
+    Flame,
+    Swift,
+    Arcane,
+    Thorns,
+    Storm,
+    Deathsight,
+    Fortune,
+    Shadow,
+    Wrath,
+}
+
+pub struct UniqueDef {
+    pub name: &'static str,
+    pub slot: USlot,
+    /// Base weapon or armour (index into WEAPONS / ARMORS); unused for rings and amulets.
+    pub base: usize,
+    pub bonus: i32,
+    pub power: UPower,
+    pub desc: &'static str,
+    pub color: Rgb,
+}
+
+/// The first ten are the signature drops of the floor uniques (in floor
+/// order); the rest can only be found on champions slain on depth 10.
+pub static UNIQUES: &[UniqueDef] = &[
+    UniqueDef { name: "Gnawbone's Signet", slot: USlot::Ring, base: 0, bonus: 0, power: UPower::Soulfeast, desc: "Every kill feeds you: +3 HP and +2 MP.", color: Rgb(220, 180, 120) },
+    UniqueDef { name: "Grutch's Cleaver", slot: USlot::Weapon, base: 4, bonus: 2, power: UPower::Executioner, desc: "+12% critical chance; critical hits deal triple damage.", color: Rgb(200, 230, 120) },
+    UniqueDef { name: "Locket of the Weeping Bride", slot: USlot::Amulet, base: 0, bonus: 0, power: UPower::Undying, desc: "Once per floor, a killing blow leaves you at 1 HP instead.", color: Rgb(180, 220, 255) },
+    UniqueDef { name: "Mossback Hide", slot: USlot::Armor, base: 3, bonus: 2, power: UPower::Regrowth, desc: "Your wounds knit shut: regenerate 1 HP every turn.", color: Rgb(110, 190, 90) },
+    UniqueDef { name: "Tidecaller", slot: USlot::Weapon, base: 6, bonus: 2, power: UPower::Frost, desc: "Hits have a 25% chance to freeze the foe solid.", color: Rgb(120, 210, 255) },
+    UniqueDef { name: "Vyrmatha's Fang", slot: USlot::Weapon, base: 0, bonus: 4, power: UPower::Vampiric, desc: "Drinks blood: heal 20% of the damage you deal.", color: Rgb(220, 80, 200) },
+    UniqueDef { name: "Obsidian Bulwark", slot: USlot::Armor, base: 7, bonus: 1, power: UPower::Stoneskin, desc: "Every blow against you is reduced by 2.", color: Rgb(120, 100, 150) },
+    UniqueDef { name: "Cinderbrand", slot: USlot::Weapon, base: 12, bonus: 2, power: UPower::Flame, desc: "Your strikes burn for 1d6 + depth/2 extra fire damage.", color: Rgb(255, 130, 40) },
+    UniqueDef { name: "Hoof of Asterion", slot: USlot::Ring, base: 0, bonus: 0, power: UPower::Swift, desc: "Your steps are swift: moving takes 30% less time.", color: Rgb(230, 110, 80) },
+    UniqueDef { name: "Malzareth's Phylactery", slot: USlot::Amulet, base: 0, bonus: 0, power: UPower::Arcane, desc: "Skills cost half mana, and mana returns faster.", color: Rgb(200, 130, 255) },
+    UniqueDef { name: "Briarmail", slot: USlot::Armor, base: 4, bonus: 3, power: UPower::Thorns, desc: "Foes that strike you in melee are torn by thorns.", color: Rgb(140, 170, 90) },
+    UniqueDef { name: "Stormcaller", slot: USlot::Weapon, base: 2, bonus: 3, power: UPower::Storm, desc: "Hits arc lightning into another nearby foe.", color: Rgb(170, 200, 255) },
+    UniqueDef { name: "Eye of the Deep", slot: USlot::Amulet, base: 0, bonus: 0, power: UPower::Deathsight, desc: "You sense every living thing on the floor (maps).", color: Rgb(120, 255, 200) },
+    UniqueDef { name: "Ring of Avarice", slot: USlot::Ring, base: 0, bonus: 0, power: UPower::Fortune, desc: "Slain foes drop treasure far more often.", color: Rgb(255, 215, 80) },
+    UniqueDef { name: "Shadowweave", slot: USlot::Armor, base: 2, bonus: 3, power: UPower::Shadow, desc: "You move like a shadow: +3 stealth.", color: Rgb(110, 110, 160) },
+    UniqueDef { name: "Wrathstone Band", slot: USlot::Ring, base: 0, bonus: 0, power: UPower::Wrath, desc: "Burning fury: +3 damage to every strike.", color: Rgb(255, 80, 60) },
+];
+
+/// Number of signature items (the rest form the depth-10 champion pool).
+pub const N_SIGNATURE: usize = 10;
 
 // ---------------------------------------------------------------- weapons
 
@@ -463,13 +696,21 @@ pub static ARMORS: &[ArmorDef] = &[
 
 // ---------------------------------------------------------------- items
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Gear {
     pub def: usize,
     pub bonus: i32,
+    /// Index into UNIQUES if this is a unique piece.
+    pub uniq: Option<u8>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+impl Gear {
+    pub fn plain(def: usize, bonus: i32) -> Gear {
+        Gear { def, bonus, uniq: None }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Potion {
     Healing,
     Mana,
@@ -478,20 +719,41 @@ pub enum Potion {
     Cure,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scroll {
     Teleport,
     Mapping,
     Fire,
+    Vision,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Item {
     Weapon(Gear),
     Armor(Gear),
     Potion(Potion),
     Scroll(Scroll),
     Amulet,
+    /// A unique ring or amulet (index into UNIQUES).
+    Trinket(u8),
+}
+
+/// Builds the item for unique `u`.
+pub fn unique_item(u: usize) -> Item {
+    let d = &UNIQUES[u];
+    match d.slot {
+        USlot::Weapon => Item::Weapon(Gear { def: d.base, bonus: d.bonus, uniq: Some(u as u8) }),
+        USlot::Armor => Item::Armor(Gear { def: d.base, bonus: d.bonus, uniq: Some(u as u8) }),
+        USlot::Ring | USlot::Amulet => Item::Trinket(u as u8),
+    }
+}
+
+/// Display name of a weapon or armour, including unique names.
+pub fn gear_label(base: &str, g: &Gear) -> String {
+    match g.uniq {
+        Some(u) => UNIQUES[u as usize].name.to_string(),
+        None => gear_name(base, g.bonus),
+    }
 }
 
 pub fn gear_name(n: &str, b: i32) -> String {
@@ -508,6 +770,7 @@ const ART_POTION: &[&str] = &[r"  _  ", r" |=| ", r"/~~~\", r"\___/"];
 const ART_SCROLL: &[&str] = &[r" ____ ", r"(____)", r" |~~| ", r"(____)"];
 const ART_WEAPON: &[&str] = &[r"     /", r"    / ", r" \ /  ", r"  X   ", r" / \  "];
 const ART_ARMOR: &[&str] = &[r"/\___/\", r"|#####|", r" |###| ", r" |___| "];
+const ART_RING: &[&str] = &[r" .-. ", r"( § )", r" '-' "];
 const ART_AMULET: &[&str] = &[r" .-~-. ", r"(     )", r" \   / ", r"  (§)  "];
 pub const ART_CORPSE: &[&str] = &[r"    ,%%%,    ", r" _,(%%%%%),_ "];
 pub const ART_BONES: &[&str] = &[r"  o   ,=-,  ", r"='-%=--o-'=-"];
@@ -515,8 +778,9 @@ pub const ART_BONES: &[&str] = &[r"  o   ,=-,  ", r"='-%=--o-'=-"];
 impl Item {
     pub fn name(&self) -> String {
         match self {
-            Item::Weapon(g) => gear_name(WEAPONS[g.def].name, g.bonus),
-            Item::Armor(g) => gear_name(ARMORS[g.def].name, g.bonus),
+            Item::Weapon(g) => gear_label(WEAPONS[g.def].name, g),
+            Item::Armor(g) => gear_label(ARMORS[g.def].name, g),
+            Item::Trinket(u) => UNIQUES[*u as usize].name.to_string(),
             Item::Potion(p) => format!(
                 "Potion of {}",
                 match p {
@@ -533,6 +797,7 @@ impl Item {
                     Scroll::Teleport => "Teleportation",
                     Scroll::Mapping => "Magic Mapping",
                     Scroll::Fire => "Fire",
+                    Scroll::Vision => "Monster Vision",
                 }
             ),
             Item::Amulet => "the Amulet of GRAZZARK".to_string(),
@@ -546,11 +811,15 @@ impl Item {
             Item::Potion(_) => '!',
             Item::Scroll(_) => '?',
             Item::Amulet => '"',
+            Item::Trinket(u) => if UNIQUES[*u as usize].slot == USlot::Ring { '=' } else { '"' },
         }
     }
 
     pub fn color(&self) -> Rgb {
         match self {
+            Item::Weapon(Gear { uniq: Some(u), .. }) | Item::Armor(Gear { uniq: Some(u), .. }) | Item::Trinket(u) => {
+                UNIQUES[*u as usize].color
+            }
             Item::Weapon(g) => WEAPONS[g.def].color,
             Item::Armor(_) => Rgb(170, 160, 140),
             Item::Potion(p) => match p {
@@ -572,13 +841,22 @@ impl Item {
             Item::Potion(_) => ART_POTION,
             Item::Scroll(_) => ART_SCROLL,
             Item::Amulet => ART_AMULET,
+            Item::Trinket(u) => if UNIQUES[*u as usize].slot == USlot::Ring { ART_RING } else { ART_AMULET },
+        }
+    }
+
+    /// The unique this item is, if any.
+    pub fn unique(&self) -> Option<usize> {
+        match self {
+            Item::Weapon(Gear { uniq: Some(u), .. }) | Item::Armor(Gear { uniq: Some(u), .. }) | Item::Trinket(u) => Some(*u as usize),
+            _ => None,
         }
     }
 }
 
 // ---------------------------------------------------------------- skills
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Skill {
     Cleave,
     WarStomp,
@@ -596,6 +874,14 @@ pub enum Skill {
     SoulBurst,
     PhaseWard,
     SecondWind,
+    BattleCry,
+    Shadowstep,
+    SmokeBomb,
+    ChainLightning,
+    Smite,
+    PiercingShot,
+    RainOfArrows,
+    CorpseExplosion,
 }
 
 impl Skill {
@@ -615,8 +901,16 @@ impl Skill {
             Skill::DrainLife => "Drain Life",
             Skill::Blink => "Blink",
             Skill::SoulBurst => "Soul Burst",
-            Skill::PhaseWard => "Phase Ward",
+            Skill::PhaseWard => "Holy Ward",
             Skill::SecondWind => "Second Wind",
+            Skill::BattleCry => "Battle Cry",
+            Skill::Shadowstep => "Shadowstep",
+            Skill::SmokeBomb => "Smoke Bomb",
+            Skill::ChainLightning => "Chain Lightning",
+            Skill::Smite => "Smite",
+            Skill::PiercingShot => "Piercing Shot",
+            Skill::RainOfArrows => "Rain of Arrows",
+            Skill::CorpseExplosion => "Corpse Explosion",
         }
     }
 
@@ -634,6 +928,17 @@ impl Skill {
             Skill::TurnUndead => 5,
             Skill::RaiseDead => 8,
             Skill::DrainLife => 4,
+            Skill::Blink => 4,
+            Skill::SoulBurst => 7,
+            Skill::PhaseWard => 5,
+            Skill::BattleCry => 4,
+            Skill::Shadowstep => 5,
+            Skill::SmokeBomb => 6,
+            Skill::ChainLightning => 8,
+            Skill::Smite => 6,
+            Skill::PiercingShot => 5,
+            Skill::RainOfArrows => 8,
+            Skill::CorpseExplosion => 6,
             _ => 0,
         }
     }
@@ -648,10 +953,18 @@ impl Skill {
             Skill::Heal => 3.0,
             Skill::TurnUndead => 8.0,
             Skill::RaiseDead => 10.0,
-            Skill::Blink => 25.0,
-            Skill::SoulBurst => 40.0,
-            Skill::PhaseWard => 60.0,
-            Skill::SecondWind => 150.0,
+            Skill::Blink => 12.0,
+            Skill::SoulBurst => 20.0,
+            Skill::PhaseWard => 30.0,
+            Skill::SecondWind => 120.0,
+            Skill::BattleCry => 25.0,
+            Skill::Shadowstep => 8.0,
+            Skill::SmokeBomb => 30.0,
+            Skill::ChainLightning => 6.0,
+            Skill::Smite => 4.0,
+            Skill::PiercingShot => 5.0,
+            Skill::RainOfArrows => 12.0,
+            Skill::CorpseExplosion => 10.0,
             _ => 0.0,
         }
     }
@@ -671,9 +984,30 @@ impl Skill {
             Skill::RaiseDead => "Raise a nearby corpse as your thrall.",
             Skill::DrainLife => "Steal life from the foe in front of you.",
             Skill::Blink => "Teleport up to 4 tiles forward.",
-            Skill::SoulBurst => "Blast every foe within 2 tiles with soulfire.",
-            Skill::PhaseWard => "A ward absorbs the next 20+ damage.",
-            Skill::SecondWind => "Instantly heal half your health.",
+            Skill::SoulBurst => "Blast every foe within 2 tiles with soulfire; heals you for each foe hit.",
+            Skill::PhaseWard => "A holy ward absorbs the next 20+ damage.",
+            Skill::SecondWind => "Instantly heal half your health and shrug off poison.",
+            Skill::BattleCry => "A terrible roar: nearby foes flee, and you deal +50% damage for 8 turns.",
+            Skill::Shadowstep => "Vanish and reappear behind a visible foe, striking it as an unseen backstab.",
+            Skill::SmokeBomb => "Foes within 4 tiles are blinded and lose you; you vanish for 5 turns.",
+            Skill::ChainLightning => "A bolt that leaps between up to 5 foes, weakening with each jump.",
+            Skill::Smite => "Call down holy fire on the foe ahead. Double damage to undead and demons.",
+            Skill::PiercingShot => "An arrow that tears through every foe in a line.",
+            Skill::RainOfArrows => "Arrows rain on the area ahead, striking every foe within 1 tile.",
+            Skill::CorpseExplosion => "Detonate every corpse within 6 tiles. The dead never rise again.",
+        }
+    }
+
+    /// The class that can learn this skill at the Soul Altar.
+    pub fn class(self) -> Option<usize> {
+        match self {
+            Skill::SecondWind | Skill::BattleCry => Some(0),
+            Skill::Shadowstep | Skill::SmokeBomb => Some(1),
+            Skill::Blink | Skill::ChainLightning => Some(2),
+            Skill::PhaseWard | Skill::Smite => Some(3),
+            Skill::PiercingShot | Skill::RainOfArrows => Some(4),
+            Skill::SoulBurst | Skill::CorpseExplosion => Some(5),
+            _ => None,
         }
     }
 }
@@ -736,6 +1070,19 @@ pub static CLASSES: &[ClassDef] = &[
 
 // ---------------------------------------------------------------- profile upgrades
 
+/// Sections of the Soul Altar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UCat {
+    /// Plain stat bonuses.
+    Stat,
+    /// Boons that change how a run plays.
+    Boon,
+    /// Unlock a new class.
+    Class,
+    /// A skill only one class can learn.
+    Skill(usize),
+}
+
 pub struct UpgradeDef {
     pub id: &'static str,
     pub name: &'static str,
@@ -743,25 +1090,100 @@ pub struct UpgradeDef {
     pub max: u32,
     pub cost: u32,
     pub skill: Option<Skill>,
+    pub cat: UCat,
+}
+
+const fn stat(id: &'static str, name: &'static str, desc: &'static str, max: u32, cost: u32) -> UpgradeDef {
+    UpgradeDef { id, name, desc, max, cost, skill: None, cat: UCat::Stat }
+}
+const fn boon(id: &'static str, name: &'static str, desc: &'static str, max: u32, cost: u32) -> UpgradeDef {
+    UpgradeDef { id, name, desc, max, cost, skill: None, cat: UCat::Boon }
+}
+const fn cskill(id: &'static str, class: usize, s: Skill, cost: u32) -> UpgradeDef {
+    UpgradeDef { id, name: "", desc: "", max: 1, cost, skill: Some(s), cat: UCat::Skill(class) }
 }
 
 pub static UPGRADES: &[UpgradeDef] = &[
-    UpgradeDef { id: "vitality", name: "Vitality", desc: "+4 max HP per rank", max: 5, cost: 10, skill: None },
-    UpgradeDef { id: "might", name: "Might", desc: "+1 damage per rank", max: 5, cost: 12, skill: None },
-    UpgradeDef { id: "ironskin", name: "Iron Skin", desc: "+1 armor class per rank", max: 3, cost: 15, skill: None },
-    UpgradeDef { id: "arcana", name: "Arcane Well", desc: "+3 max MP per rank", max: 5, cost: 8, skill: None },
-    UpgradeDef { id: "keen", name: "Keen Eyes", desc: "+1 sight radius and +3% crit per rank", max: 3, cost: 10, skill: None },
-    UpgradeDef { id: "scholar", name: "Scholar", desc: "+10% experience per rank", max: 5, cost: 10, skill: None },
-    UpgradeDef { id: "regen", name: "Troll Blood", desc: "Faster health regeneration", max: 3, cost: 15, skill: None },
-    UpgradeDef { id: "provision", name: "Provisioned", desc: "+1 starting Potion of Healing per rank", max: 3, cost: 8, skill: None },
-    UpgradeDef { id: "luck", name: "Fortune", desc: "More and better loot", max: 3, cost: 12, skill: None },
-    UpgradeDef { id: "siphon", name: "Soul Siphon", desc: "Heal 1 HP per kill per rank", max: 3, cost: 15, skill: None },
-    UpgradeDef { id: "blink", name: "Skill: Blink", desc: "Active: teleport up to 4 tiles forward", max: 1, cost: 30, skill: Some(Skill::Blink) },
-    UpgradeDef { id: "burst", name: "Skill: Soul Burst", desc: "Active: blast all foes within 2 tiles", max: 1, cost: 40, skill: Some(Skill::SoulBurst) },
-    UpgradeDef { id: "ward", name: "Skill: Phase Ward", desc: "Active: absorb the next 20+ damage", max: 1, cost: 35, skill: Some(Skill::PhaseWard) },
-    UpgradeDef { id: "wind", name: "Skill: Second Wind", desc: "Active: heal 50% of max HP", max: 1, cost: 45, skill: Some(Skill::SecondWind) },
-    UpgradeDef { id: "class_ranger", name: "Unlock: Ranger", desc: "New class: archer with a wolf companion", max: 1, cost: 40, skill: None },
-    UpgradeDef { id: "class_necro", name: "Unlock: Necromancer", desc: "New class: raise the dead, drain life", max: 1, cost: 80, skill: None },
+    stat("vitality", "Vitality", "+4 max HP per rank", 5, 40),
+    stat("might", "Might", "+1 damage per rank", 5, 50),
+    stat("ironskin", "Iron Skin", "+1 armor class per rank", 3, 70),
+    stat("arcana", "Arcane Well", "+3 max MP per rank", 5, 35),
+    stat("keen", "Keen Eyes", "+1 sight radius and +3% crit per rank", 3, 50),
+    stat("scholar", "Scholar", "+10% experience per rank", 5, 45),
+    stat("regen", "Troll Blood", "Faster health regeneration", 3, 70),
+    stat("provision", "Provisioned", "+1 starting Potion of Healing per rank", 3, 40),
+    stat("luck", "Fortune", "More and better loot", 3, 60),
+    stat("siphon", "Soul Siphon", "Heal 1 HP per kill per rank", 3, 60),
+    boon("harvest", "Soul Harvest", "+10% soul points from every descent per rank", 3, 80),
+    boon("bloodlust", "Bloodlust", "Each killing blow has a 10% chance per rank to cost no time at all", 3, 90),
+    boon("pockets", "Deep Pockets", "+3 pack slots per rank", 2, 60),
+    boon("carto", "Cartographer", "Rank 1: the way down is revealed on every floor. Rank 2: every room is mapped too", 2, 100),
+    boon("anchor", "Soul Anchor", "Once per descent, cheat death: rise with 40% health as nearby foes flee", 1, 600),
+    boon("coup", "Coup de Grace", "+15% damage per rank to foes below 30% health", 3, 80),
+    boon("alchemy", "Alchemy", "Potions are 25% more potent per rank", 3, 70),
+    boon("thorns", "Thorned Hide", "Monsters that strike you in melee take 1-3 damage per rank", 3, 70),
+    boon("bloodmagic", "Blood Magic", "When short of mana, pay for skills with 2 health per missing point", 1, 300),
+    boon("hunter", "Champion Hunter", "+15% damage per rank against champions, overlords and uniques", 3, 90),
+    boon("heirloom", "Heirloom Arms", "Your starting weapon and armour are +1 per rank", 3, 60),
+    boon("ironwill", "Iron Will", "Rank 1: poison wears off twice as fast. Rank 2: immune to poison", 2, 70),
+    boon("leech", "Mana Leech", "+1 MP per kill per rank", 3, 60),
+    boon("laststand", "Last Stand", "Below 25% health: +15% damage and +1 AC per rank", 3, 80),
+    boon("fleet", "Fleet Foot", "Walking takes 10% less time per rank", 2, 120),
+    boon("scavenger", "Scavenger", "Start each descent with one random scroll per rank", 3, 50),
+    UpgradeDef { id: "class_ranger", name: "Unlock: Ranger", desc: "New class: archer with a wolf companion", max: 1, cost: 400, skill: None, cat: UCat::Class },
+    UpgradeDef { id: "class_necro", name: "Unlock: Necromancer", desc: "New class: raise the dead, drain life", max: 1, cost: 700, skill: None, cat: UCat::Class },
+    cskill("w_wind", 0, Skill::SecondWind, 350),
+    cskill("w_cry", 0, Skill::BattleCry, 450),
+    cskill("r_step", 1, Skill::Shadowstep, 400),
+    cskill("r_smoke", 1, Skill::SmokeBomb, 350),
+    cskill("m_blink", 2, Skill::Blink, 300),
+    cskill("m_chain", 2, Skill::ChainLightning, 500),
+    cskill("c_ward", 3, Skill::PhaseWard, 300),
+    cskill("c_smite", 3, Skill::Smite, 450),
+    cskill("g_pierce", 4, Skill::PiercingShot, 400),
+    cskill("g_rain", 4, Skill::RainOfArrows, 500),
+    cskill("n_corpse", 5, Skill::CorpseExplosion, 450),
+    cskill("n_burst", 5, Skill::SoulBurst, 400),
+];
+
+impl UpgradeDef {
+    /// Display name; class skills are named after their skill.
+    pub fn title(&self) -> String {
+        match self.skill {
+            Some(s) => s.name().to_string(),
+            None => self.name.to_string(),
+        }
+    }
+    pub fn text(&self) -> String {
+        match self.skill {
+            Some(s) => format!("{} ({} mp, {} turn cooldown)", s.desc(), s.mp(), s.cooldown()),
+            None => self.desc.to_string(),
+        }
+    }
+}
+
+/// Upgrades from older versions of the altar, refunded when the profile loads.
+pub static LEGACY_UPGRADES: &[(&str, u32)] = &[("blink", 250), ("burst", 350), ("ward", 300), ("wind", 400)];
+
+// ---------------------------------------------------------------- difficulty
+
+pub struct DiffDef {
+    pub name: &'static str,
+    pub desc: &'static str,
+    /// Monster health multiplier.
+    pub hp: f32,
+    /// Monster damage multiplier.
+    pub dmg: f32,
+    /// Soul point multiplier.
+    pub souls: f32,
+    pub color: Rgb,
+}
+
+pub static DIFFICULTIES: [DiffDef; 4] = [
+    DiffDef { name: "Normal", desc: "The dungeon as GRAZZARK made it.", hp: 1.0, dmg: 1.0, souls: 1.0, color: Rgb(170, 220, 170) },
+    DiffDef { name: "Hard", desc: "Monsters have 30% more health and deal 20% more damage.", hp: 1.3, dmg: 1.2, souls: 1.5, color: Rgb(240, 210, 110) },
+    DiffDef { name: "Difficult", desc: "Monsters have 60% more health and deal 40% more damage.", hp: 1.6, dmg: 1.4, souls: 2.0, color: Rgb(255, 140, 70) },
+    DiffDef { name: "Chaotic", desc: "Monsters have double health and deal 70% more damage.", hp: 2.0, dmg: 1.7, souls: 3.0, color: Rgb(255, 60, 90) },
 ];
 
 pub static DEPTH_NAMES: [&str; 10] = [

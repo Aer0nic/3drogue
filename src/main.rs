@@ -21,7 +21,7 @@ use audio::{Audio, MusicMode, Sfx, Spatial};
 use canvas::Canvas;
 use color::Rgb;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use data::{CLASSES, UPGRADES};
+use data::{CLASSES, DIFFICULTIES, MONSTERS, UPGRADES};
 use game::{cap, Action, DeathCause, Game, Outcome, GREY};
 use profile::{Profile, RunRecord};
 use rand::Rng;
@@ -59,7 +59,10 @@ fn restore_stderr() {
 enum Screen {
     Title,
     ClassSel,
+    /// Choose difficulty after the class.
+    DiffSel,
     Altar,
+    Bestiary,
     Hall,
     Help,
     Game,
@@ -73,6 +76,10 @@ enum Overlay {
     Inventory,
     Pause,
     Help,
+    /// Full-screen plain map (M).
+    Map,
+    /// Choose what to pick up from a pile.
+    Pickup,
 }
 
 /// Screen-melt transition between dungeon levels.
@@ -86,6 +93,8 @@ struct App {
     screen: Screen,
     sel: usize,
     class_sel: usize,
+    diff_sel: usize,
+    best_sel: usize,
     altar_sel: usize,
     pause_sel: usize,
     profile: Profile,
@@ -104,14 +113,18 @@ struct App {
     over_timer: f32,
     quit: bool,
     note: String,
+    /// A saved run exists on disk.
+    has_save: bool,
 }
 
 impl App {
     fn new(profile: Profile, audio: Audio, w: usize, h: usize) -> App {
         App {
             screen: Screen::Title,
-            sel: 0,
+            sel: if game::has_save() { 0 } else { 1 },
             class_sel: 0,
+            diff_sel: 0,
+            best_sel: 0,
             altar_sel: 0,
             pause_sel: 0,
             profile,
@@ -130,6 +143,7 @@ impl App {
             over_timer: 0.0,
             quit: false,
             note: String::new(),
+            has_save: game::has_save(),
         }
     }
 
@@ -140,7 +154,7 @@ impl App {
     fn on_key(&mut self, k: KeyEvent) {
         let code = k.code;
         if k.modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
-            self.quit = true;
+            self.save_and_quit();
             return;
         }
         let up = matches!(code, KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('k'));
@@ -150,22 +164,29 @@ impl App {
         match self.screen {
             Screen::Title => {
                 let n = screens::TITLE_ITEMS.len();
+                // "Continue" (item 0) only exists when there is a saved run.
+                let first = if self.has_save { 0 } else { 1 };
+                if self.sel < first {
+                    self.sel = first;
+                }
                 if up {
-                    self.sel = (self.sel + n - 1) % n;
+                    self.sel = if self.sel <= first { n - 1 } else { self.sel - 1 };
                     self.click();
                 } else if down {
-                    self.sel = (self.sel + 1) % n;
+                    self.sel = if self.sel + 1 >= n { first } else { self.sel + 1 };
                     self.click();
                 } else if enter {
                     self.click();
                     match self.sel {
-                        0 => self.screen = Screen::ClassSel,
-                        1 => {
+                        0 => self.continue_game(),
+                        1 => self.screen = Screen::ClassSel,
+                        2 => {
                             self.note.clear();
                             self.screen = Screen::Altar;
                         }
-                        2 => self.screen = Screen::Hall,
-                        3 => self.screen = Screen::Help,
+                        3 => self.screen = Screen::Bestiary,
+                        4 => self.screen = Screen::Hall,
+                        5 => self.screen = Screen::Help,
                         _ => self.quit = true,
                     }
                 } else if esc {
@@ -182,9 +203,39 @@ impl App {
                     self.click();
                 } else if enter {
                     if self.profile.class_unlocked(&CLASSES[self.class_sel]) {
-                        self.start_game(self.class_sel);
+                        self.click();
+                        self.diff_sel = self.diff_sel.min(self.profile.unlocked_diff as usize);
+                        self.screen = Screen::DiffSel;
                     }
                 } else if esc {
+                    self.screen = Screen::Title;
+                }
+            }
+            Screen::DiffSel => {
+                let n = DIFFICULTIES.len();
+                if up {
+                    self.diff_sel = (self.diff_sel + n - 1) % n;
+                    self.click();
+                } else if down {
+                    self.diff_sel = (self.diff_sel + 1) % n;
+                    self.click();
+                } else if enter {
+                    if self.profile.diff_unlocked(self.diff_sel) {
+                        self.start_game(self.class_sel, self.diff_sel as u8);
+                    }
+                } else if esc {
+                    self.screen = Screen::ClassSel;
+                }
+            }
+            Screen::Bestiary => {
+                let n = MONSTERS.len();
+                if up {
+                    self.best_sel = (self.best_sel + n - 1) % n;
+                    self.click();
+                } else if down {
+                    self.best_sel = (self.best_sel + 1) % n;
+                    self.click();
+                } else if esc || enter {
                     self.screen = Screen::Title;
                 }
             }
@@ -220,7 +271,8 @@ impl App {
             Screen::Dead | Screen::Victory => {
                 if (enter || matches!(code, KeyCode::Esc)) && self.end_t > 1.5 {
                     self.screen = Screen::Title;
-                    self.sel = 0;
+                    self.has_save = game::has_save();
+                    self.sel = if self.has_save { 0 } else { 1 };
                     self.death = None;
                     self.audio.set_music(MusicMode::Title, 1);
                     self.audio.set_intensity(0.0);
@@ -270,7 +322,7 @@ impl App {
                             self.overlay = Overlay::None;
                             g.abandon();
                         }
-                        _ => self.quit = true,
+                        _ => self.save_and_quit(),
                     },
                     _ => {}
                 }
@@ -280,15 +332,49 @@ impl App {
                 self.overlay = Overlay::None;
                 return;
             }
+            Overlay::Pickup => {
+                let n = g.items_here().len();
+                match k.code {
+                    Esc => self.overlay = Overlay::None,
+                    Enter | Char(' ') | Char(',') | Char('g') | Char('G') => {
+                        self.overlay = Overlay::None;
+                        g.do_action(Action::PickupAll);
+                    }
+                    Char(c) if c.is_ascii_lowercase() => {
+                        let i = (c as u8 - b'a') as usize;
+                        if i < n {
+                            self.overlay = Overlay::None;
+                            g.do_action(Action::PickupOne(i));
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            Overlay::Map => {
+                if matches!(k.code, Esc | Char('m') | Char('M') | Tab | Enter | Char(' ')) {
+                    self.overlay = Overlay::None;
+                }
+                return;
+            }
             Overlay::None => {}
         }
 
         match k.code {
-            Tab | Char('m') | Char('M') => {
+            Tab => {
                 g.overhead = !g.overhead;
                 return;
             }
-            Char('r') | Char('R') => {
+            Char('m') | Char('M') => {
+                self.overlay = Overlay::Map;
+                return;
+            }
+            Char('g') | Char(',') if g.items_here().len() > 1 => {
+                self.overlay = Overlay::Pickup;
+                return;
+            }
+            // Shift+R, so it is hard to switch by accident.
+            Char('R') => {
                 g.toggle_realtime();
                 return;
             }
@@ -361,8 +447,44 @@ impl App {
         }
     }
 
-    fn start_game(&mut self, class: usize) {
-        let g = Game::new(class, self.profile.bonuses());
+    /// Quitting mid-run saves it so it can be continued next time.
+    fn save_and_quit(&mut self) {
+        if self.screen == Screen::Game {
+            if let Some(g) = &self.game {
+                g.save();
+            }
+        }
+        self.quit = true;
+    }
+
+    fn continue_game(&mut self) {
+        match Game::load() {
+            Some(g) => {
+                let depth = g.depth;
+                self.game = Some(g);
+                self.has_save = false;
+                self.last_depth = depth;
+                self.screen = Screen::Game;
+                self.overlay = Overlay::None;
+                self.melt = None;
+                self.over_timer = 0.0;
+                self.ambient_timer = 3.0;
+                self.audio.set_music(MusicMode::Dungeon, depth);
+                self.audio.set_intensity(0.0);
+            }
+            None => {
+                self.has_save = false;
+                self.sel = 1;
+                self.note = "The saved run could not be read.".to_string();
+            }
+        }
+    }
+
+    fn start_game(&mut self, class: usize, difficulty: u8) {
+        // A new descent replaces any saved run.
+        game::delete_save();
+        self.has_save = false;
+        let g = Game::new(class, self.profile.bonuses(), difficulty);
         self.game = Some(g);
         self.last_depth = 1;
         self.screen = Screen::Game;
@@ -465,11 +587,16 @@ impl App {
     fn end_run(&mut self) {
         let Some(g) = self.game.take() else { return };
         let won = matches!(g.over, Some(Outcome::Won));
-        let pts = g.max_depth * 10
+        let base = g.max_depth * 10
             + g.p.level as u32 * 5
             + g.kills
             + if won { 250 } else { 0 }
             + if g.p.has_amulet { 50 } else { 0 };
+        let dd = g.diff();
+        let mult = dd.souls * (1.0 + 0.1 * g.bonus.harvest as f32);
+        let pts = (base as f32 * mult).round() as u32;
+        let mastered = self.profile.record_kills(&g.slain);
+        let unlocked = if won { self.profile.record_win(g.difficulty as usize) } else { None };
         let cd = g.cdef();
         let cause_txt = match &g.over {
             Some(Outcome::Died(c)) => c.describe(),
@@ -491,18 +618,29 @@ impl App {
             won,
             turns: g.turns,
             kills: g.kills,
+            difficulty: g.difficulty,
         });
         if self.profile.history.len() > 40 {
             self.profile.history.remove(0);
         }
         self.profile.save();
 
-        let info = vec![
-            format!("{}, level {}", cd.name, g.p.level),
+        let mut info = vec![
+            format!("{}, level {}  ({})", cd.name, g.p.level, dd.name),
             format!("Reached depth {} of 10. Slew {} foes in {} turns.", g.max_depth, g.kills, g.turns),
             cap(&cause_txt),
-            format!("+{} Soul Points  (you now have {})", pts, self.profile.points),
+            if mult != 1.0 {
+                format!("+{} Soul Points (x{:.1})  (you now have {})", pts, mult, self.profile.points)
+            } else {
+                format!("+{} Soul Points  (you now have {})", pts, self.profile.points)
+            },
         ];
+        if let Some(n) = unlocked {
+            info.push(format!("{} difficulty is now unlocked!", n.to_uppercase()));
+        }
+        for m in mastered.iter().take(3) {
+            info.push(format!("Bestiary: you have mastered the {}! (+crit against it)", m));
+        }
         self.end_t = 0.0;
         self.overlay = Overlay::None;
         self.melt = None;
@@ -528,8 +666,10 @@ impl App {
     fn draw(&self, c: &mut Canvas) {
         c.clear();
         match self.screen {
-            Screen::Title => screens::draw_title(c, &self.fire, self.t, self.sel, &self.profile),
+            Screen::Title => screens::draw_title(c, &self.fire, self.t, self.sel, &self.profile, self.has_save),
             Screen::ClassSel => screens::draw_class_select(c, self.class_sel, &self.profile, self.t),
+            Screen::DiffSel => screens::draw_difficulty(c, self.diff_sel, self.class_sel, &self.profile, self.t),
+            Screen::Bestiary => screens::draw_bestiary(c, self.best_sel, &self.profile, self.t),
             Screen::Altar => screens::draw_altar(c, self.altar_sel, &self.profile, self.t, &self.note, &self.fire),
             Screen::Hall => screens::draw_hall(c, &self.profile),
             Screen::Help => {
@@ -560,6 +700,8 @@ impl App {
                             render::draw_pause(c, self.pause_sel);
                         }
                         Overlay::Help => render::draw_help(c),
+                        Overlay::Map => render::draw_map(c, g),
+                        Overlay::Pickup => render::draw_pickup(c, g),
                         Overlay::None => {}
                     }
                     if let Some(o) = &g.over {
@@ -700,8 +842,45 @@ mod tests {
         for class in 0..CLASSES.len() {
             for _run in 0..3 {
                 let mut bonus = Bonuses { xp_mult: 1.0, ..Default::default() };
-                bonus.skills = vec![data::Skill::Blink, data::Skill::SoulBurst, data::Skill::PhaseWard, data::Skill::SecondWind];
-                let mut g = Game::new(class, bonus);
+                bonus.skills = UPGRADES.iter().filter_map(|u| u.skill).collect();
+                // Exercise every boon as well.
+                bonus.bloodlust = 3;
+                bonus.pockets = 2;
+                bonus.carto = 2;
+                bonus.anchor = true;
+                bonus.coup = 3;
+                bonus.alchemy = 3;
+                bonus.thorns = 3;
+                bonus.bloodmagic = true;
+                bonus.hunter = 3;
+                bonus.heirloom = 2;
+                bonus.ironwill = 1 + (_run as i32 % 2);
+                bonus.leech = 2;
+                bonus.laststand = 3;
+                bonus.fleet = 2;
+                bonus.scavenger = 2;
+                bonus.mastered = vec!["giant rat".into(), "orc".into()];
+                let mut g = Game::new(class, bonus, ((_run + class) % 4) as u8);
+                // Every floor gets its unique, and the hero wears a rotating
+                // set of unique gear so every power is exercised.
+                g.unique_chance = [1.0; 10];
+                let n_u = data::UNIQUES.len();
+                for k in 0..4 {
+                    let u = (class * 3 + _run * 5 + k * 4) % n_u;
+                    match data::unique_item(u) {
+                        data::Item::Weapon(gr) => g.p.wpn = gr,
+                        data::Item::Armor(gr) => g.p.arm = gr,
+                        data::Item::Trinket(t) => {
+                            if data::UNIQUES[u].slot == data::USlot::Ring {
+                                g.p.ring = Some(t)
+                            } else {
+                                g.p.neck = Some(t)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                g.p.inv.push(data::unique_item((class + _run) % n_u));
                 let mut canvas = Canvas::new(140, 45);
                 let mut t = 0.0f32;
                 let mut went_down = true;
@@ -737,12 +916,27 @@ mod tests {
                     if step == 1000 {
                         g.toggle_realtime();
                     }
+                    if step % 37 == 0 && !g.level.monsters.is_empty() {
+                        let k = rng.gen_range(0..g.level.monsters.len());
+                        if g.level.monsters[k].alive && !g.level.monsters[k].champion {
+                            g.make_champion(k);
+                        } else if g.level.monsters[k].alive && !g.level.monsters[k].overlord {
+                            g.make_overlord(k);
+                        }
+                    }
+                    if step % 90 == 0 {
+                        g.p.vision = 10;
+                    }
                     let a = match rng.gen_range(0..14) {
                         0..=4 => Action::Move(rng.gen_range(0..8), rng.gen_bool(0.5)),
                         5 => Action::Turn(if rng.gen_bool(0.5) { 1 } else { -1 }),
                         6 | 7 => Action::Attack,
                         8 => Action::Wait,
-                        9 => Action::Pickup,
+                        9 => match rng.gen_range(0..3) {
+                            0 => Action::Pickup,
+                            1 => Action::PickupAll,
+                            _ => Action::PickupOne(rng.gen_range(0..3)),
+                        },
                         10 => Action::Skill(rng.gen_range(0..6)),
                         11 => Action::Use(rng.gen_range(0..4)),
                         12 => Action::Drop(rng.gen_range(0..20)),
@@ -762,11 +956,51 @@ mod tests {
                     g.overhead = step % 2 == 0;
                     canvas.clear();
                     render::render_game(&mut canvas, &g, t);
+                    if step % 50 == 0 {
+                        render::draw_map(&mut canvas, &g);
+                        render::draw_inventory(&mut canvas, &g);
+                        render::draw_pickup(&mut canvas, &g);
+                    }
+                    for m in g.level.monsters.iter() {
+                        if m.alive && !m.def().ghost {
+                            assert!(g.level.tile(m.x, m.y) != Tile::Wall, "{} inside a wall", m.def().name);
+                        }
+                    }
                     assert!(g.level.tile(g.p.x, g.p.y) != Tile::Wall, "player inside a wall");
                 }
-                eprintln!("class {} max_depth {} depth {} lvl {} kills {} amulet {} outcome {}", class, g.max_depth, g.depth, g.p.level, g.kills, g.p.has_amulet,
+                eprintln!("class {} max_depth {} depth {} lvl {} kills {} amulet {} uniques {:?} outcome {}", class, g.max_depth, g.depth, g.p.level, g.kills, g.p.has_amulet, g.found_uniques,
                     match &g.over { Some(Outcome::Won) => "WON".to_string(), Some(Outcome::Died(c)) => c.describe(), None => "alive".into() });
             }
+        }
+    }
+
+    #[test]
+    fn menu_screens_render() {
+        let mut prof = Profile::default();
+        prof.points = 1234;
+        prof.unlocked_diff = 1;
+        for (i, m) in data::MONSTERS.iter().enumerate() {
+            prof.bestiary.insert(m.name.to_string(), [0, 1, 10, 100, 250][i % 5]);
+        }
+        let fire = screens::Fire::new();
+        for &(w, h) in &[(80usize, 24usize), (120, 40), (200, 60)] {
+            let mut c = Canvas::new(w, h);
+            for sel in 0..UPGRADES.len() {
+                screens::draw_altar(&mut c, sel, &prof, 1.0, "note", &fire);
+            }
+            for sel in 0..data::MONSTERS.len() {
+                screens::draw_bestiary(&mut c, sel, &prof, 1.0);
+            }
+            for sel in 0..DIFFICULTIES.len() {
+                screens::draw_difficulty(&mut c, sel, sel % CLASSES.len(), &prof, 1.0);
+            }
+            for sel in 0..CLASSES.len() {
+                screens::draw_class_select(&mut c, sel, &prof, 1.0);
+            }
+            for sel in 0..screens::TITLE_ITEMS.len() {
+                screens::draw_title(&mut c, &fire, 1.0, sel, &prof, true);
+            }
+            screens::draw_hall(&mut c, &prof);
         }
     }
 
@@ -785,6 +1019,11 @@ mod tests {
             DeathCause::Abandoned,
         ];
         let mut c = Canvas::new(120, 40);
+        let mut causes = causes;
+        for k in data::M_UNIQUE0..data::MONSTERS.len() {
+            causes.push(DeathCause::Monster(k));
+            causes.push(DeathCause::Spell(k));
+        }
         for cause in causes {
             let mut d = DeathScreen::new(&cause, vec!["Warrior, level 3".into(), "x".into()]);
             for _ in 0..120 {

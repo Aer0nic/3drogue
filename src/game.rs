@@ -35,21 +35,12 @@ pub fn cap(s: &str) -> String {
 
 pub fn a_name(kind: usize) -> String {
     let d = &MONSTERS[kind];
-    if d.boss {
+    if d.boss || d.unique > 0 {
         return d.name.to_string();
     }
     let first = d.name.chars().next().unwrap_or('x');
     let art = if "aeiou".contains(first) { "an" } else { "a" };
     format!("{} {}", art, d.name)
-}
-
-pub fn the_name(kind: usize) -> String {
-    let d = &MONSTERS[kind];
-    if d.boss {
-        d.name.to_string()
-    } else {
-        format!("the {}", d.name)
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,6 +51,10 @@ pub enum Action {
     Attack,
     Wait,
     Pickup,
+    /// Pick up the k-th item on the floor here.
+    PickupOne(usize),
+    /// Gather everything here in a single turn.
+    PickupAll,
     Stairs,
     Skill(usize),
     Use(usize),
@@ -101,6 +96,7 @@ pub enum Outcome {
     Won,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Msg {
     pub text: String,
     pub color: Rgb,
@@ -115,6 +111,7 @@ pub struct SoundEv {
 }
 
 /// Smoothly interpolated camera following the grid-locked player.
+#[derive(Default)]
 pub struct Cam {
     pub x: f32,
     pub y: f32,
@@ -123,6 +120,7 @@ pub struct Cam {
     pub swing: f32,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Player {
     pub x: i32,
     pub y: i32,
@@ -147,9 +145,29 @@ pub struct Player {
     pub regen_ctr: i32,
     pub mp_ctr: i32,
     pub extra_dmg: i32,
+    /// Equipped unique ring and amulet (indices into UNIQUES).
+    pub ring: Option<u8>,
+    pub neck: Option<u8>,
+    /// The Undying power has been spent on this floor.
+    pub undying_used: bool,
+    /// Extra ticks added to the next action (frozen by a frost attack).
+    pub slow: f64,
+    /// Permanent boosts stolen from slain overlords.
+    pub extra_ac: i32,
+    pub extra_crit: f32,
+    /// Turns of Monster Vision left.
+    pub vision: i32,
+    /// Turns of Battle Cry fury left (+50% damage).
+    #[serde(default)]
+    pub fury: i32,
+    /// The Soul Anchor has been spent this descent.
+    #[serde(default)]
+    pub anchor_used: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Game {
+    #[serde(skip, default = "fresh_rng")]
     pub rng: StdRng,
     pub depth: u32,
     pub level: Level,
@@ -163,18 +181,54 @@ pub struct Game {
     pub realtime: bool,
     pub overhead: bool,
     pub msgs: Vec<Msg>,
+    #[serde(skip)]
     pub sounds: Vec<SoundEv>,
+    #[serde(skip, default = "Fx::new")]
     pub fx: Fx,
+    #[serde(skip)]
     pub dmap: Vec<i32>,
     pub next_id: u32,
+    #[serde(skip)]
     pub over: Option<Outcome>,
     pub kills: u32,
     pub max_depth: u32,
+    #[serde(skip, default = "Cam::default")]
     pub cam: Cam,
+    #[serde(skip)]
     pub queued: Option<Action>,
     pub combat_heat: f32,
     pub room_size: f32,
     last_fight_msg: u64,
+    /// Chance that each floor's unique monster walks its halls, rolled at the start of the run.
+    pub unique_chance: [f32; 10],
+    /// Unique items already handed out this run.
+    pub found_uniques: Vec<usize>,
+    /// Index into DIFFICULTIES.
+    #[serde(default)]
+    pub difficulty: u8,
+    /// Kills this run by monster name, for the bestiary.
+    #[serde(default)]
+    pub slain: HashMap<String, u32>,
+    /// Bloodlust fired: the current action costs no time.
+    #[serde(skip)]
+    free_turn: bool,
+}
+
+fn fresh_rng() -> StdRng {
+    StdRng::from_entropy()
+}
+
+/// Where a run in progress is saved when you quit.
+pub fn save_path() -> std::path::PathBuf {
+    crate::profile::Profile::path().with_file_name("savegame.json")
+}
+
+pub fn has_save() -> bool {
+    save_path().exists()
+}
+
+pub fn delete_save() {
+    let _ = std::fs::remove_file(save_path());
 }
 
 // ---------------------------------------------------------------- population
@@ -196,12 +250,14 @@ pub fn random_item(depth: u32, rng: &mut StdRng, luck: i32) -> Item {
         })
     } else if r < 0.60 {
         let s: f32 = rng.gen();
-        Item::Scroll(if s < 0.4 {
+        Item::Scroll(if s < 0.33 {
             Scroll::Teleport
-        } else if s < 0.75 {
+        } else if s < 0.6 {
             Scroll::Mapping
-        } else {
+        } else if s < 0.82 {
             Scroll::Fire
+        } else {
+            Scroll::Vision
         })
     } else if r < 0.82 {
         let opts: Vec<usize> = (0..WEAPONS.len()).filter(|&i| WEAPONS[i].depth <= depth + 1).collect();
@@ -210,16 +266,33 @@ pub fn random_item(depth: u32, rng: &mut StdRng, luck: i32) -> Item {
         if rng.gen_bool(0.1) {
             bonus = -1;
         }
-        Item::Weapon(Gear { def, bonus })
+        Item::Weapon(Gear::plain(def, bonus))
     } else {
         let opts: Vec<usize> = (0..ARMORS.len()).filter(|&i| ARMORS[i].depth <= depth + 1).collect();
         let def = *opts.choose(rng).unwrap_or(&2);
         let bonus = rng.gen_range(0..=(depth as i32 / 4 + luck / 2));
-        Item::Armor(Gear { def, bonus })
+        Item::Armor(Gear::plain(def, bonus))
     }
 }
 
-fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time: f64) {
+/// A random weapon or armour piece (champion drops).
+pub fn random_gear(depth: u32, rng: &mut StdRng, luck: i32) -> Item {
+    loop {
+        match random_item(depth, rng, luck) {
+            Item::Weapon(mut g) => {
+                g.bonus = g.bonus.max(0) + 1;
+                return Item::Weapon(g);
+            }
+            Item::Armor(mut g) => {
+                g.bonus += 1;
+                return Item::Armor(g);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time: f64, unique: bool, hp_mult: f32) {
     let depth = lv.depth;
     let kinds: Vec<usize> = (0..MONSTERS.len())
         .filter(|&i| {
@@ -250,6 +323,7 @@ fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time
                 let extra = rng.gen_range(0..=(depth as i32 / 2));
                 m.hp += extra;
                 m.max_hp += extra;
+                m.scale_hp(hp_mult);
                 lv.monsters.push(m);
                 placed += 1;
             }
@@ -274,7 +348,37 @@ fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time
         let mut w = Monster::new(*next_id, M_WARDEN, pos.0, pos.1, time);
         *next_id += 1;
         w.awake = false;
+        w.scale_hp(hp_mult);
         lv.monsters.push(w);
+    }
+
+    // This floor's unique monster, if fate allows it to walk these halls.
+    if unique && (1..=10).contains(&depth) {
+        let kind = M_UNIQUE0 + depth as usize - 1;
+        let mut placed = false;
+        for _ in 0..40 {
+            let ri = rng.gen_range(1..n_rooms);
+            let room = lv.rooms[ri];
+            if room.contains(lv.down.0, lv.down.1) && depth == 10 {
+                continue;
+            }
+            if let Some((x, y)) = lv.random_floor_in(&room, rng) {
+                let mut m = Monster::new(*next_id, kind, x, y, time);
+                *next_id += 1;
+                // Uniques roam their floor instead of sleeping.
+                m.awake = true;
+                m.scale_hp(hp_mult);
+                lv.monsters.push(m);
+                placed = true;
+                break;
+            }
+        }
+        lv.has_unique = placed;
+    }
+
+    // A monster closet: a big room packed wall to wall with sleeping monsters.
+    if depth >= 2 && depth <= 10 && rng.gen::<f32>() < 0.12 + depth as f32 * 0.03 {
+        place_closet(lv, rng, next_id, &kinds, time, hp_mult);
     }
 
     let n_items = 5 + rng.gen_range(0..4) + luck as usize;
@@ -300,15 +404,109 @@ fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time
     }
 }
 
+/// Fill the largest suitable room with monsters and shut its doors.
+fn place_closet(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, kinds: &[usize], time: f64, hp_mult: f32) {
+    if kinds.is_empty() {
+        return;
+    }
+    let (ux, uy) = lv.up;
+    let (dx, dy) = lv.down;
+    let best = lv
+        .rooms
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, r)| r.w * r.h >= 30 && !r.contains(dx, dy) && !r.contains(ux, uy))
+        .max_by_key(|(_, r)| r.w * r.h)
+        .map(|(i, r)| (i, *r));
+    let Some((_, room)) = best else { return };
+    // Doorways become closed doors so the closet is a surprise.
+    for x in room.x - 1..=room.x + room.w {
+        for y in room.y - 1..=room.y + room.h {
+            let edge = x == room.x - 1 || x == room.x + room.w || y == room.y - 1 || y == room.y + room.h;
+            if !edge || lv.tile(x, y) != Tile::Floor {
+                continue;
+            }
+            let horiz = lv.tile(x - 1, y).opaque() && lv.tile(x + 1, y).opaque();
+            let vert = lv.tile(x, y - 1).opaque() && lv.tile(x, y + 1).opaque();
+            if horiz || vert {
+                lv.set(x, y, Tile::DoorClosed);
+            }
+        }
+    }
+    let n = ((room.w * room.h) / 4).clamp(8, 18);
+    let mut placed = 0;
+    for _ in 0..n * 3 {
+        if placed >= n {
+            break;
+        }
+        let Some((x, y)) = lv.random_floor_in(&room, rng) else { continue };
+        if lv.monster_at(x, y).is_some() || lv.items.iter().any(|i| i.x == x && i.y == y) {
+            continue;
+        }
+        let kind = *kinds.choose(rng).unwrap();
+        let mut m = Monster::new(*next_id, kind, x, y, time);
+        *next_id += 1;
+        m.awake = rng.gen_bool(0.15);
+        let roll: f32 = rng.gen();
+        if roll < 0.02 {
+            m.promote_overlord();
+        } else if roll < 0.10 {
+            m.promote_champion();
+        }
+        m.scale_hp(hp_mult);
+        lv.monsters.push(m);
+        placed += 1;
+    }
+    if placed > 0 {
+        lv.closet = Some(room);
+    }
+}
+
+/// Cartographer: reveal the way down, and with rank 2 every room.
+fn chart_level(lv: &mut Level, rank: i32) {
+    if rank <= 0 {
+        return;
+    }
+    let mark = |lv: &mut Level, x0: i32, y0: i32, x1: i32, y1: i32| {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if lv.inb(x, y) {
+                    let i = lv.idx(x, y);
+                    lv.explored[i] = true;
+                }
+            }
+        }
+    };
+    let (dx, dy) = lv.down;
+    mark(lv, dx - 1, dy - 1, dx + 1, dy + 1);
+    if rank >= 2 {
+        let rooms = lv.rooms.clone();
+        for r in rooms {
+            mark(lv, r.x - 1, r.y - 1, r.x + r.w, r.y + r.h);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- game
 
 impl Game {
-    pub fn new(class: usize, bonus: Bonuses) -> Game {
+    pub fn new(class: usize, mut bonus: Bonuses, difficulty: u8) -> Game {
+        let difficulty = difficulty.min(DIFFICULTIES.len() as u8 - 1);
+        let hp_mult = DIFFICULTIES[difficulty as usize].hp;
+        // Only this class's altar skills come along.
+        bonus.skills.retain(|s| s.class() == Some(class));
         let seed: u64 = rand::thread_rng().gen();
         let mut rng = StdRng::seed_from_u64(seed);
         let mut next_id = 1u32;
+        let mut unique_chance = [0.0f32; 10];
+        for c in unique_chance.iter_mut() {
+            *c = rng.gen_range(0.15..0.55);
+        }
         let mut level = generate(1, &mut rng);
-        populate(&mut level, &mut rng, &mut next_id, bonus.luck, 0.0);
+        let u1 = rng.gen::<f32>() < unique_chance[0];
+        populate(&mut level, &mut rng, &mut next_id, bonus.luck, 0.0, u1, hp_mult);
+        chart_level(&mut level, bonus.carto);
         let cd = &CLASSES[class];
         let mut inv = Vec::new();
         for _ in 0..(1 + bonus.potions) {
@@ -316,6 +514,10 @@ impl Game {
         }
         if cd.mp >= 14 {
             inv.push(Item::Potion(Potion::Mana));
+        }
+        for _ in 0..bonus.scavenger {
+            let sc = *[Scroll::Teleport, Scroll::Mapping, Scroll::Fire, Scroll::Vision].choose(&mut rng).unwrap();
+            inv.push(Item::Scroll(sc));
         }
         let p = Player {
             x: level.up.0,
@@ -328,8 +530,8 @@ impl Game {
             max_mp: cd.mp + bonus.mp,
             level: 1,
             xp: 0,
-            wpn: Gear { def: cd.weapon, bonus: 0 },
-            arm: Gear { def: cd.armor, bonus: 0 },
+            wpn: Gear::plain(cd.weapon, bonus.heirloom),
+            arm: Gear::plain(cd.armor, bonus.heirloom),
             inv,
             next_act: 0.0,
             poison: 0,
@@ -341,6 +543,15 @@ impl Game {
             regen_ctr: 0,
             mp_ctr: 0,
             extra_dmg: 0,
+            ring: None,
+            neck: None,
+            undying_used: false,
+            slow: 0.0,
+            extra_ac: 0,
+            extra_crit: 0.0,
+            vision: 0,
+            fury: 0,
+            anchor_used: false,
         };
         let mut g = Game {
             rng,
@@ -367,12 +578,22 @@ impl Game {
             combat_heat: 0.0,
             room_size: 0.4,
             last_fight_msg: 0,
+            unique_chance,
+            found_uniques: Vec::new(),
+            difficulty,
+            slain: HashMap::new(),
+            free_turn: false,
         };
         g.enter_level();
+        g.announce_unique();
         g.msg(
             format!("You descend into the dungeon of GRAZZARK as a {}.", cd.name),
             Rgb(220, 200, 150),
         );
+        if difficulty > 0 {
+            let dd = &DIFFICULTIES[difficulty as usize];
+            g.msg(format!("Difficulty: {}. {}", dd.name, dd.desc), dd.color);
+        }
         g.msg(
             "Claim the Amulet on level 10 and return to the surface. Press ? for help.",
             Rgb(170, 170, 170),
@@ -380,8 +601,63 @@ impl Game {
         g
     }
 
+    // ------------------------------------------------------------ save / load
+
+    /// Write the run to disk so it can be continued later.
+    pub fn save(&self) -> bool {
+        if self.over.is_some() {
+            return false;
+        }
+        let p = save_path();
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        match serde_json::to_string(self) {
+            Ok(s) => {
+                let tmp = p.with_extension("json.tmp");
+                std::fs::write(&tmp, s).is_ok() && std::fs::rename(&tmp, &p).is_ok()
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Load a saved run. The save is removed once loaded, so a death is final.
+    pub fn load() -> Option<Game> {
+        let s = std::fs::read_to_string(save_path()).ok()?;
+        delete_save();
+        let mut g: Game = serde_json::from_str(&s).ok()?;
+        g.queued = None;
+        g.p.next_act = g.p.next_act.min(g.time);
+        g.enter_level_keep_facing();
+        g.msg("You return to the dungeon of GRAZZARK. Your journey continues...", Rgb(220, 200, 150));
+        Some(g)
+    }
+
+    fn enter_level_keep_facing(&mut self) {
+        let (px, py) = (self.p.x, self.p.y);
+        for m in self.level.monsters.iter_mut() {
+            m.rx = m.x as f32;
+            m.ry = m.y as f32;
+        }
+        self.refresh_view();
+        self.cam.x = px as f32 + 0.5;
+        self.cam.y = py as f32 + 0.5;
+        self.cam.ang = facing_angle(self.p.facing);
+    }
+
     // ------------------------------------------------------------ stats
 
+    pub fn diff(&self) -> &'static DiffDef {
+        &DIFFICULTIES[(self.difficulty as usize).min(DIFFICULTIES.len() - 1)]
+    }
+    /// How many items your pack holds.
+    pub fn inv_cap(&self) -> usize {
+        MAX_INV + 3 * self.bonus.pockets.max(0) as usize
+    }
+    /// Below a quarter of your health (Last Stand).
+    pub fn last_stand(&self) -> bool {
+        self.bonus.laststand > 0 && self.p.hp * 4 < self.p.max_hp
+    }
     pub fn cdef(&self) -> &'static ClassDef {
         &CLASSES[self.p.class]
     }
@@ -395,13 +671,70 @@ impl Game {
         self.cdef().hit + self.p.level + self.wdef().hit + self.p.wpn.bonus
     }
     pub fn player_ac(&self) -> i32 {
-        ARMORS[self.p.arm.def].ac + self.p.arm.bonus + self.bonus.ac
+        ARMORS[self.p.arm.def].ac
+            + self.p.arm.bonus
+            + self.bonus.ac
+            + self.p.extra_ac
+            + if self.last_stand() { self.bonus.laststand } else { 0 }
     }
     pub fn dmg_bonus(&self) -> i32 {
-        self.p.wpn.bonus + self.p.extra_dmg + self.bonus.dmg + self.p.level / 3
+        self.p.wpn.bonus + self.p.extra_dmg + self.bonus.dmg + self.p.level / 3 + if self.has(UPower::Wrath) { 3 } else { 0 }
     }
     pub fn crit_chance(&self) -> f32 {
-        self.wdef().crit + self.bonus.crit + if self.p.class == C_ROGUE { 0.08 } else { 0.0 }
+        self.wdef().crit
+            + self.bonus.crit
+            + if self.p.class == C_ROGUE { 0.08 } else { 0.0 }
+            + if self.has(UPower::Executioner) { 0.12 } else { 0.0 }
+            + self.p.extra_crit
+    }
+    /// How fast the dead rise while you carry the Amulet: the normal rate on
+    /// depth 10, faster and faster as you climb toward the surface.
+    pub fn respawn_factor(&self) -> f64 {
+        if !self.amulet_rage() {
+            return 1.0;
+        }
+        let d = self.depth.clamp(1, 10) as f64;
+        0.3 + 0.7 * (d - 1.0) / 9.0
+    }
+    /// Range of Monster Vision, in tiles.
+    pub const VISION_RANGE: i32 = 20;
+    /// Is monster `m` revealed by Monster Vision?
+    pub fn vision_shows(&self, m: &Monster) -> bool {
+        self.p.vision > 0 && m.alive && cheb(m.x, m.y, self.p.x, self.p.y) <= Self::VISION_RANGE
+    }
+    /// Indices into level.items of the items lying at your feet.
+    pub fn items_here(&self) -> Vec<usize> {
+        let (px, py) = (self.p.x, self.p.y);
+        self.level.items.iter().enumerate().filter(|(_, i)| i.x == px && i.y == py).map(|(i, _)| i).collect()
+    }
+    /// Unique items currently equipped.
+    pub fn equipped_uniques(&self) -> Vec<usize> {
+        [self.p.wpn.uniq, self.p.arm.uniq, self.p.ring, self.p.neck].iter().flatten().map(|&u| u as usize).collect()
+    }
+    /// Does an equipped unique grant this power?
+    pub fn has(&self, pw: UPower) -> bool {
+        [self.p.wpn.uniq, self.p.arm.uniq, self.p.ring, self.p.neck]
+            .iter()
+            .flatten()
+            .any(|&u| UNIQUES[u as usize].power == pw)
+    }
+    pub fn stealth(&self) -> i32 {
+        self.cdef().stealth + if self.has(UPower::Shadow) { 3 } else { 0 }
+    }
+    pub fn luck(&self) -> i32 {
+        self.bonus.luck + if self.has(UPower::Fortune) { 2 } else { 0 }
+    }
+    /// Mana cost of a skill after the Arcane power.
+    pub fn skill_cost(&self, s: Skill) -> i32 {
+        if self.has(UPower::Arcane) {
+            s.mp() / 2
+        } else {
+            s.mp()
+        }
+    }
+    /// Does the Amulet of GRAZZARK turn every hostile monster against the player?
+    pub fn amulet_rage(&self) -> bool {
+        self.p.has_amulet
     }
     pub fn skills(&self) -> Vec<Skill> {
         let mut v = self.cdef().skills.to_vec();
@@ -467,6 +800,34 @@ impl Game {
             }
         }
         self.room_size = open as f32 / tot as f32;
+        self.check_closet();
+    }
+
+    /// The first glimpse inside a monster closet.
+    fn check_closet(&mut self) {
+        if self.level.closet_found {
+            return;
+        }
+        let Some(r) = self.level.closet else { return };
+        let seen = (r.y..r.y + r.h).any(|y| (r.x..r.x + r.w).any(|x| self.level.is_visible(x, y)));
+        if !seen {
+            return;
+        }
+        self.level.closet_found = true;
+        let (px, py) = (self.p.x, self.p.y);
+        let n = self
+            .level
+            .monsters
+            .iter()
+            .filter(|m| m.alive && m.faction != Faction::Ally && r.contains(m.x, m.y))
+            .count();
+        if n < 4 {
+            return;
+        }
+        self.msg(format!("A MONSTER CLOSET! The room is packed with {} creatures...", n), Rgb(255, 110, 60));
+        self.fx.shake = self.fx.shake.max(0.6);
+        self.emit(Sfx::Rumble, px, py, 0.8);
+        self.combat_heat = self.combat_heat.max(0.8);
     }
 
     fn enter_level(&mut self) {
@@ -603,6 +964,7 @@ impl Game {
                 return;
             }
             if let Some(c) = self.player_action(a) {
+                let c = self.action_cost(c);
                 self.p.next_act = self.time + c;
             }
         } else {
@@ -610,6 +972,7 @@ impl Game {
                 self.p.next_act = self.time;
             }
             if let Some(c) = self.player_action(a) {
+                let c = self.action_cost(c);
                 let t = self.time + c;
                 self.p.next_act = t;
                 self.advance_to(t);
@@ -617,11 +980,21 @@ impl Game {
         }
     }
 
+    /// Final time cost of an action: frost slows it, Bloodlust erases it.
+    fn action_cost(&mut self, c: f64) -> f64 {
+        let slow = std::mem::take(&mut self.p.slow);
+        if std::mem::take(&mut self.free_turn) {
+            self.msg("Bloodlust! You strike again before the body hits the floor.", Rgb(255, 70, 70));
+            return 0.0;
+        }
+        c + slow
+    }
+
     pub fn toggle_realtime(&mut self) {
         self.realtime = !self.realtime;
         self.queued = None;
         if self.realtime {
-            self.msg("REAL-TIME combat engaged. The dungeon no longer waits for you!", Rgb(255, 120, 80));
+            self.msg("REAL-TIME combat engaged. The dungeon no longer waits for you! (Shift+R to switch back)", Rgb(255, 120, 80));
         } else {
             self.msg("Turn-based mode. Time moves only when you act.", Rgb(120, 200, 255));
         }
@@ -667,19 +1040,27 @@ impl Game {
         let (px, py) = (self.p.x, self.p.y);
 
         if self.p.poison > 0 {
-            self.p.poison -= 1;
+            self.p.poison -= if self.bonus.ironwill >= 1 { 2 } else { 1 };
+            self.p.poison = self.p.poison.max(0);
             if self.turns % 2 == 0 {
                 self.p.hp -= 1;
                 if self.p.hp <= 0 {
-                    self.p.hp = 0;
-                    let src = self.p.poison_src.clone();
-                    self.die(DeathCause::Poison(src));
-                    return;
+                    if self.bonus.anchor && !self.p.anchor_used {
+                        self.soul_anchor();
+                    } else {
+                        self.p.hp = 0;
+                        let src = self.p.poison_src.clone();
+                        self.die(DeathCause::Poison(src));
+                        return;
+                    }
                 }
             }
             if self.p.poison == 0 {
                 self.msg("The poison wears off.", Rgb(150, 255, 150));
             }
+        }
+        if self.has(UPower::Regrowth) && self.p.hp < self.p.max_hp && self.p.hp > 0 {
+            self.p.hp += 1;
         }
         self.p.regen_ctr += 1;
         let period = (10 - self.bonus.regen * 2 - self.p.level / 4).max(2);
@@ -692,11 +1073,24 @@ impl Game {
         self.p.mp_ctr += 1;
         let base_period: i32 = if self.p.class == C_MAGE || self.p.class == C_NECRO { 2 } else { 4 };
         let staff_bonus: i32 = if WEAPONS[self.p.wpn.def].art == WArt::Staff { 1 } else { 0 };
-        let mperiod = base_period - staff_bonus;
+        let arcane: i32 = if self.has(UPower::Arcane) { 1 } else { 0 };
+        let mperiod = base_period - staff_bonus - arcane;
         if self.p.mp_ctr >= mperiod.max(1) {
             self.p.mp_ctr = 0;
             if self.p.mp < self.p.max_mp {
                 self.p.mp += 1;
+            }
+        }
+        if self.p.fury > 0 {
+            self.p.fury -= 1;
+            if self.p.fury == 0 {
+                self.msg("Your battle fury subsides.", Rgb(200, 150, 120));
+            }
+        }
+        if self.p.vision > 0 {
+            self.p.vision -= 1;
+            if self.p.vision == 0 {
+                self.msg("Your monster vision fades.", Rgb(200, 160, 120));
             }
         }
         if self.p.invis > 0 {
@@ -729,7 +1123,8 @@ impl Game {
             let c = self.level.corpses.remove(ci);
             let id = self.new_id();
             let mut m = Monster::new(id, c.kind, c.x, c.y, self.time + 100.0);
-            m.awake = self.rng.gen_bool(0.5);
+            m.awake = self.amulet_rage() || self.rng.gen_bool(0.5);
+            m.scale_hp(self.diff().hp);
             self.level.monsters.push(m);
             self.emit(Sfx::Revive, c.x, c.y, 0.9);
             if cheb(c.x, c.y, px, py) < 16 {
@@ -809,7 +1204,18 @@ impl Game {
                 self.search_traps(0.3);
                 Some(100.0)
             }
-            Action::Pickup => self.pickup(),
+            Action::Pickup => match self.items_here().first() {
+                Some(&ii) => self.pickup_index(ii),
+                None => {
+                    self.msg("There is nothing here to pick up.", GREY);
+                    None
+                }
+            },
+            Action::PickupOne(k) => match self.items_here().get(k) {
+                Some(&ii) => self.pickup_index(ii),
+                None => None,
+            },
+            Action::PickupAll => self.pickup_all(),
             Action::Stairs => self.use_stairs(),
             Action::Skill(i) => {
                 let sk = self.skills();
@@ -867,13 +1273,25 @@ impl Game {
                 self.p.y = ny;
                 self.emit(Sfx::Step, nx, ny, 0.5);
                 self.after_player_move();
-                Some(100.0)
+                let base = if self.has(UPower::Swift) { 70.0 } else { 100.0 };
+                Some(base * (1.0 - 0.1 * self.bonus.fleet.clamp(0, 2) as f64))
             }
             _ => {
                 self.fx.shake = self.fx.shake.max(0.15);
                 None
             }
         }
+    }
+
+    /// Poison the player, unless Iron Will makes them immune.
+    fn add_poison(&mut self, turns: i32, src: String) -> bool {
+        if self.bonus.ironwill >= 2 {
+            self.msg("Your iron will shrugs off the poison.", Rgb(200, 220, 200));
+            return false;
+        }
+        self.p.poison += turns;
+        self.p.poison_src = src;
+        true
     }
 
     fn search_traps(&mut self, chance: f64) {
@@ -914,7 +1332,7 @@ impl Game {
             Tile::StairsUp => self.msg("A stairway leads up. (< or Enter)", Rgb(150, 200, 255)),
             _ => {}
         }
-        let r = (3 - self.cdef().stealth).max(1);
+        let r = (3 - self.stealth()).max(1);
         self.noise(px, py, r);
     }
 
@@ -940,8 +1358,7 @@ impl Game {
                 self.msg("A cloud of noxious gas erupts around you!", Rgb(140, 255, 90));
                 self.fx.mist(fx, fy, Rgb(120, 220, 60));
                 self.emit(Sfx::Voice(VoiceKind::Hiss, Mood::Alert), x, y, 0.9);
-                self.p.poison += 6 + d;
-                self.p.poison_src = "a poison gas trap".to_string();
+                self.add_poison(6 + d, "a poison gas trap".to_string());
                 self.fx.flash(Rgb(80, 200, 40), 0.4);
             }
             TrapKind::Fire => {
@@ -1023,12 +1440,19 @@ impl Game {
     }
 
     fn player_strike(&mut self, mi: usize, mult: f32, hit_mod: i32, custom: Option<(i32, i32)>) {
-        let (kind, mx, my, unaware) = {
+        let (kind, mx, my, unaware, name, elite, low) = {
             let m = &self.level.monsters[mi];
-            (m.kind, m.x, m.y, !m.awake || m.target != Some(Target::Player))
+            (
+                m.kind,
+                m.x,
+                m.y,
+                !m.awake || m.target != Some(Target::Player),
+                m.label(),
+                m.champion || m.is_unique() || m.def().boss,
+                m.hp * 10 < m.max_hp * 3,
+            )
         };
         let def = &MONSTERS[kind];
-        let name = def.name;
         let roll = self.rng.gen_range(1..=20);
         let hitb = self.hit_bonus() + hit_mod + if unaware { 4 } else { 0 };
         let tn = 10 + def.ac * 3 / 2;
@@ -1036,16 +1460,26 @@ impl Game {
         if roll == 20 || (roll != 1 && roll + hitb >= tn) {
             let (lo, hi) = custom.unwrap_or(self.wdef().dmg);
             let mut dmg = self.rng.gen_range(lo..=hi) + self.dmg_bonus();
-            dmg = ((dmg as f32) * mult).round() as i32;
-            let crit = roll == 20 || self.rng.gen::<f32>() < self.crit_chance();
+            dmg = ((dmg as f32) * mult * self.dmg_mult_vs(elite, low)).round() as i32;
+            // Mastered in the bestiary: you know exactly where to strike.
+            let mastered = self.bonus.mastered.iter().any(|n| n == def.name);
+            let crit_bonus = if mastered { 0.015 } else { 0.0 };
+            let crit = roll == 20 || self.rng.gen::<f32>() < self.crit_chance() + crit_bonus;
             let backstab = unaware && self.p.class == C_ROGUE;
             let mut col = Rgb(235, 235, 235);
             if backstab {
                 dmg *= 3;
                 col = Rgb(255, 80, 80);
             } else if crit {
-                dmg *= 2;
+                let k = if self.has(UPower::Executioner) { 3.0 } else { 2.0 };
+                let k = if mastered { k * 1.02 } else { k };
+                dmg = ((dmg as f32) * k).round() as i32;
                 col = Rgb(255, 210, 60);
+            }
+            if self.has(UPower::Flame) {
+                dmg += self.rng.gen_range(1..=6) + self.depth as i32 / 2;
+                self.fx.ichor(fx, fy, 0.5, 8, Rgb(255, 140, 30));
+                self.fx.light(fx, fy, [1.8, 0.8, 0.2], 1.5, 0.3);
             }
             dmg = dmg.max(1);
             if backstab {
@@ -1060,13 +1494,26 @@ impl Game {
                 self.level.monsters[mi].stun = 2;
                 self.msg(format!("The {} is stunned!", name), Rgb(200, 200, 255));
             }
+            if self.has(UPower::Frost) && self.rng.gen_bool(0.25) && self.level.monsters[mi].hp > dmg {
+                self.level.monsters[mi].stun = 2;
+                self.fx.ice(fx, fy);
+                self.msg(format!("The {} is frozen solid!", name), Rgb(150, 220, 255));
+            }
+            if self.has(UPower::Vampiric) {
+                let heal = (dmg / 5).max(1);
+                self.p.hp = (self.p.hp + heal).min(self.p.max_hp);
+            }
             let sfx = if def.death == DeathKind::Undead || def.ac >= 5 { Sfx::Clang } else { Sfx::Hit };
             self.emit(sfx, mx, my, 0.9);
             self.fx.text(fx, fy, 0.9, dmg.to_string(), col);
             if crit || backstab {
                 self.fx.shake = self.fx.shake.max(0.4);
             }
+            let mid = self.level.monsters[mi].id;
             self.damage_monster(mi, dmg, Src::Player);
+            if self.has(UPower::Storm) {
+                self.storm_arc(mid, mx, my, dmg / 2 + 1);
+            }
         } else {
             self.msg(format!("You miss the {}.", name), GREY);
             self.emit(Sfx::Miss, mx, my, 0.5);
@@ -1076,6 +1523,46 @@ impl Game {
         if m.alive && m.faction != Faction::Ally {
             m.awake = true;
             m.target = Some(Target::Player);
+        }
+    }
+
+    /// Damage multiplier from boons and buffs against a foe.
+    /// `elite`: champion, overlord, unique or boss. `low`: below 30% health.
+    pub fn dmg_mult_vs(&self, elite: bool, low: bool) -> f32 {
+        let mut k = 1.0;
+        if self.p.fury > 0 {
+            k *= 1.5;
+        }
+        if elite {
+            k *= 1.0 + 0.15 * self.bonus.hunter as f32;
+        }
+        if low {
+            k *= 1.0 + 0.15 * self.bonus.coup as f32;
+        }
+        if self.last_stand() {
+            k *= 1.0 + 0.15 * self.bonus.laststand as f32;
+        }
+        k
+    }
+
+    /// Stormcaller: lightning leaps from (x,y) to the nearest other foe.
+    fn storm_arc(&mut self, from_id: u32, x: i32, y: i32, dmg: i32) {
+        let mut best: Option<(usize, i32)> = None;
+        for (i, o) in self.level.monsters.iter().enumerate() {
+            if !o.alive || o.id == from_id || o.faction == Faction::Ally {
+                continue;
+            }
+            let d = cheb(x, y, o.x, o.y);
+            if d <= 3 && best.map_or(true, |b| d < b.1) && self.level.los(x, y, o.x, o.y) {
+                best = Some((i, d));
+            }
+        }
+        if let Some((oi, _)) = best {
+            let (ox, oy) = (self.level.monsters[oi].x, self.level.monsters[oi].y);
+            self.fx.bolt(x as f32 + 0.5, y as f32 + 0.5, ox as f32 + 0.5, oy as f32 + 0.5, 30.0, '~', Rgb(170, 200, 255), Some([0.8, 1.0, 2.2]), BoltEnd::Sparks(Rgb(200, 220, 255)));
+            self.emit(Sfx::Bolt, ox, oy, 0.6);
+            self.fx.text(ox as f32 + 0.5, oy as f32 + 0.5, 0.9, dmg.to_string(), Rgb(170, 200, 255));
+            self.damage_monster(oi, dmg, Src::Player);
         }
     }
 
@@ -1115,6 +1602,15 @@ impl Game {
             self.kill_monster(mi, src);
             true
         } else {
+            let m = &self.level.monsters[mi];
+            if def.abil.contains(&MAbil::Berserk) && !m.raged && m.hp * 2 < m.max_hp {
+                self.level.monsters[mi].raged = true;
+                self.emit(Sfx::Voice(def.voice, Mood::Alert), x, y, 1.0);
+                self.fx.ichor(fx, fy, 0.6, 16, Rgb(255, 40, 20));
+                if self.level.is_visible(x, y) || cheb(x, y, self.p.x, self.p.y) <= 10 {
+                    self.msg(format!("{} flies into a BERSERK RAGE!", cap(def.name)), Rgb(255, 70, 50));
+                }
+            }
             if self.rng.gen_bool(0.4) {
                 self.emit(Sfx::Voice(def.voice, Mood::Hurt), x, y, 0.7);
             }
@@ -1123,16 +1619,23 @@ impl Game {
     }
 
     fn kill_monster(&mut self, mi: usize, src: Src) {
-        let (kind, x, y, faction, summoned) = {
+        let (kind, x, y, faction, summoned, champion, overlord, label) = {
             let m = &mut self.level.monsters[mi];
             m.alive = false;
-            (m.kind, m.x, m.y, m.faction, m.summoned)
+            (m.kind, m.x, m.y, m.faction, m.summoned, m.champion, m.overlord, m.label())
         };
         let def = &MONSTERS[kind];
+        let unique = def.unique > 0;
         let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
         let ally = faction == Faction::Ally;
         if self.level.is_visible(x, y) {
-            let label = if ally { format!("Your {}", def.name) } else { cap(&the_name(kind)) };
+            let label = if ally {
+                format!("Your {}", label)
+            } else if def.boss || unique {
+                cap(def.name)
+            } else {
+                format!("The {}", label)
+            };
             let verb = if def.death == DeathKind::Undead { "is destroyed" } else { "dies" };
             let col = if ally { Rgb(255, 150, 100) } else { Rgb(255, 220, 140) };
             self.msg(format!("{} {}!", label, verb), col);
@@ -1150,7 +1653,7 @@ impl Game {
             }
             _ => self.fx.blood(fx, fy, 0.5, 22),
         }
-        if def.death != DeathKind::Undead {
+        if def.death != DeathKind::Undead && self.level.inb(x, y) {
             let i = self.level.idx(x, y);
             self.level.blood[i] = (self.level.blood[i] + 1.0).min(3.0);
             for &(dx, dy) in DIRS.iter() {
@@ -1160,37 +1663,248 @@ impl Game {
                 }
             }
         }
-        if !def.boss {
+        // Bosses and uniques leave no corpse: they never rise again and cannot be raised.
+        if !def.boss && !unique {
             let revive_at = if def.revive.1 > 0.0 {
-                self.time + self.rng.gen_range(def.revive.0..def.revive.1) * 100.0
+                let delay = self.rng.gen_range(def.revive.0..def.revive.1) * 100.0;
+                self.time + delay * self.respawn_factor()
             } else {
                 -1.0
             };
             self.level.corpses.push(Corpse { kind, x, y, revive_at });
         }
-        let by_ally = match src {
-            Src::Mon(id) => self.level.monsters.iter().any(|m| m.id == id && m.faction == Faction::Ally),
-            _ => false,
+        let killer_idx = match src {
+            Src::Mon(id) => self.level.monsters.iter().position(|m| m.id == id && m.alive),
+            _ => None,
         };
-        if !ally && (src == Src::Player || by_ally) {
-            let xp = if by_ally { (def.xp + 1) / 2 } else { def.xp };
+        let by_ally = killer_idx.map_or(false, |k| self.level.monsters[k].faction == Faction::Ally);
+        let by_player = src == Src::Player;
+        if !ally && (by_player || by_ally) {
+            let mut xp = if by_ally { (def.xp + 1) / 2 } else { def.xp };
+            if overlord {
+                xp *= 5;
+            } else if champion {
+                xp *= 3;
+            }
             self.gain_xp(xp);
-            if src == Src::Player {
+            *self.slain.entry(def.name.to_string()).or_insert(0) += 1;
+            if by_player {
                 self.kills += 1;
+                if self.bonus.leech > 0 {
+                    self.p.mp = (self.p.mp + self.bonus.leech).min(self.p.max_mp);
+                }
+                if self.bonus.bloodlust > 0 && self.rng.gen::<f32>() < 0.10 * self.bonus.bloodlust as f32 {
+                    self.free_turn = true;
+                }
                 if self.bonus.siphon > 0 {
                     self.p.hp = (self.p.hp + self.bonus.siphon).min(self.p.max_hp);
                 }
+                if self.has(UPower::Soulfeast) {
+                    self.p.hp = (self.p.hp + 3).min(self.p.max_hp);
+                    self.p.mp = (self.p.mp + 2).min(self.p.max_mp);
+                }
             }
         }
-        if !ally && !summoned && self.rng.gen::<f32>() < 0.10 + self.bonus.luck as f32 * 0.04 {
-            let it = random_item(self.depth, &mut self.rng, self.bonus.luck);
-            self.level.items.push(FloorItem { x, y, item: it });
+
+        // Infighting: the victor may grow into a champion.
+        // A champion that slays another champion may become an overlord.
+        if let Some(k) = killer_idx {
+            let km = &self.level.monsters[k];
+            if !km.champion && !km.summoned && !km.def().boss && !km.is_unique() && self.rng.gen_bool(0.35) {
+                self.make_champion(k);
+            } else if km.champion && !km.overlord && champion && self.rng.gen_bool(0.5) {
+                self.make_overlord(k);
+            }
+        }
+
+        let drop_at = self.drop_spot(x, y);
+        let luck = self.luck();
+        if !ally && !summoned && !unique {
+            let chance = 0.10 + luck as f32 * 0.04 + if self.has(UPower::Fortune) { 0.15 } else { 0.0 };
+            if self.rng.gen::<f32>() < chance {
+                let it = random_item(self.depth, &mut self.rng, luck);
+                self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item: it });
+            }
+        }
+        if champion && !ally && by_player {
+            self.champion_slain(x, y, &label, drop_at, overlord);
+        }
+        if unique && !ally {
+            let sig = def.sig;
+            self.found_uniques.push(sig);
+            let item = unique_item(sig);
+            self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item });
+            self.msg(format!("{} is no more! {} clatters to the floor.", cap(def.name), item.name()), Rgb(220, 150, 255));
+            self.fx.ring(fx, fy, 50, 3.0, Rgb(200, 120, 255), &['*', '+', '\''], 0.8);
+            self.fx.light(fx, fy, [1.6, 0.8, 2.2], 4.0, 1.0);
+            self.fx.shake = self.fx.shake.max(1.0);
+            self.emit(Sfx::Amulet, x, y, 0.8);
         }
         if def.boss {
             self.msg("VORTH, WARDEN OF GRAZZARK, FALLS! The Amulet lies unguarded!", Rgb(255, 80, 60));
             self.fx.explosion(fx, fy, Rgb(255, 60, 30));
             self.fx.shake = 2.0;
             self.emit(Sfx::Explosion, x, y, 1.0);
+        }
+    }
+
+    /// Where loot from a death at (x,y) lands: ghosts can die inside walls.
+    fn drop_spot(&self, x: i32, y: i32) -> (i32, i32) {
+        if self.level.tile(x, y).walkable() {
+            return (x, y);
+        }
+        for r in 1..6 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if self.level.tile(x + dx, y + dy).walkable() {
+                        return (x + dx, y + dy);
+                    }
+                }
+            }
+        }
+        (self.p.x, self.p.y)
+    }
+
+    /// A monster that won a fight swells with power.
+    pub fn make_champion(&mut self, k: usize) {
+        let (x, y, name, voice) = {
+            let m = &mut self.level.monsters[k];
+            m.champion = true;
+            m.max_hp = (m.max_hp as f32 * 1.6).round() as i32 + 4;
+            m.hp = m.max_hp;
+            (m.x, m.y, m.def().name, m.def().voice)
+        };
+        self.emit(Sfx::Voice(voice, Mood::Alert), x, y, 1.0);
+        let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+        self.fx.ring(fx, fy, 30, 1.5, Rgb(255, 190, 60), &['*', '+', '.'], 0.6);
+        self.fx.light(fx, fy, [2.0, 1.4, 0.4], 2.5, 0.6);
+        let ally = self.level.monsters[k].faction == Faction::Ally;
+        if self.level.is_visible(x, y) {
+            let who = if ally { format!("Your {}", name) } else { format!("The {}", name) };
+            self.msg(format!("{} roars in triumph and swells with power: it has become a CHAMPION!", who), Rgb(255, 190, 70));
+        } else if cheb(x, y, self.p.x, self.p.y) <= 16 {
+            self.msg("A triumphant cry is heard!", Rgb(220, 170, 90));
+        }
+    }
+
+    /// A champion that slew another champion becomes an overlord.
+    pub fn make_overlord(&mut self, k: usize) {
+        let (x, y, name, voice) = {
+            let m = &mut self.level.monsters[k];
+            m.champion = true;
+            m.overlord = true;
+            m.max_hp = (m.max_hp as f32 * 1.5).round() as i32 + 10;
+            m.hp = m.max_hp;
+            (m.x, m.y, m.def().name, m.def().voice)
+        };
+        self.emit(Sfx::Voice(voice, Mood::Alert), x, y, 1.0);
+        self.emit(Sfx::Rumble, x, y, 0.8);
+        let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+        self.fx.ring(fx, fy, 50, 2.5, Rgb(255, 40, 70), &['#', '*', '+'], 0.8);
+        self.fx.light(fx, fy, [2.4, 0.3, 0.5], 3.5, 0.9);
+        if self.level.is_visible(x, y) {
+            self.fx.shake = self.fx.shake.max(0.8);
+            self.msg(
+                format!("The champion {} devours its rival's power and rises as an OVERLORD!", name),
+                Rgb(255, 60, 80),
+            );
+        } else if cheb(x, y, self.p.x, self.p.y) <= 20 {
+            self.msg("A terrible, triumphant bellow shakes the dungeon. Something has grown mightier...", Rgb(230, 80, 90));
+        }
+    }
+
+    /// Slaying an overlord grants a permanent boost for the rest of the run.
+    fn steal_power(&mut self) {
+        let txt = match self.rng.gen_range(0..5) {
+            0 => {
+                self.p.max_hp += 10;
+                self.p.hp += 10;
+                "+10 maximum health"
+            }
+            1 => {
+                self.p.extra_dmg += 2;
+                "+2 damage"
+            }
+            2 => {
+                self.p.extra_ac += 1;
+                "+1 armour class"
+            }
+            3 => {
+                self.p.max_mp += 8;
+                self.p.mp += 8;
+                "+8 maximum mana"
+            }
+            _ => {
+                self.p.extra_crit += 0.05;
+                "+5% critical chance"
+            }
+        };
+        self.msg(format!("You steal the overlord's power: {} for the rest of this descent!", txt), Rgb(255, 90, 110));
+        let (px, py) = (self.p.x, self.p.y);
+        self.fx.levelup(px as f32 + 0.5, py as f32 + 0.5);
+        self.emit(Sfx::LevelUp, px, py, 0.9);
+    }
+
+    /// Rewards and terror for slaying a champion at (x,y).
+    fn champion_slain(&mut self, x: i32, y: i32, label: &str, drop_at: (i32, i32), overlord: bool) {
+        let (px, py) = (self.p.x, self.p.y);
+        let heal = if overlord { 12 + self.p.max_hp * 25 / 100 } else { 8 + self.p.max_hp * 15 / 100 };
+        self.p.hp = (self.p.hp + heal).min(self.p.max_hp);
+        self.fx.heal(px as f32 + 0.5, py as f32 + 0.5);
+        self.msg(format!("You slay the {}! Its strength flows into you (+{} HP).", label, heal), Rgb(255, 200, 90));
+        if overlord {
+            self.steal_power();
+        }
+
+        // Every monster that saw the kill, or heard the death scream within
+        // 10 tiles, flees in terror.
+        let mut scared = 0;
+        for i in 0..self.level.monsters.len() {
+            let (mx, my, ok, sight) = {
+                let m = &self.level.monsters[i];
+                let d = m.def();
+                (m.x, m.y, m.alive && m.faction != Faction::Ally && !d.boss && !m.is_unique(), d.sight as f32)
+            };
+            if !ok {
+                continue;
+            }
+            let heard = cheb(mx, my, x, y) <= 10;
+            let saw = (dist(mx, my, x, y) <= sight && self.level.los(mx, my, x, y))
+                || (dist(mx, my, px, py) <= sight && self.level.los(mx, my, px, py));
+            if heard || saw {
+                let turns = self.rng.gen_range(5..=20);
+                let m = &mut self.level.monsters[i];
+                m.awake = true;
+                m.fear = m.fear.max(turns);
+                m.target = None;
+                scared += 1;
+            }
+        }
+        if scared > 0 {
+            self.msg("Its death scream echoes through the halls. Nearby monsters flee in terror!", Rgb(255, 160, 90));
+        }
+
+        // Champions carry treasure from deeper down.
+        let luck = self.luck();
+        let deeper = self.depth + 2;
+        if self.rng.gen_bool(0.65) {
+            let it = random_gear(deeper, &mut self.rng, luck);
+            self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item: it });
+        }
+        if self.rng.gen_bool(0.35) {
+            let it = random_item(deeper, &mut self.rng, luck);
+            self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item: it });
+        }
+        // On the deepest floor, champions may carry a unique treasure.
+        if self.depth == 10 && self.rng.gen_bool(0.25) {
+            let pool: Vec<usize> = (N_SIGNATURE..UNIQUES.len()).filter(|u| !self.found_uniques.contains(u)).collect();
+            if let Some(&u) = pool.choose(&mut self.rng) {
+                self.found_uniques.push(u);
+                let item = unique_item(u);
+                self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item });
+                self.msg(format!("Something precious falls from the champion: {}!", item.name()), Rgb(220, 150, 255));
+                self.emit(Sfx::Amulet, x, y, 0.7);
+            }
         }
     }
 
@@ -1239,7 +1953,23 @@ impl Game {
         if dmg <= 0 {
             return;
         }
+        if self.has(UPower::Stoneskin) {
+            dmg = (dmg - 2).max(1);
+        }
         self.p.hp -= dmg;
+        if self.p.hp <= 0 && self.has(UPower::Undying) && !self.p.undying_used {
+            self.p.undying_used = true;
+            self.p.hp = 1;
+            self.msg("The Bride's locket weeps cold tears... death releases you! (1 HP)", Rgb(180, 220, 255));
+            self.fx.flash(Rgb(180, 220, 255), 0.7);
+            let (px, py) = (self.p.x, self.p.y);
+            self.fx.mist(px as f32 + 0.5, py as f32 + 0.5, Rgb(180, 220, 255));
+            self.emit(Sfx::Voice(VoiceKind::Wail, Mood::Hurt), px, py, 0.7);
+        }
+        if self.p.hp <= 0 && self.bonus.anchor && !self.p.anchor_used {
+            self.soul_anchor();
+            return;
+        }
         let amt = (0.3 + dmg as f32 / self.p.max_hp.max(1) as f32).min(0.8);
         self.fx.flash(Rgb(200, 0, 0), amt);
         self.fx.shake = self.fx.shake.max(if crush { 1.4 } else { 0.5 });
@@ -1249,6 +1979,27 @@ impl Game {
         if self.p.hp <= 0 {
             self.p.hp = 0;
             self.die(cause);
+        }
+    }
+
+    /// The Soul Anchor drags you back from death once per descent.
+    fn soul_anchor(&mut self) {
+        self.p.anchor_used = true;
+        self.p.hp = (self.p.max_hp * 2 / 5).max(1);
+        self.p.poison = 0;
+        let (px, py) = (self.p.x, self.p.y);
+        let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+        self.msg("Your soul is anchored to this world! You tear yourself back from death!", Rgb(200, 160, 255));
+        self.fx.flash(Rgb(200, 150, 255), 0.9);
+        self.fx.ring(fx, fy, 60, 4.0, Rgb(200, 140, 255), &['*', '+', '@'], 0.8);
+        self.fx.light(fx, fy, [1.8, 1.2, 2.4], 5.0, 1.2);
+        self.fx.shake = self.fx.shake.max(1.2);
+        self.emit(Sfx::Amulet, px, py, 1.0);
+        for m in self.level.monsters.iter_mut() {
+            if m.alive && m.faction != Faction::Ally && !m.def().boss && cheb(m.x, m.y, px, py) <= 5 {
+                m.fear = m.fear.max(6);
+                m.target = None;
+            }
         }
     }
 
@@ -1304,10 +2055,18 @@ impl Game {
             self.msg(format!("{} is not ready ({} turns).", s.name(), wait), GREY);
             return None;
         }
-        if self.p.mp < s.mp() {
-            self.msg(format!("Not enough mana for {}.", s.name()), Rgb(120, 140, 255));
-            return None;
-        }
+        let cost = self.skill_cost(s);
+        // Blood Magic: pay the shortfall in health, never fatally.
+        let blood = if self.p.mp < cost {
+            let need = (cost - self.p.mp) * 2;
+            if !self.bonus.bloodmagic || self.p.hp <= need {
+                self.msg(format!("Not enough mana for {}.", s.name()), Rgb(120, 140, 255));
+                return None;
+            }
+            need
+        } else {
+            0
+        };
         let (px, py) = (self.p.x, self.p.y);
         let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
         let f = self.p.facing;
@@ -1556,9 +2315,13 @@ impl Game {
                 self.emit(Sfx::Explosion, px, py, 0.9);
                 self.msg("Soulfire bursts from your body!", Rgb(210, 150, 255));
                 let ids = self.monsters_within(px, py, 2.9, true);
+                let heal = ids.len() as i32 * 2;
                 for mi in ids {
                     let dmg = (0..3).map(|_| self.rng.gen_range(1..=6)).sum::<i32>() + lvl;
                     self.damage_monster(mi, dmg, Src::Player);
+                }
+                if heal > 0 {
+                    self.p.hp = (self.p.hp + heal).min(self.p.max_hp);
                 }
                 true
             }
@@ -1573,14 +2336,299 @@ impl Game {
             Skill::SecondWind => {
                 let amt = self.p.max_hp / 2;
                 self.p.hp = (self.p.hp + amt).min(self.p.max_hp);
+                self.p.poison = 0;
                 self.fx.heal(fx, fy);
                 self.emit(Sfx::Heal, px, py, 0.9);
                 self.msg(format!("You catch your second wind (+{}).", amt), Rgb(150, 255, 150));
                 true
             }
+            Skill::BattleCry => {
+                self.p.fury = 8;
+                self.fx.shake = self.fx.shake.max(1.0);
+                self.fx.ring(fx, fy, 50, 5.0, Rgb(255, 120, 60), &['!', '>', '<', '~'], 0.6);
+                self.fx.flash(Rgb(255, 90, 40), 0.3);
+                self.emit(Sfx::Voice(VoiceKind::Roar, Mood::Alert), px, py, 1.0);
+                self.emit(Sfx::Stomp, px, py, 0.8);
+                let ids = self.monsters_within(px, py, 5.5, true);
+                let mut fled = 0;
+                for mi in ids {
+                    let m = &mut self.level.monsters[mi];
+                    if m.def().boss || m.def().unique > 0 {
+                        continue;
+                    }
+                    m.fear = m.fear.max(4 + (mi as i32 % 3));
+                    m.target = None;
+                    fled += 1;
+                }
+                self.msg(
+                    if fled > 0 { "You bellow a terrible battle cry! Your foes quail, and fury fills you!" } else { "You bellow a terrible battle cry! Fury fills you!" },
+                    Rgb(255, 140, 80),
+                );
+                self.noise(px, py, 14);
+                true
+            }
+            Skill::Shadowstep => {
+                let sight = self.sight() as f32;
+                let mut best: Option<(usize, f32)> = None;
+                for (i, m) in self.level.monsters.iter().enumerate() {
+                    if !m.alive || m.faction == Faction::Ally || !self.level.is_visible(m.x, m.y) {
+                        continue;
+                    }
+                    let d = dist(px, py, m.x, m.y);
+                    if d <= 6.5f32.min(sight) && d > 1.5 && best.map_or(true, |b| d < b.1) {
+                        best = Some((i, d));
+                    }
+                }
+                let spot = best.and_then(|(mi, _)| {
+                    let (mx, my) = (self.level.monsters[mi].x, self.level.monsters[mi].y);
+                    let (sx, sy) = ((mx - px).signum(), (my - py).signum());
+                    let behind = (mx + sx, my + sy);
+                    let ok = |g: &Game, x: i32, y: i32| {
+                        g.level.tile(x, y).walkable() && g.level.monster_at(x, y).is_none() && !(x == px && y == py)
+                    };
+                    if ok(self, behind.0, behind.1) {
+                        Some((mi, behind))
+                    } else {
+                        DIRS.iter().map(|&(dx, dy)| (mx + dx, my + dy)).find(|&(x, y)| ok(self, x, y)).map(|p| (mi, p))
+                    }
+                });
+                match spot {
+                    None => {
+                        self.msg("There is no foe in sight to step behind.", GREY);
+                        false
+                    }
+                    Some((mi, (x, y))) => {
+                        self.fx.mist(fx, fy, Rgb(70, 70, 110));
+                        self.p.x = x;
+                        self.p.y = y;
+                        self.cam.x = x as f32 + 0.5;
+                        self.cam.y = y as f32 + 0.5;
+                        let (mx, my) = (self.level.monsters[mi].x, self.level.monsters[mi].y);
+                        if let Some(d) = DIRS.iter().position(|&d| d == ((mx - x).signum(), (my - y).signum())) {
+                            self.p.facing = d as i32;
+                        }
+                        self.fx.mist(x as f32 + 0.5, y as f32 + 0.5, Rgb(70, 70, 110));
+                        self.emit(Sfx::Blink, x, y, 0.6);
+                        self.msg("You step through the shadows!", Rgb(160, 160, 220));
+                        // It never saw you coming.
+                        self.level.monsters[mi].target = None;
+                        self.refresh_view();
+                        self.cam.swing = 1.0;
+                        self.player_strike(mi, 1.0, 4, None);
+                        true
+                    }
+                }
+            }
+            Skill::SmokeBomb => {
+                self.fx.mist(fx, fy, Rgb(120, 120, 130));
+                self.fx.burst(fx, fy, 0.3, 50, Rgb(110, 110, 120), &['%', '@', 'o', '.'], 1.2, 2.5, -0.2, false);
+                self.emit(Sfx::Explosion, px, py, 0.4);
+                let ids: Vec<usize> = self
+                    .level
+                    .monsters
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.alive && m.faction != Faction::Ally && cheb(m.x, m.y, px, py) <= 4)
+                    .map(|(i, _)| i)
+                    .collect();
+                for mi in ids {
+                    let m = &mut self.level.monsters[mi];
+                    m.target = None;
+                    m.last_known = None;
+                    if !m.def().boss {
+                        m.stun = m.stun.max(2);
+                    }
+                }
+                self.p.invis = self.p.invis.max(5);
+                self.msg("You hurl a smoke bomb and vanish in the choking cloud!", Rgb(170, 170, 190));
+                true
+            }
+            Skill::ChainLightning => {
+                let first = self.fire_line(f, 8).2.or_else(|| {
+                    self.level
+                        .monsters
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, m)| m.alive && m.faction != Faction::Ally && self.level.is_visible(m.x, m.y) && dist(px, py, m.x, m.y) <= 6.5)
+                        .min_by(|a, b| dist(px, py, a.1.x, a.1.y).partial_cmp(&dist(px, py, b.1.x, b.1.y)).unwrap())
+                        .map(|(i, _)| i)
+                });
+                match first {
+                    None => {
+                        self.msg("There is nothing for the lightning to strike.", GREY);
+                        false
+                    }
+                    Some(mi) => {
+                        self.msg("Lightning leaps from your fingertips!", Rgb(170, 200, 255));
+                        let mut dmg = (0..3).map(|_| self.rng.gen_range(1..=6)).sum::<i32>() + lvl;
+                        let mut hit: Vec<u32> = Vec::new();
+                        let (mut fx0, mut fy0) = (px, py);
+                        let mut cur = Some(mi);
+                        while let Some(ci) = cur {
+                            let (cx, cy, cid) = {
+                                let m = &self.level.monsters[ci];
+                                (m.x, m.y, m.id)
+                            };
+                            hit.push(cid);
+                            self.fx.bolt(fx0 as f32 + 0.5, fy0 as f32 + 0.5, cx as f32 + 0.5, cy as f32 + 0.5, 30.0, '~', Rgb(170, 200, 255), Some([0.8, 1.0, 2.2]), BoltEnd::Sparks(Rgb(200, 220, 255)));
+                            self.emit(Sfx::Bolt, cx, cy, 0.7);
+                            self.fx.text(cx as f32 + 0.5, cy as f32 + 0.5, 0.9, dmg.to_string(), Rgb(170, 200, 255));
+                            self.damage_monster(ci, dmg, Src::Player);
+                            if hit.len() >= 5 {
+                                break;
+                            }
+                            dmg = (dmg * 4 / 5).max(1);
+                            fx0 = cx;
+                            fy0 = cy;
+                            cur = self
+                                .level
+                                .monsters
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, o)| o.alive && o.faction != Faction::Ally && !hit.contains(&o.id) && cheb(o.x, o.y, cx, cy) <= 4 && self.level.los(cx, cy, o.x, o.y))
+                                .min_by_key(|(_, o)| cheb(o.x, o.y, cx, cy))
+                                .map(|(i, _)| i);
+                        }
+                        self.noise(px, py, 8);
+                        true
+                    }
+                }
+            }
+            Skill::Smite => {
+                let (hx, hy, mi) = self.fire_line(f, 8);
+                match mi {
+                    None => {
+                        self.msg("There is nothing ahead to smite.", GREY);
+                        false
+                    }
+                    Some(mi) => {
+                        let unholy = matches!(self.level.monsters[mi].def().faction, Faction::Undead | Faction::Demon);
+                        let mut dmg = (0..2).map(|_| self.rng.gen_range(1..=8)).sum::<i32>() + lvl + 2;
+                        if unholy {
+                            dmg *= 2;
+                        }
+                        let (tx, ty) = (hx as f32 + 0.5, hy as f32 + 0.5);
+                        self.fx.ring(tx, ty, 30, 1.2, Rgb(255, 245, 180), &['+', '|', '*'], 0.6);
+                        self.fx.light(tx, ty, [2.6, 2.4, 1.6], 3.0, 0.6);
+                        self.fx.flash(Rgb(255, 250, 210), 0.25);
+                        self.emit(Sfx::Heal, hx, hy, 1.0);
+                        self.fx.text(tx, ty, 0.9, dmg.to_string(), Rgb(255, 240, 150));
+                        let name = self.level.monsters[mi].label();
+                        self.msg(
+                            if unholy { format!("Holy fire SEARS the unholy {} ({})!", name, dmg) } else { format!("Holy fire smites the {} ({}).", name, dmg) },
+                            Rgb(255, 240, 150),
+                        );
+                        self.damage_monster(mi, dmg, Src::Player);
+                        self.p.hp = (self.p.hp + dmg / 4).min(self.p.max_hp);
+                        true
+                    }
+                }
+            }
+            Skill::PiercingShot => {
+                let (dx, dy) = DIRS[f as usize];
+                let custom = if self.wdef().range > 0 { None } else { Some((2, 8)) };
+                let mut end = (px, py);
+                let mut targets = Vec::new();
+                for k in 1..=10 {
+                    let (x, y) = (px + dx * k, py + dy * k);
+                    if self.level.tile(x, y).opaque() {
+                        break;
+                    }
+                    end = (x, y);
+                    if let Some(mi) = self.level.monster_at(x, y) {
+                        if self.level.monsters[mi].faction != Faction::Ally {
+                            targets.push(mi);
+                        }
+                    }
+                }
+                let ch = ['|', '/', '-', '\\', '|', '/', '-', '\\'][f as usize];
+                self.fx.bolt(fx, fy, end.0 as f32 + 0.5, end.1 as f32 + 0.5, 30.0, ch, Rgb(255, 230, 160), Some([1.2, 1.0, 0.5]), BoltEnd::Sparks(Rgb(255, 230, 160)));
+                self.emit(Sfx::Arrow, px, py, 0.9);
+                self.msg("You loose an arrow that tears through everything in its path!", Rgb(230, 230, 150));
+                for mi in targets {
+                    self.player_strike(mi, 1.25, 3, custom);
+                }
+                self.noise(px, py, 5);
+                true
+            }
+            Skill::RainOfArrows => {
+                let (dx, dy) = DIRS[f as usize];
+                let mut c = (px, py);
+                for k in 1..=5 {
+                    let (x, y) = (px + dx * k, py + dy * k);
+                    if self.level.tile(x, y).opaque() {
+                        break;
+                    }
+                    c = (x, y);
+                    if self.level.monster_at(x, y).is_some() {
+                        break;
+                    }
+                }
+                let (cx, cy) = (c.0 as f32 + 0.5, c.1 as f32 + 0.5);
+                for _ in 0..8 {
+                    let ox = self.rng.gen_range(-1.2..1.2);
+                    let oy = self.rng.gen_range(-1.2..1.2);
+                    self.fx.bolt(fx, fy, cx + ox, cy + oy, 18.0 + self.rng.gen_range(0.0..8.0), '\'', Rgb(225, 205, 160), None, BoltEnd::Sparks(Rgb(200, 190, 160)));
+                }
+                self.emit(Sfx::Arrow, px, py, 1.0);
+                self.emit(Sfx::Arrow, c.0, c.1, 0.8);
+                self.msg("A rain of arrows falls upon your foes!", Rgb(200, 230, 160));
+                let ids: Vec<usize> = self
+                    .level
+                    .monsters
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.alive && m.faction != Faction::Ally && cheb(m.x, m.y, c.0, c.1) <= 1)
+                    .map(|(i, _)| i)
+                    .collect();
+                for mi in ids {
+                    let dmg = (0..2).map(|_| self.rng.gen_range(1..=6)).sum::<i32>() + lvl / 2 + 1;
+                    let (mx, my) = (self.level.monsters[mi].x, self.level.monsters[mi].y);
+                    self.fx.text(mx as f32 + 0.5, my as f32 + 0.5, 0.9, dmg.to_string(), Rgb(230, 220, 170));
+                    self.damage_monster(mi, dmg, Src::Player);
+                }
+                self.noise(px, py, 6);
+                true
+            }
+            Skill::CorpseExplosion => {
+                let mut picks: Vec<usize> = self
+                    .level
+                    .corpses
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| dist(c.x, c.y, px, py) <= 6.5 && self.level.los(px, py, c.x, c.y))
+                    .map(|(i, _)| i)
+                    .collect();
+                picks.truncate(6);
+                if picks.is_empty() {
+                    self.msg("There are no corpses in reach to detonate.", GREY);
+                    false
+                } else {
+                    self.msg(format!("You detonate {} corpse{}!", picks.len(), if picks.len() == 1 { "" } else { "s" }), Rgb(170, 255, 140));
+                    let spots: Vec<(i32, i32)> = picks.iter().map(|&i| (self.level.corpses[i].x, self.level.corpses[i].y)).collect();
+                    for &i in picks.iter().rev() {
+                        self.level.corpses.remove(i);
+                    }
+                    for (x, y) in spots {
+                        self.fx.explosion(x as f32 + 0.5, y as f32 + 0.5, Rgb(140, 255, 90));
+                        self.fx.blood(x as f32 + 0.5, y as f32 + 0.5, 0.6, 16);
+                        self.emit(Sfx::Explosion, x, y, 0.8);
+                        self.explode(x, y, 2, 2 + lvl / 2, DeathCause::OwnFire, false);
+                    }
+                    self.fx.shake = self.fx.shake.max(0.8);
+                    true
+                }
+            }
         };
         if ok {
-            self.p.mp -= s.mp();
+            if blood > 0 {
+                self.p.hp -= blood;
+                self.p.mp = 0;
+                self.msg(format!("Your blood fuels the spell (-{} HP).", blood), Rgb(200, 40, 60));
+                self.fx.blood(fx, fy, 0.3, 8);
+            } else {
+                self.p.mp -= cost;
+            }
             self.p.cds.insert(s, self.time + s.cooldown() * 100.0);
             self.combat_heat = self.combat_heat.max(0.5);
             Some(100.0)
@@ -1589,12 +2637,37 @@ impl Game {
         }
     }
 
-    fn pickup(&mut self) -> Option<f64> {
+    /// Gather everything here for one turn.
+    fn pickup_all(&mut self) -> Option<f64> {
+        let mut took = false;
+        loop {
+            let here = self.items_here();
+            // Pick from the back so earlier indices stay valid; stop when full.
+            let Some(&ii) = here.iter().rev().find(|&&i| self.level.items[i].item == Item::Amulet || self.p.inv.len() < self.inv_cap()) else {
+                break;
+            };
+            if self.pickup_index(ii).is_none() {
+                break;
+            }
+            took = true;
+        }
+        if !self.items_here().is_empty() && took {
+            self.msg("Your pack is full; some items remain.", GREY);
+        }
+        if took {
+            Some(100.0)
+        } else {
+            if self.items_here().is_empty() {
+                self.msg("There is nothing here to pick up.", GREY);
+            } else {
+                self.msg("Your pack is full.", GREY);
+            }
+            None
+        }
+    }
+
+    fn pickup_index(&mut self, ii: usize) -> Option<f64> {
         let (px, py) = (self.p.x, self.p.y);
-        let Some(ii) = self.level.items.iter().position(|i| i.x == px && i.y == py) else {
-            self.msg("There is nothing here to pick up.", GREY);
-            return None;
-        };
         let item = self.level.items[ii].item;
         if item == Item::Amulet {
             self.level.items.remove(ii);
@@ -1607,15 +2680,21 @@ impl Game {
             self.emit(Sfx::Amulet, px, py, 1.0);
             self.msg("You seize the AMULET OF GRAZZARK! It throbs with dark power.", Rgb(255, 215, 60));
             self.msg("The whole dungeon shudders. Now RETURN TO THE SURFACE alive!", Rgb(255, 150, 60));
+            self.msg("Every creature in GRAZZARK's halls now knows where you are...", Rgb(255, 90, 60));
+            self.rouse_all();
             self.combat_heat = 1.0;
             return Some(100.0);
         }
-        if self.p.inv.len() >= MAX_INV {
+        if self.p.inv.len() >= self.inv_cap() {
             self.msg("Your pack is full.", GREY);
             return None;
         }
         self.level.items.remove(ii);
         self.msg(format!("You pick up {}.", item.name()), Rgb(220, 220, 150));
+        if let Some(u) = item.unique() {
+            let d = &UNIQUES[u];
+            self.msg(format!("A unique treasure! {} (equip it from the inventory)", d.desc), d.color);
+        }
         self.p.inv.push(item);
         self.emit(Sfx::Pickup, px, py, 0.6);
         Some(50.0)
@@ -1632,6 +2711,11 @@ impl Game {
         Some(50.0)
     }
 
+    /// Alchemy: potions are 25% stronger per rank.
+    fn potency(&self, amt: i32) -> i32 {
+        ((amt as f32) * (1.0 + 0.25 * self.bonus.alchemy as f32)).round() as i32
+    }
+
     pub fn use_item(&mut self, i: usize) -> Option<f64> {
         if i >= self.p.inv.len() {
             return None;
@@ -1645,27 +2729,31 @@ impl Game {
                 match k {
                     Potion::Healing => {
                         let amt = 12 + self.depth as i32 * 2 + self.p.max_hp / 4;
+                        let amt = self.potency(amt);
                         self.p.hp = (self.p.hp + amt).min(self.p.max_hp);
                         self.p.poison = 0;
                         self.msg(format!("You feel much better (+{} HP).", amt), Rgb(255, 120, 120));
                     }
                     Potion::Mana => {
-                        let amt = 10 + self.p.max_mp / 2;
+                        let amt = self.potency(10 + self.p.max_mp / 2);
                         self.p.mp = (self.p.mp + amt).min(self.p.max_mp);
                         self.msg(format!("Arcane energy surges through you (+{} MP).", amt), Rgb(120, 150, 255));
                     }
                     Potion::Might => {
-                        self.p.extra_dmg += 1;
-                        self.msg("Your muscles swell with power! (+1 damage)", Rgb(255, 170, 60));
+                        let n = if self.bonus.alchemy >= 3 { 2 } else { 1 };
+                        self.p.extra_dmg += n;
+                        self.msg(format!("Your muscles swell with power! (+{} damage)", n), Rgb(255, 170, 60));
                     }
                     Potion::Vigor => {
-                        self.p.max_hp += 5;
-                        self.p.hp += 5;
-                        self.msg("You feel hardier! (+5 max HP)", Rgb(120, 255, 120));
+                        let n = self.potency(5);
+                        self.p.max_hp += n;
+                        self.p.hp += n;
+                        self.msg(format!("You feel hardier! (+{} max HP)", n), Rgb(120, 255, 120));
                     }
                     Potion::Cure => {
                         self.p.poison = 0;
-                        self.p.hp = (self.p.hp + 5).min(self.p.max_hp);
+                        let n = self.potency(5);
+                        self.p.hp = (self.p.hp + n).min(self.p.max_hp);
                         self.msg("The poison is purged from your blood.", Rgb(200, 255, 200));
                     }
                 }
@@ -1722,6 +2810,13 @@ impl Game {
                         }
                         self.noise(px, py, 12);
                     }
+                    Scroll::Vision => {
+                        self.p.vision = 10;
+                        self.fx.ring(fx, fy, 40, 5.0, Rgb(255, 120, 90), &['o', '.', '*'], 0.7);
+                        self.emit(Sfx::Whisper, px, py, 0.8);
+                        let n = self.level.monsters.iter().filter(|m| self.vision_shows(m) && m.faction != Faction::Ally).count();
+                        self.msg(format!("Your eyes burn red. You sense {} creature{} nearby.", n, if n == 1 { "" } else { "s" }), Rgb(255, 140, 110));
+                    }
                 }
                 Some(100.0)
             }
@@ -1739,6 +2834,21 @@ impl Game {
                 self.p.inv[i] = Item::Armor(old);
                 self.msg(format!("You put on the {}.", it.name()), Rgb(220, 220, 220));
                 Some(150.0)
+            }
+            Item::Trinket(u) => {
+                let d = &UNIQUES[u as usize];
+                let slot = if d.slot == USlot::Ring { &mut self.p.ring } else { &mut self.p.neck };
+                let old = slot.replace(u);
+                match old {
+                    Some(o) => self.p.inv[i] = Item::Trinket(o),
+                    None => {
+                        self.p.inv.remove(i);
+                    }
+                }
+                let verb = if d.slot == USlot::Ring { "slip on" } else { "fasten" };
+                self.msg(format!("You {} {}. {}", verb, d.name, d.desc), d.color);
+                self.emit(Sfx::Amulet, px, py, 0.4);
+                Some(100.0)
             }
             Item::Amulet => None,
         }
@@ -1800,7 +2910,11 @@ impl Game {
             None => {
                 let mut l = generate(new_depth, &mut self.rng);
                 let luck = self.bonus.luck;
-                populate(&mut l, &mut self.rng, &mut self.next_id, luck, self.time);
+                let chance = self.unique_chance[(new_depth as usize - 1).min(9)];
+                let unique = self.rng.gen::<f32>() < chance;
+                let hp_mult = self.diff().hp;
+                populate(&mut l, &mut self.rng, &mut self.next_id, luck, self.time, unique, hp_mult);
+                chart_level(&mut l, self.bonus.carto);
                 l
             }
         };
@@ -1811,6 +2925,7 @@ impl Game {
         let (sx, sy) = if down { self.level.up } else { self.level.down };
         self.p.x = sx;
         self.p.y = sy;
+        self.p.undying_used = false;
         self.enter_level();
 
         for mut m in followers {
@@ -1835,16 +2950,26 @@ impl Game {
         if new_depth == 10 && down {
             self.msg("An overwhelming malice fills these halls. The Warden is near.", Rgb(255, 80, 80));
         }
+        self.announce_unique();
 
         if self.p.has_amulet && !self.level.hunted {
             self.level.hunted = true;
+            // The dead on this floor stir faster the nearer you are to the surface.
+            let f = self.respawn_factor();
+            let now = self.time;
+            for c in self.level.corpses.iter_mut() {
+                if c.revive_at > now {
+                    c.revive_at = now + (c.revive_at - now) * f;
+                }
+            }
             let kinds: Vec<usize> = (0..MONSTERS.len())
                 .filter(|&k| {
                     let d = &MONSTERS[k];
                     !d.boss && d.depth.1 >= new_depth && d.depth.0 <= new_depth + 3
                 })
                 .collect();
-            let n = 2 + new_depth / 3;
+            // The Amulet's power draws about 10% more hunters.
+            let n = ((2 + new_depth / 3) as f32 * 1.1).round() as u32;
             for _ in 0..n {
                 let mut pos = None;
                 for _ in 0..40 {
@@ -1859,11 +2984,39 @@ impl Game {
                     let mut m = Monster::new(id, k, x, y, self.time + 100.0);
                     m.awake = true;
                     m.last_known = Some((sx, sy));
+                    m.scale_hp(self.diff().hp);
                     self.level.monsters.push(m);
                 }
             }
             self.msg("The Amulet's pulse echoes through the halls. Things are hunting you...", Rgb(255, 120, 80));
             self.emit(Sfx::Rumble, sx, sy, 1.0);
+        }
+        if self.amulet_rage() {
+            self.rouse_all();
+        }
+    }
+
+    /// The Amulet of GRAZZARK: every hostile monster on the floor wakes and
+    /// comes for the bearer.
+    fn rouse_all(&mut self) {
+        let (px, py) = (self.p.x, self.p.y);
+        for m in self.level.monsters.iter_mut() {
+            if m.alive && m.faction != Faction::Ally {
+                m.awake = true;
+                m.target = Some(Target::Player);
+                m.last_known = Some((px, py));
+            }
+        }
+    }
+
+    /// A message when you step onto a floor its unique monster walks.
+    fn announce_unique(&mut self) {
+        if !self.level.has_unique {
+            return;
+        }
+        let kind = M_UNIQUE0 + self.depth as usize - 1;
+        if self.level.monsters.iter().any(|m| m.alive && m.kind == kind) {
+            self.msg(format!("A dreadful presence haunts this floor: {}.", MONSTERS[kind].name), Rgb(210, 140, 255));
         }
     }
 
@@ -1874,26 +3027,34 @@ impl Game {
         let def = &MONSTERS[kind];
         {
             let m = &mut self.level.monsters[mi];
-            m.next_act += def.speed;
+            m.next_act += m.speed();
             if m.stun > 0 {
                 m.stun -= 1;
                 return;
             }
         }
-        let (mx, my, fac, awake) = {
+        let (mx, my, fac) = {
             let m = &self.level.monsters[mi];
-            (m.x, m.y, m.faction, m.awake)
+            (m.x, m.y, m.faction)
         };
         let (px, py) = (self.p.x, self.p.y);
         let pd = cheb(mx, my, px, py);
-        let sees_player = hostile(fac, Faction::Player)
-            && dist(mx, my, px, py) <= def.sight as f32
-            && (self.p.invis == 0 || pd <= 1)
-            && self.level.los(mx, my, px, py);
+        let hunts_player = hostile(fac, Faction::Player);
+        // The Amulet of GRAZZARK: hostile monsters never sleep, always know
+        // where the bearer is, and ignore everything else.
+        let amulet = hunts_player && self.amulet_rage();
+        if amulet {
+            self.level.monsters[mi].awake = true;
+        }
+        let awake = self.level.monsters[mi].awake;
+        let in_range = dist(mx, my, px, py) <= def.sight as f32 && (self.p.invis == 0 || pd <= 1);
+        let los_player = self.level.los(mx, my, px, py);
+        // Ghosts sense the living through solid stone once they are hunting.
+        let sees_player = amulet || (hunts_player && in_range && (los_player || (def.ghost && awake)));
 
         if !awake {
-            if sees_player {
-                let stealth = self.cdef().stealth;
+            if hunts_player && in_range && los_player {
+                let stealth = self.stealth();
                 let chance = (if pd <= 2 { 0.7 } else { 0.3 }) - stealth as f64 * 0.06;
                 if self.rng.gen_bool(chance.clamp(0.05, 0.95)) {
                     {
@@ -1904,7 +3065,8 @@ impl Game {
                     }
                     self.emit(Sfx::Voice(def.voice, Mood::Alert), mx, my, 1.0);
                     if self.level.is_visible(mx, my) {
-                        self.msg(format!("{} notices you!", cap(&the_name(kind))), Rgb(255, 170, 90));
+                        let who = self.level.monsters[mi].the();
+                        self.msg(format!("{} notices you!", cap(&who)), Rgb(255, 170, 90));
                     }
                 }
             } else if self.rng.gen_bool(0.003) {
@@ -1921,42 +3083,75 @@ impl Game {
 
         // Choose a target: the player, or any hostile monster in view.
         let mut tgt = self.level.monsters[mi].target;
-        tgt = match tgt {
-            Some(Target::Player) => {
-                if sees_player {
-                    tgt
-                } else {
-                    None
+        if amulet {
+            tgt = Some(Target::Player);
+        } else {
+            tgt = match tgt {
+                Some(Target::Player) => {
+                    if sees_player {
+                        tgt
+                    } else {
+                        None
+                    }
+                }
+                Some(Target::Mon(id)) => match self.mon_index(id) {
+                    Some(oi) if cheb(self.level.monsters[oi].x, self.level.monsters[oi].y, mx, my) <= 10 => tgt,
+                    _ => None,
+                },
+                None => None,
+            };
+            if tgt.is_none() || self.rng.gen_bool(0.15) {
+                let mut best: Option<(Target, i32)> = if sees_player { Some((Target::Player, pd)) } else { None };
+                for (oi, o) in self.level.monsters.iter().enumerate() {
+                    if oi == mi || !o.alive || !hostile(fac, o.faction) {
+                        continue;
+                    }
+                    let d = cheb(o.x, o.y, mx, my);
+                    if d > 7 {
+                        continue;
+                    }
+                    let dd = d + 1;
+                    if best.map_or(true, |b| dd < b.1) && self.level.los(mx, my, o.x, o.y) {
+                        best = Some((Target::Mon(o.id), dd));
+                    }
+                }
+                if let Some((t, _)) = best {
+                    if tgt.is_none() || self.rng.gen_bool(0.5) {
+                        tgt = Some(t);
+                    }
                 }
             }
-            Some(Target::Mon(id)) => match self.mon_index(id) {
-                Some(oi) if cheb(self.level.monsters[oi].x, self.level.monsters[oi].y, mx, my) <= 10 => tgt,
-                _ => None,
-            },
-            None => None,
-        };
-        if tgt.is_none() || self.rng.gen_bool(0.15) {
-            let mut best: Option<(Target, i32)> = if sees_player { Some((Target::Player, pd)) } else { None };
-            for (oi, o) in self.level.monsters.iter().enumerate() {
-                if oi == mi || !o.alive || !hostile(fac, o.faction) {
-                    continue;
-                }
-                let d = cheb(o.x, o.y, mx, my);
-                if d > 7 {
-                    continue;
-                }
-                let dd = d + 1;
-                if best.map_or(true, |b| dd < b.1) && self.level.los(mx, my, o.x, o.y) {
-                    best = Some((Target::Mon(o.id), dd));
-                }
-            }
-            if let Some((t, _)) = best {
-                if tgt.is_none() || self.rng.gen_bool(0.5) {
-                    tgt = Some(t);
+            // Champions cannot abide a rival: when two meet, they fight at once.
+            if self.level.monsters[mi].champion {
+                let fighting_rival = match tgt {
+                    Some(Target::Mon(id)) => self.mon_index(id).map_or(false, |oi| self.level.monsters[oi].champion),
+                    _ => false,
+                };
+                if !fighting_rival {
+                    if let Some(rid) = self.rival_in_view(mi) {
+                        tgt = Some(Target::Mon(rid));
+                        if self.level.is_visible(mx, my) && self.rng.gen_bool(0.5) {
+                            let who = self.level.monsters[mi].the();
+                            self.msg(format!("{} spots a rival champion and charges!", cap(&who)), Rgb(255, 170, 70));
+                        }
+                    }
                 }
             }
         }
         self.level.monsters[mi].target = tgt;
+
+        // Unique powers.
+        if let Some(t) = tgt {
+            if !def.abil.is_empty() && self.unique_power(mi, t) {
+                return;
+            }
+        }
+        if def.abil.contains(&MAbil::FireAura) {
+            self.fire_aura(mi);
+            if self.over.is_some() || !self.level.monsters[mi].alive {
+                return;
+            }
+        }
 
         match tgt {
             Some(t) => {
@@ -1965,7 +3160,7 @@ impl Game {
                     self.level.monsters[mi].last_known = Some((tx, ty));
                 }
                 let d = cheb(mx, my, tx, ty);
-                if d == 1 && self.level.can_step(mx, my, tx - mx, ty - my) {
+                if d == 1 && (def.ghost || self.level.can_step(mx, my, tx - mx, ty - my)) {
                     self.monster_melee(mi, t);
                     return;
                 }
@@ -2000,7 +3195,9 @@ impl Game {
                     }
                     _ => {
                         self.level.monsters[mi].last_known = None;
-                        if self.rng.gen_bool(0.3) {
+                        // Uniques prowl their halls; others mostly loiter.
+                        let roam = if def.unique > 0 { 0.7 } else { 0.3 };
+                        if self.rng.gen_bool(roam) {
                             self.monster_wander(mi);
                         }
                         if self.rng.gen_bool(0.015) {
@@ -2012,6 +3209,209 @@ impl Game {
         }
     }
 
+    /// Another champion that champion `mi` can see.
+    fn rival_in_view(&self, mi: usize) -> Option<u32> {
+        let m = &self.level.monsters[mi];
+        let sight = m.def().sight as f32;
+        self.level
+            .monsters
+            .iter()
+            .enumerate()
+            .filter(|(oi, o)| {
+                *oi != mi
+                    && o.alive
+                    && o.champion
+                    && o.faction != Faction::Ally
+                    && dist(m.x, m.y, o.x, o.y) <= sight
+                    && self.level.los(m.x, m.y, o.x, o.y)
+            })
+            .min_by_key(|(_, o)| cheb(m.x, m.y, o.x, o.y))
+            .map(|(_, o)| o.id)
+    }
+
+    /// Try a unique monster's special power against target `t`. Returns true
+    /// if it used its action.
+    fn unique_power(&mut self, mi: usize, t: Target) -> bool {
+        let (kind, mx, my, fac, cd) = {
+            let m = &self.level.monsters[mi];
+            (m.kind, m.x, m.y, m.faction, m.abil_cd)
+        };
+        if cd > self.time {
+            return false;
+        }
+        let def = &MONSTERS[kind];
+        let (tx, ty) = self.target_pos(t);
+        let d = cheb(mx, my, tx, ty);
+        let vis = self.level.is_visible(mx, my);
+        let name = cap(def.name);
+        for &ab in def.abil {
+            match ab {
+                MAbil::Summon(k, n) => {
+                    let minions = self.level.monsters.iter().filter(|m| m.alive && m.summoned && m.faction == fac && m.kind == k).count();
+                    if minions >= 6 || !self.rng.gen_bool(0.3) {
+                        continue;
+                    }
+                    let mut made = 0;
+                    for _ in 0..n {
+                        if let Some((sx, sy)) = self.free_adjacent(mx, my) {
+                            let id = self.new_id();
+                            let mut m = Monster::new(id, k, sx, sy, self.time + 60.0);
+                            m.faction = fac;
+                            m.summoned = true;
+                            m.awake = true;
+                            if fac != Faction::Ally {
+                                m.scale_hp(self.diff().hp);
+                            }
+                            m.target = Some(t);
+                            self.level.monsters.push(m);
+                            self.fx.mist(sx as f32 + 0.5, sy as f32 + 0.5, Rgb(160, 120, 200));
+                            made += 1;
+                        }
+                    }
+                    if made > 0 {
+                        self.emit(Sfx::Voice(def.voice, Mood::Alert), mx, my, 1.0);
+                        if vis {
+                            self.msg(format!("{} calls its brood to its side!", name), Rgb(220, 150, 255));
+                        }
+                        self.level.monsters[mi].abil_cd = self.time + 900.0;
+                        return true;
+                    }
+                }
+                MAbil::Raise => {
+                    let mut raised = 0;
+                    let mut i = 0;
+                    while i < self.level.corpses.len() && raised < 2 {
+                        let c = &self.level.corpses[i];
+                        if cheb(c.x, c.y, mx, my) <= 6 && self.level.monster_at(c.x, c.y).is_none() && !(c.x == self.p.x && c.y == self.p.y) {
+                            let c = self.level.corpses.remove(i);
+                            let id = self.new_id();
+                            let mut m = Monster::new(id, c.kind, c.x, c.y, self.time + 80.0);
+                            m.faction = fac;
+                            m.awake = true;
+                            if fac != Faction::Ally {
+                                m.scale_hp(self.diff().hp);
+                            }
+                            m.target = Some(t);
+                            self.level.monsters.push(m);
+                            self.fx.mist(c.x as f32 + 0.5, c.y as f32 + 0.5, Rgb(200, 120, 255));
+                            self.emit(Sfx::Revive, c.x, c.y, 1.0);
+                            raised += 1;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    if raised > 0 {
+                        if vis {
+                            self.msg(format!("{} raises the dead to serve it!", name), Rgb(200, 140, 255));
+                        }
+                        self.level.monsters[mi].abil_cd = self.time + 700.0;
+                        return true;
+                    }
+                }
+                MAbil::Blink | MAbil::Charge => {
+                    let charge = ab == MAbil::Charge;
+                    let ok_range = if charge { (2..=6).contains(&d) } else { (3..=8).contains(&d) };
+                    if !ok_range || !self.level.los(mx, my, tx, ty) || !self.rng.gen_bool(0.35) {
+                        continue;
+                    }
+                    // Land on the free tile next to the target that is closest to us.
+                    let mut best: Option<(i32, i32, i32)> = None;
+                    for &(dx, dy) in DIRS.iter() {
+                        let (nx, ny) = (tx + dx, ty + dy);
+                        if self.level.tile(nx, ny).walkable()
+                            && self.level.monster_at(nx, ny).is_none()
+                            && !(nx == self.p.x && ny == self.p.y)
+                            && self.level.can_step(nx, ny, -dx, -dy)
+                        {
+                            let sc = cheb(nx, ny, mx, my);
+                            if best.map_or(true, |b| sc < b.2) {
+                                best = Some((nx, ny, sc));
+                            }
+                        }
+                    }
+                    let Some((nx, ny, _)) = best else { continue };
+                    let (ofx, ofy) = (mx as f32 + 0.5, my as f32 + 0.5);
+                    if charge {
+                        self.fx.burst(ofx, ofy, 0.1, 14, Rgb(150, 130, 110), &['.', ',', 'o'], 0.5, 1.5, -0.2, false);
+                        self.emit(Sfx::Stomp, mx, my, 0.9);
+                        self.fx.shake = self.fx.shake.max(0.6);
+                    } else {
+                        self.fx.rise(ofx, ofy, 18, Rgb(160, 200, 255), &['*', '.', '+'], 0.7);
+                        self.emit(Sfx::Blink, mx, my, 0.8);
+                    }
+                    {
+                        let m = &mut self.level.monsters[mi];
+                        m.x = nx;
+                        m.y = ny;
+                        if !charge {
+                            m.rx = nx as f32;
+                            m.ry = ny as f32;
+                        }
+                        m.abil_cd = self.time + if charge { 500.0 } else { 600.0 };
+                    }
+                    if vis || self.level.is_visible(nx, ny) {
+                        let txt = if charge { format!("{} CHARGES!", name) } else { format!("{} vanishes and reappears beside you!", name) };
+                        let txt = if t == Target::Player { txt } else { format!("{} lunges across the room!", name) };
+                        self.msg(txt, Rgb(255, 150, 120));
+                    }
+                    if charge {
+                        // The charge carries extra force into the blow.
+                        self.level.monsters[mi].charging = true;
+                        self.monster_melee(mi, t);
+                        self.level.monsters[mi].charging = false;
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Ignar's searing aura burns everything standing next to him.
+    fn fire_aura(&mut self, mi: usize) {
+        if !self.rng.gen_bool(0.5) {
+            return;
+        }
+        let (mx, my, mid, kind) = {
+            let m = &self.level.monsters[mi];
+            (m.x, m.y, m.id, m.kind)
+        };
+        let fx = mx as f32 + 0.5;
+        let fy = my as f32 + 0.5;
+        let d = self.depth as i32;
+        let mut any = false;
+        if cheb(mx, my, self.p.x, self.p.y) <= 1 {
+            let dmg = ((self.rng.gen_range(2..=5) + d / 2) as f32 * self.diff().dmg).round() as i32;
+            self.msg(format!("Searing heat from {} scorches you! ({} damage)", MONSTERS[kind].name, dmg), Rgb(255, 130, 40));
+            self.player_hit(dmg, DeathCause::Spell(kind), false);
+            any = true;
+        }
+        let near: Vec<usize> = self
+            .level
+            .monsters
+            .iter()
+            .enumerate()
+            .filter(|(i, o)| *i != mi && o.alive && o.id != mid && cheb(o.x, o.y, mx, my) <= 1 && hostile(self.level.monsters[mi].faction, o.faction))
+            .map(|(i, _)| i)
+            .collect();
+        for oi in near {
+            let dmg = self.rng.gen_range(2..=5) + d / 2;
+            self.damage_monster(oi, dmg, Src::Mon(mid));
+            any = true;
+        }
+        if any {
+            self.fx.ring(fx, fy, 16, 1.2, Rgb(255, 120, 30), &['^', '*', '~'], 0.4);
+            self.fx.light(fx, fy, [2.0, 0.8, 0.2], 2.0, 0.3);
+            self.emit(Sfx::Fireball, mx, my, 0.5);
+        }
+    }
+
+    /// Ghosts drift through walls (but not the dungeon's outer edge).
+    fn ghost_can_enter(&self, x: i32, y: i32) -> bool {
+        x >= 1 && y >= 1 && x < self.level.w - 1 && y < self.level.h - 1
+    }
+
     fn monster_free(&self, mx: i32, my: i32, dx: i32, dy: i32) -> bool {
         let (nx, ny) = (mx + dx, my + dy);
         let t = self.level.tile(nx, ny);
@@ -2021,23 +3421,46 @@ impl Game {
             && !(nx == self.p.x && ny == self.p.y)
     }
 
+    /// Like monster_free, but ghosts may enter walls.
+    fn monster_free_for(&self, mi: usize, dx: i32, dy: i32) -> bool {
+        let m = &self.level.monsters[mi];
+        if m.def().ghost {
+            let (nx, ny) = (m.x + dx, m.y + dy);
+            self.ghost_can_enter(nx, ny) && self.level.monster_at(nx, ny).is_none() && !(nx == self.p.x && ny == self.p.y)
+        } else {
+            self.monster_free(m.x, m.y, dx, dy)
+        }
+    }
+
     fn monster_wander(&mut self, mi: usize) {
         let (mx, my) = (self.level.monsters[mi].x, self.level.monsters[mi].y);
         let (dx, dy) = DIRS[self.rng.gen_range(0..8)];
-        if self.monster_free(mx, my, dx, dy) {
+        if self.monster_free_for(mi, dx, dy) {
             self.move_monster(mi, mx + dx, my + dy);
         }
     }
 
     fn monster_flee(&mut self, mi: usize) {
-        let (mx, my) = (self.level.monsters[mi].x, self.level.monsters[mi].y);
-        let cur = self.dmap[self.level.idx(mx, my)];
+        let (mx, my, ghost) = {
+            let m = &self.level.monsters[mi];
+            (m.x, m.y, m.def().ghost)
+        };
+        let (px, py) = (self.p.x, self.p.y);
+        // Ghosts flee in a straight line; others follow the corridors.
+        let score = |g: &Game, x: i32, y: i32| -> i32 {
+            if ghost {
+                cheb(x, y, px, py) * 10 + (x - px).abs() + (y - py).abs()
+            } else {
+                g.dmap[g.level.idx(x, y)]
+            }
+        };
+        let cur = score(self, mx, my);
         let mut best: Option<(i32, i32, i32)> = None;
         for &(dx, dy) in DIRS.iter() {
-            if !self.monster_free(mx, my, dx, dy) {
+            if !self.monster_free_for(mi, dx, dy) {
                 continue;
             }
-            let v = self.dmap[self.level.idx(mx + dx, my + dy)];
+            let v = score(self, mx + dx, my + dy);
             if v < UNREACH && v > cur && best.map_or(true, |b| v > b.0) {
                 best = Some((v, dx, dy));
             }
@@ -2048,7 +3471,8 @@ impl Game {
     }
 
     fn move_monster(&mut self, mi: usize, nx: i32, ny: i32) {
-        if self.level.tile(nx, ny) == Tile::DoorClosed {
+        let ghost = self.level.monsters[mi].def().ghost;
+        if !ghost && self.level.tile(nx, ny) == Tile::DoorClosed {
             self.level.set(nx, ny, Tile::DoorOpen);
             self.emit(Sfx::Creak, nx, ny, 0.8);
             self.refresh_view();
@@ -2063,19 +3487,22 @@ impl Game {
             m.y = ny;
         }
         // Distant, unseen footsteps give you something to listen for.
-        if !self.level.is_visible(nx, ny) && self.dmap[self.level.idx(nx, ny)] <= 12 && self.rng.gen_bool(0.25) {
+        if !ghost && !self.level.is_visible(nx, ny) && self.dmap[self.level.idx(nx, ny)] <= 12 && self.rng.gen_bool(0.25) {
             self.emit(Sfx::Step, nx, ny, 0.45);
         }
     }
 
     /// Step toward (tx,ty). Uses the player distance map when chasing the
-    /// player so monsters path around corners. Returns false if stuck.
+    /// player so monsters path around corners; ghosts go straight through
+    /// walls. Returns false if stuck.
     fn monster_step_toward(&mut self, mi: usize, tx: i32, ty: i32, use_dmap: bool) -> bool {
-        let (mx, my, fac) = {
+        let (mx, my, fac, ghost) = {
             let m = &self.level.monsters[mi];
-            (m.x, m.y, m.faction)
+            (m.x, m.y, m.faction, m.def().ghost)
         };
+        let use_dmap = use_dmap && !ghost;
         let (px, py) = (self.p.x, self.p.y);
+        let amulet = hostile(fac, Faction::Player) && self.amulet_rage();
         let score = |g: &Game, x: i32, y: i32| -> i32 {
             if use_dmap {
                 g.dmap[g.level.idx(x, y)]
@@ -2087,12 +3514,18 @@ impl Game {
         let mut opts: Vec<(i32, i32, i32, u32)> = Vec::new();
         for &(dx, dy) in DIRS.iter() {
             let (nx, ny) = (mx + dx, my + dy);
-            if !self.level.can_step(mx, my, dx, dy) {
-                continue;
-            }
-            let t = self.level.tile(nx, ny);
-            if !(t.walkable() || t == Tile::DoorClosed) {
-                continue;
+            if ghost {
+                if !self.ghost_can_enter(nx, ny) {
+                    continue;
+                }
+            } else {
+                if !self.level.can_step(mx, my, dx, dy) {
+                    continue;
+                }
+                let t = self.level.tile(nx, ny);
+                if !(t.walkable() || t == Tile::DoorClosed) {
+                    continue;
+                }
             }
             if nx == px && ny == py {
                 continue;
@@ -2109,9 +3542,15 @@ impl Game {
             let (nx, ny) = (mx + dx, my + dy);
             if let Some(oi) = self.level.monster_at(nx, ny) {
                 let ofac = self.level.monsters[oi].faction;
-                if hostile(fac, ofac) {
+                // Under the Amulet's spell, monsters only cut through the
+                // player's companions; they ignore their usual enemies.
+                let oid = self.level.monsters[oi].id;
+                let is_target = self.level.monsters[mi].target == Some(Target::Mon(oid));
+                if (hostile(fac, ofac) || is_target) && (!amulet || ofac == Faction::Ally) {
                     let oid = self.level.monsters[oi].id;
-                    self.level.monsters[mi].target = Some(Target::Mon(oid));
+                    if !amulet {
+                        self.level.monsters[mi].target = Some(Target::Mon(oid));
+                    }
                     self.monster_melee(mi, Target::Mon(oid));
                     return true;
                 }
@@ -2121,6 +3560,14 @@ impl Game {
             return true;
         }
         false
+    }
+
+    /// Roll a monster's damage, including champion and rage bonuses.
+    fn mon_damage(&mut self, mi: usize, range: (i32, i32)) -> i32 {
+        let base = self.rng.gen_range(range.0..=range.1);
+        let m = &self.level.monsters[mi];
+        let diff = if m.faction == Faction::Ally { 1.0 } else { self.diff().dmg };
+        ((base as f32) * m.dmg_mult() * diff).round() as i32
     }
 
     fn monster_melee(&mut self, mi: usize, t: Target) {
@@ -2133,10 +3580,13 @@ impl Game {
         self.level.monsters[mi].lunge = ((tx - mx) as f32, (ty - my) as f32, 1.0);
         let vis = self.level.is_visible(mx, my);
         let ally = fac == Faction::Ally;
-        let aname = if ally { format!("your {}", def.name) } else { the_name(kind) };
+        let label = self.level.monsters[mi].the();
+        let aname = if ally { format!("your {}", self.level.monsters[mi].label()) } else { label };
+        // A ghost lurking inside the stone.
+        let in_wall = def.ghost && self.level.tile(mx, my).opaque();
         match t {
             Target::Player => {
-                if self.rng.gen_bool(0.5) {
+                if in_wall || self.rng.gen_bool(0.5) {
                     self.emit(Sfx::Voice(def.voice, Mood::Attack), mx, my, 0.8);
                 } else {
                     self.emit(Sfx::Swing, mx, my, 0.5);
@@ -2144,17 +3594,40 @@ impl Game {
                 let roll = self.rng.gen_range(1..=20);
                 let ac = 10 + self.player_ac();
                 if roll == 20 || (roll != 1 && roll + def.hit >= ac) {
-                    let dmg = self.rng.gen_range(def.dmg.0..=def.dmg.1);
-                    self.msg(format!("{} hits you for {}!", cap(&aname), dmg), Rgb(255, 90, 90));
+                    let dmg = self.mon_damage(mi, def.dmg);
+                    if in_wall {
+                        self.msg(format!("An unseen power hits you from a nearby wall for {} damage!", dmg), Rgb(170, 200, 255));
+                        self.fx.flash(Rgb(120, 160, 255), 0.35);
+                    } else {
+                        self.msg(format!("{} hits you for {}!", cap(&aname), dmg), Rgb(255, 90, 90));
+                    }
                     let (px, py) = (self.p.x, self.p.y);
                     self.emit(Sfx::Hit, px, py, 0.8);
                     self.player_hit(dmg, DeathCause::Monster(kind), def.crush);
                     if def.poison && self.over.is_none() && self.rng.gen_bool(0.35) {
-                        self.p.poison += 4 + self.depth as i32 / 2;
-                        self.p.poison_src = a_name(kind);
-                        self.msg("You are poisoned!", Rgb(120, 255, 80));
-                        self.fx.flash(Rgb(80, 200, 40), 0.3);
+                        let n = 4 + self.depth as i32 / 2;
+                        if self.add_poison(n, a_name(kind)) {
+                            self.msg("You are poisoned!", Rgb(120, 255, 80));
+                            self.fx.flash(Rgb(80, 200, 40), 0.3);
+                        }
                     }
+                    if self.over.is_none() {
+                        self.on_hit_powers(mi, dmg);
+                    }
+                    // Thorned Hide (altar boon).
+                    if self.over.is_none() && self.bonus.thorns > 0 && !in_wall && self.level.monsters[mi].alive {
+                        let th: i32 = (0..self.bonus.thorns).map(|_| self.rng.gen_range(1..=3)).sum();
+                        self.fx.text(mx as f32 + 0.5, my as f32 + 0.5, 0.9, th.to_string(), Rgb(170, 220, 110));
+                        self.damage_monster(mi, th, Src::Player);
+                    }
+                    // Briarmail: thorns tear at anything that strikes you.
+                    if self.over.is_none() && self.has(UPower::Thorns) && self.level.monsters[mi].alive {
+                        let th = 2 + self.depth as i32 / 2;
+                        self.fx.text(mx as f32 + 0.5, my as f32 + 0.5, 0.9, th.to_string(), Rgb(140, 200, 90));
+                        self.damage_monster(mi, th, Src::Player);
+                    }
+                } else if in_wall {
+                    self.msg("Something cold brushes past you from within the wall.", Rgb(150, 160, 200));
                 } else {
                     self.msg(format!("{} misses you.", cap(&aname)), GREY);
                 }
@@ -2167,10 +3640,10 @@ impl Game {
                 };
                 let odef = &MONSTERS[okind];
                 let ovis = self.level.is_visible(ox, oy);
-                let oname = if ofac == Faction::Ally { format!("your {}", odef.name) } else { the_name(okind) };
+                let oname = if ofac == Faction::Ally { format!("your {}", self.level.monsters[oi].label()) } else { self.level.monsters[oi].the() };
                 let roll = self.rng.gen_range(1..=20);
                 if roll + def.hit >= 10 + odef.ac {
-                    let dmg = self.rng.gen_range(def.dmg.0..=def.dmg.1);
+                    let dmg = self.mon_damage(mi, def.dmg);
                     if vis || ovis {
                         self.msg(format!("{} hits {}.", cap(&aname), oname), Rgb(200, 170, 140));
                     }
@@ -2179,6 +3652,10 @@ impl Game {
                         self.emit(Sfx::Voice(def.voice, Mood::Attack), mx, my, 0.8);
                     }
                     self.fx.text(ox as f32 + 0.5, oy as f32 + 0.5, 0.9, dmg.to_string(), Rgb(255, 160, 80));
+                    if def.abil.contains(&MAbil::Vampiric) {
+                        let m = &mut self.level.monsters[mi];
+                        m.hp = (m.hp + dmg / 2).min(m.max_hp);
+                    }
                     self.damage_monster(oi, dmg, Src::Mon(mid));
                 } else if vis || ovis {
                     self.msg(format!("{} misses {}.", cap(&aname), oname), GREY);
@@ -2189,6 +3666,36 @@ impl Game {
                 }
                 self.noise(mx, my, 6);
             }
+        }
+    }
+
+    /// Unique monster powers that trigger when its blow lands on the player.
+    fn on_hit_powers(&mut self, mi: usize, dmg: i32) {
+        let def = self.level.monsters[mi].def();
+        if def.abil.is_empty() {
+            return;
+        }
+        let name = cap(def.name);
+        if def.abil.contains(&MAbil::Vampiric) {
+            let m = &mut self.level.monsters[mi];
+            m.hp = (m.hp + dmg / 2 + 1).min(m.max_hp);
+            self.msg(format!("{} drinks your blood!", name), Rgb(220, 60, 90));
+        }
+        if def.abil.contains(&MAbil::FrostTouch) && self.rng.gen_bool(0.35) {
+            self.p.slow += 100.0;
+            if self.realtime {
+                self.p.next_act = self.p.next_act.max(self.time) + 100.0;
+                self.p.slow = 0.0;
+            }
+            let (px, py) = (self.p.x, self.p.y);
+            self.fx.ice(px as f32 + 0.5, py as f32 + 0.5);
+            self.emit(Sfx::Frost, px, py, 0.8);
+            self.msg("A deathly chill freezes you in place!", Rgb(150, 210, 255));
+        }
+        if def.abil.contains(&MAbil::ManaDrain) && self.p.mp > 0 {
+            let drain = self.rng.gen_range(3..=6).min(self.p.mp);
+            self.p.mp -= drain;
+            self.msg(format!("{} tears {} mana from your soul!", name, drain), Rgb(180, 120, 255));
         }
     }
 
@@ -2225,14 +3732,15 @@ impl Game {
         };
         self.emit(sfx, mx, my, 0.8);
         if self.level.is_visible(mx, my) {
-            self.msg(format!("{} {}!", cap(&the_name(kind)), r.verb), Rgb(255, 180, 120));
+            let who = self.level.monsters[mi].the();
+            self.msg(format!("{} {}!", cap(&who), r.verb), Rgb(255, 180, 120));
         }
         self.level.monsters[mi].lunge = ((tx - mx).signum() as f32 * 0.5, (ty - my).signum() as f32 * 0.5, 0.6);
         match hit {
             Some(Target::Player) => {
                 let roll = self.rng.gen_range(1..=20);
                 if roll == 20 || (roll != 1 && roll + def.hit >= 10 + self.player_ac()) {
-                    let dmg = self.rng.gen_range(r.dmg.0..=r.dmg.1);
+                    let dmg = self.mon_damage(mi, r.dmg);
                     self.msg(format!("You are struck for {}!", dmg), Rgb(255, 90, 90));
                     let cause = if r.element == Element::Phys { DeathCause::Monster(kind) } else { DeathCause::Spell(kind) };
                     self.player_hit(dmg, cause, false);
@@ -2243,7 +3751,7 @@ impl Game {
             Some(Target::Mon(oid)) => {
                 if let Some(oi) = self.mon_index(oid) {
                     if self.rng.gen_bool(0.75) {
-                        let dmg = self.rng.gen_range(r.dmg.0..=r.dmg.1);
+                        let dmg = self.mon_damage(mi, r.dmg);
                         let (ox, oy) = (self.level.monsters[oi].x, self.level.monsters[oi].y);
                         self.fx.text(ox as f32 + 0.5, oy as f32 + 0.5, 0.9, dmg.to_string(), Rgb(255, 160, 80));
                         self.damage_monster(oi, dmg, Src::Mon(mid));
@@ -2380,5 +3888,483 @@ impl Game {
             (Sfx::Drip, 0.7)
         };
         self.emit(sfx, x, y, vol);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const M_WRAITH: usize = 13;
+    const M_ORC: usize = 7;
+    const M_GOBLIN: usize = 3;
+    const M_SKELETON: usize = 4;
+
+    fn game() -> Game {
+        let mut g = Game::new(0, Bonuses { xp_mult: 1.0, ..Default::default() }, 0);
+        g.level.monsters.clear();
+        g.p.max_hp = 10_000;
+        g.p.hp = 10_000;
+        g
+    }
+
+    fn spawn(g: &mut Game, kind: usize, x: i32, y: i32) -> usize {
+        let id = g.new_id();
+        let mut m = Monster::new(id, kind, x, y, g.time);
+        m.awake = true;
+        g.level.monsters.push(m);
+        g.level.monsters.len() - 1
+    }
+
+    /// A free floor tile at least `d` steps from the player.
+    fn floor_away(g: &mut Game, d: i32) -> (i32, i32) {
+        loop {
+            let c = g.level.random_floor(&mut g.rng);
+            if cheb(c.0, c.1, g.p.x, g.p.y) >= d {
+                return c;
+            }
+        }
+    }
+
+    #[test]
+    fn ghost_strikes_from_inside_a_wall() {
+        let mut g = game();
+        let (px, py) = (g.p.x, g.p.y);
+        let (wx, wy) = DIRS
+            .iter()
+            .step_by(2)
+            .map(|&(dx, dy)| (px + dx, py + dy))
+            .find(|&(x, y)| g.ghost_can_enter(x, y))
+            .expect("an interior tile next to the start");
+        g.level.set(wx, wy, Tile::Wall);
+        let mi = spawn(&mut g, M_WRAITH, wx, wy);
+        g.level.monsters[mi].target = Some(Target::Player);
+        for _ in 0..60 {
+            g.monster_melee(mi, Target::Player);
+        }
+        assert!(g.msgs.iter().any(|m| m.text.starts_with("An unseen power hits you from a nearby wall for")));
+        assert!(g.p.hp < 10_000);
+    }
+
+    #[test]
+    fn ghost_drifts_through_walls_toward_the_player() {
+        let mut g = game();
+        let (gx, gy) = floor_away(&mut g, 12);
+        let mi = spawn(&mut g, M_WRAITH, gx, gy);
+        let (px, py) = (g.p.x, g.p.y);
+        for _ in 0..80 {
+            g.monster_step_toward(mi, px, py, true);
+            let m = &g.level.monsters[mi];
+            if cheb(m.x, m.y, px, py) <= 1 {
+                break;
+            }
+        }
+        let m = &g.level.monsters[mi];
+        assert!(cheb(m.x, m.y, px, py) <= 1, "ghost should reach the player in a straight line");
+    }
+
+    #[test]
+    fn slaying_a_champion_rewards_and_terrifies() {
+        let mut g = game();
+        let (px, py) = (g.p.x, g.p.y);
+        let (cx, cy) = (px + 1, py);
+        g.level.set(cx, cy, Tile::Floor);
+        let ci = spawn(&mut g, M_ORC, cx, cy);
+        g.make_champion(ci);
+        assert!(g.level.monsters[ci].champion);
+        assert!(g.level.monsters[ci].max_hp > MONSTERS[M_ORC].hp);
+        let (wx, wy) = floor_away(&mut g, 4);
+        let wi = spawn(&mut g, M_GOBLIN, wx, wy);
+        // A witness within earshot.
+        g.level.monsters[wi].x = cx;
+        g.level.monsters[wi].y = cy + 3;
+        g.level.set(cx, cy + 3, Tile::Floor);
+        g.p.hp = 100;
+        let xp0 = g.p.xp;
+        let hp = g.level.monsters[ci].hp;
+        g.damage_monster(ci, hp + 1, Src::Player);
+        assert!(g.p.xp - xp0 >= MONSTERS[M_ORC].xp * 3, "champions give triple experience");
+        assert!(g.p.hp > 100 + g.bonus.siphon, "champion kills heal more");
+        let w = &g.level.monsters[wi];
+        assert!((5..=20).contains(&w.fear), "witness fear {}", w.fear);
+    }
+
+    #[test]
+    fn infighting_victors_become_champions() {
+        let mut g = game();
+        let (x, y) = floor_away(&mut g, 3);
+        let ki = spawn(&mut g, M_ORC, x, y);
+        let kid = g.level.monsters[ki].id;
+        let mut promoted = false;
+        for _ in 0..60 {
+            let (vx, vy) = floor_away(&mut g, 3);
+            let vi = spawn(&mut g, M_SKELETON, vx, vy);
+            g.damage_monster(vi, 999, Src::Mon(kid));
+            if g.level.monsters[ki].champion {
+                promoted = true;
+                break;
+            }
+        }
+        assert!(promoted);
+        let m = &g.level.monsters[ki];
+        assert!(m.speed() < MONSTERS[M_ORC].speed && m.dmg_mult() > 1.0);
+    }
+
+    #[test]
+    fn uniques_drop_their_signature_and_stay_dead() {
+        for floor in 1..=10usize {
+            let mut g = game();
+            g.depth = floor as u32;
+            let (x, y) = floor_away(&mut g, 2);
+            let kind = M_UNIQUE0 + floor - 1;
+            assert_eq!(MONSTERS[kind].unique as usize, floor);
+            let mi = spawn(&mut g, kind, x, y);
+            g.damage_monster(mi, 9999, Src::Player);
+            let sig = MONSTERS[kind].sig;
+            assert!(g.level.items.iter().any(|i| i.item.unique() == Some(sig)), "floor {} drop", floor);
+            assert!(g.level.corpses.iter().all(|c| c.kind != kind), "uniques leave no corpse to raise");
+        }
+    }
+
+    #[test]
+    fn the_amulet_turns_every_monster_on_the_player() {
+        let mut g = game();
+        g.p.has_amulet = true;
+        let (x, y) = floor_away(&mut g, 6);
+        let a = spawn(&mut g, M_ORC, x, y);
+        g.level.monsters[a].awake = false;
+        let b = spawn(&mut g, M_SKELETON, x, y);
+        g.level.monsters[b].x = x;
+        let (bx, by) = g.free_adjacent(x, y).expect("room");
+        g.level.monsters[b].x = bx;
+        g.level.monsters[b].y = by;
+        g.level.monsters[b].target = Some(Target::Mon(g.level.monsters[a].id));
+        g.monster_act(a);
+        g.monster_act(b);
+        for i in [a, b] {
+            let m = &g.level.monsters[i];
+            assert!(m.awake);
+            assert_eq!(m.target, Some(Target::Player));
+        }
+    }
+
+    #[test]
+    fn unique_gear_powers_apply() {
+        let mut g = game();
+        let ring = UNIQUES.iter().position(|u| u.power == UPower::Wrath).unwrap();
+        let before = g.dmg_bonus();
+        g.p.inv.push(unique_item(ring));
+        let i = g.p.inv.len() - 1;
+        g.use_item(i);
+        assert_eq!(g.p.ring, Some(ring as u8));
+        assert_eq!(g.dmg_bonus(), before + 3);
+        let neck = UNIQUES.iter().position(|u| u.power == UPower::Undying).unwrap();
+        g.p.neck = Some(neck as u8);
+        g.p.hp = 5;
+        g.player_hit(50, DeathCause::Abandoned, false);
+        assert_eq!(g.p.hp, 1);
+        assert!(g.over.is_none());
+    }
+
+    #[test]
+    fn a_run_survives_a_save_round_trip() {
+        let mut g = game();
+        for _ in 0..30 {
+            g.do_action(Action::Wait);
+        }
+        let (x, y) = floor_away(&mut g, 3);
+        let ci = spawn(&mut g, M_ORC, x, y);
+        g.make_overlord(ci);
+        g.p.ring = Some(13);
+        let json = serde_json::to_string(&g).expect("serialize");
+        let mut h: Game = serde_json::from_str(&json).expect("deserialize");
+        h.enter_level_keep_facing();
+        assert_eq!((h.p.x, h.p.y, h.depth, h.turns, h.p.hp), (g.p.x, g.p.y, g.depth, g.turns, g.p.hp));
+        assert_eq!(h.level.monsters.len(), g.level.monsters.len());
+        assert!(h.level.monsters.iter().any(|m| m.overlord));
+        assert_eq!(h.p.ring, Some(13));
+        assert_eq!(h.unique_chance, g.unique_chance);
+        assert!(!h.dmap.is_empty());
+        h.do_action(Action::Wait);
+    }
+
+    #[test]
+    fn rival_champions_fight_and_overlords_grant_power() {
+        let mut g = game();
+        let (x, y) = floor_away(&mut g, 6);
+        let a = spawn(&mut g, M_ORC, x, y);
+        let (bx, by) = g.free_adjacent(x, y).expect("room");
+        // Same faction: normally friends, but champions are rivals.
+        let b = spawn(&mut g, M_ORC, bx, by);
+        g.make_champion(a);
+        g.make_champion(b);
+        g.monster_act(a);
+        let bid = g.level.monsters[b].id;
+        assert_eq!(g.level.monsters[a].target, Some(Target::Mon(bid)));
+
+        let o = spawn(&mut g, M_GOBLIN, x, y);
+        g.level.monsters[o].x = 1;
+        g.make_overlord(o);
+        assert!(g.level.monsters[o].overlord && g.level.monsters[o].dmg_mult() > 1.4);
+        let before = (g.p.max_hp, g.p.extra_dmg, g.p.extra_ac, g.p.max_mp, g.p.extra_crit);
+        g.p.hp = 100;
+        g.damage_monster(o, 99_999, Src::Player);
+        let after = (g.p.max_hp, g.p.extra_dmg, g.p.extra_ac, g.p.max_mp, g.p.extra_crit);
+        assert_ne!(before, after, "slaying an overlord grants a permanent boost");
+        assert!(g.msgs.iter().any(|m| m.text.contains("steal the overlord's power")));
+    }
+
+    #[test]
+    fn pick_one_or_everything() {
+        let mut g = game();
+        let (px, py) = (g.p.x, g.p.y);
+        g.level.items.retain(|i| !(i.x == px && i.y == py));
+        g.p.inv.clear();
+        for it in [Item::Potion(Potion::Mana), Item::Scroll(Scroll::Vision), Item::Potion(Potion::Cure)] {
+            g.level.items.push(FloorItem { x: px, y: py, item: it });
+        }
+        assert_eq!(g.items_here().len(), 3);
+        g.do_action(Action::PickupOne(1));
+        assert_eq!(g.p.inv, vec![Item::Scroll(Scroll::Vision)]);
+        let t0 = g.time;
+        g.do_action(Action::PickupAll);
+        assert!(g.items_here().is_empty());
+        assert_eq!(g.p.inv.len(), 3);
+        assert!((g.time - t0 - 100.0).abs() < 1e-6, "grab-all takes one turn");
+        // Read the scroll of monster vision.
+        let i = g.p.inv.iter().position(|i| *i == Item::Scroll(Scroll::Vision)).unwrap();
+        g.use_item(i);
+        assert_eq!(g.p.vision, 10);
+    }
+
+    #[test]
+    fn the_dead_rise_faster_nearer_the_surface() {
+        let mut g = game();
+        assert_eq!(g.respawn_factor(), 1.0);
+        g.p.has_amulet = true;
+        g.depth = 10;
+        assert!((g.respawn_factor() - 1.0).abs() < 1e-9);
+        let mut last = 1.0;
+        for d in (1..10).rev() {
+            g.depth = d;
+            let f = g.respawn_factor();
+            assert!(f < last);
+            last = f;
+        }
+    }
+    #[test]
+    fn monster_closets_fill_a_room() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut found = 0;
+        let mut elites = 0;
+        for depth in 2..=10 {
+            for _ in 0..12 {
+                let mut lv = generate(depth, &mut rng);
+                let kinds: Vec<usize> = (0..MONSTERS.len())
+                    .filter(|&i| !MONSTERS[i].boss && depth >= MONSTERS[i].depth.0 && depth <= MONSTERS[i].depth.1)
+                    .collect();
+                let mut id = 1;
+                place_closet(&mut lv, &mut rng, &mut id, &kinds, 0.0, 1.0);
+                if let Some(r) = lv.closet {
+                    found += 1;
+                    let inside = lv.monsters.iter().filter(|m| r.contains(m.x, m.y)).count();
+                    assert!(inside >= 8, "a closet holds lots of monsters ({})", inside);
+                    assert!(!r.contains(lv.up.0, lv.up.1) && !r.contains(lv.down.0, lv.down.1));
+                    for m in &lv.monsters {
+                        assert!(lv.tile(m.x, m.y).walkable());
+                    }
+                    elites += lv.monsters.iter().filter(|m| m.champion).count();
+                }
+            }
+        }
+        assert!(found > 50, "most levels have room for a closet ({})", found);
+        assert!(elites > 0, "closets sometimes hold champions");
+    }
+
+    #[test]
+    fn closet_discovery_message() {
+        let mut g = game();
+        let r = g.level.rooms[0];
+        g.level.closet = Some(r);
+        for _ in 0..5 {
+            let (x, y) = g.level.random_floor_in(&r, &mut g.rng).unwrap();
+            if g.level.monster_at(x, y).is_none() && (x, y) != (g.p.x, g.p.y) {
+                spawn(&mut g, M_GOBLIN, x, y);
+            }
+        }
+        g.refresh_view();
+        assert!(g.level.closet_found);
+    }
+
+    #[test]
+    fn difficulty_scales_monsters() {
+        let mut g = game();
+        g.difficulty = 3;
+        let (x, y) = floor_away(&mut g, 3);
+        let mi = spawn(&mut g, M_ORC, x, y);
+        let k = g.diff().hp;
+        g.level.monsters[mi].scale_hp(k);
+        assert_eq!(g.level.monsters[mi].max_hp, MONSTERS[M_ORC].hp * 2);
+        let mut tot_hard = 0;
+        let mut tot_norm = 0;
+        for _ in 0..400 {
+            g.difficulty = 3;
+            tot_hard += g.mon_damage(mi, (10, 10));
+            g.difficulty = 0;
+            tot_norm += g.mon_damage(mi, (10, 10));
+        }
+        assert_eq!(tot_norm, 4000);
+        assert_eq!(tot_hard, 6800);
+        // A fresh Chaotic run builds its floors with tougher monsters.
+        let g2 = Game::new(0, Bonuses { xp_mult: 1.0, ..Default::default() }, 3);
+        assert!(g2.level.monsters.iter().any(|m| m.max_hp >= MONSTERS[m.kind].hp * 2));
+    }
+
+    #[test]
+    fn kills_are_tallied_for_the_bestiary() {
+        let mut g = game();
+        let (x, y) = floor_away(&mut g, 3);
+        let mi = spawn(&mut g, M_GOBLIN, x, y);
+        g.damage_monster(mi, 999, Src::Player);
+        let (x, y) = floor_away(&mut g, 3);
+        let mi = spawn(&mut g, M_GOBLIN, x, y);
+        g.damage_monster(mi, 999, Src::Player);
+        assert_eq!(g.slain.get("goblin"), Some(&2));
+        // Monsters killing each other teach you nothing.
+        let (x, y) = floor_away(&mut g, 3);
+        let a = spawn(&mut g, M_ORC, x, y);
+        let aid = g.level.monsters[a].id;
+        let (x, y) = floor_away(&mut g, 3);
+        let b = spawn(&mut g, M_SKELETON, x, y);
+        g.damage_monster(b, 999, Src::Mon(aid));
+        assert_eq!(g.slain.get("skeleton"), None);
+
+        let mut prof = crate::profile::Profile::default();
+        prof.bestiary.insert("goblin".into(), 199);
+        let newly = prof.record_kills(&g.slain);
+        assert_eq!(newly, vec!["goblin".to_string()]);
+        assert!(prof.bonuses().mastered.contains(&"goblin".to_string()));
+    }
+
+    #[test]
+    fn difficulty_unlocks_in_order() {
+        let mut prof = crate::profile::Profile::default();
+        assert!(prof.diff_unlocked(0) && !prof.diff_unlocked(1));
+        assert_eq!(prof.record_win(1), None, "can't skip ahead");
+        assert_eq!(prof.record_win(0), Some("Hard"));
+        assert_eq!(prof.record_win(0), None);
+        assert_eq!(prof.record_win(1), Some("Difficult"));
+        assert_eq!(prof.record_win(2), Some("Chaotic"));
+        assert_eq!(prof.record_win(3), None);
+        assert!(prof.diff_unlocked(3));
+    }
+
+    #[test]
+    fn legacy_skills_are_refunded() {
+        let mut prof = crate::profile::Profile::default();
+        prof.upgrades.insert("blink".into(), 1);
+        prof.upgrades.insert("wind".into(), 1);
+        prof.upgrades.insert("might".into(), 2);
+        assert_eq!(prof.migrate(), 650);
+        assert_eq!(prof.points, 650);
+        assert_eq!(prof.rank("might"), 2);
+        assert!(prof.upgrades.get("blink").is_none());
+    }
+
+    #[test]
+    fn class_skills_stay_with_their_class() {
+        let all: Vec<Skill> = UPGRADES.iter().filter_map(|u| u.skill).collect();
+        for class in 0..CLASSES.len() {
+            let g = Game::new(class, Bonuses { xp_mult: 1.0, skills: all.clone(), ..Default::default() }, 0);
+            let sk = g.skills();
+            assert_eq!(sk.len(), 4, "two class skills plus two altar skills");
+            for s in &sk[2..] {
+                assert_eq!(s.class(), Some(class));
+            }
+        }
+    }
+
+    #[test]
+    fn new_skills_work() {
+        // Warrior: Battle Cry terrifies and enrages.
+        let mut g = game();
+        g.p.mp = 100;
+        let (px, py) = (g.p.x, g.p.y);
+        let (x, y) = g.free_adjacent(px, py).unwrap();
+        let mi = spawn(&mut g, M_ORC, x, y);
+        assert!(g.use_skill(Skill::BattleCry).is_some());
+        assert!(g.p.fury > 0 && g.level.monsters[mi].fear > 0);
+        assert!(g.dmg_mult_vs(false, false) > 1.4);
+
+        // Rogue: Shadowstep lands behind a visible foe and backstabs it.
+        let mut g = game();
+        g.p.class = C_ROGUE;
+        g.p.mp = 100;
+        let (px, py) = (g.p.x, g.p.y);
+        let f = (0..8).find(|&d| {
+            let (dx, dy) = DIRS[d];
+            (1..=4).all(|k| g.level.tile(px + dx * k, py + dy * k).walkable())
+        });
+        if let Some(d) = f {
+            let (dx, dy) = DIRS[d];
+            let mi = spawn(&mut g, M_ORC, px + dx * 3, py + dy * 3);
+            g.level.monsters[mi].max_hp = 5000;
+            g.level.monsters[mi].hp = 5000;
+            g.refresh_view();
+            assert!(g.use_skill(Skill::Shadowstep).is_some());
+            assert!(cheb(g.p.x, g.p.y, px + dx * 3, py + dy * 3) == 1, "lands next to the foe");
+        }
+
+        // Necromancer: corpses explode and never rise.
+        let mut g = game();
+        g.p.mp = 100;
+        let (px, py) = (g.p.x, g.p.y);
+        let (cx, cy) = g.free_adjacent(px, py).unwrap();
+        g.level.corpses.push(Corpse { kind: M_SKELETON, x: cx, y: cy, revive_at: 1.0 });
+        let mi = spawn(&mut g, M_GOBLIN, cx, cy);
+        assert!(g.use_skill(Skill::CorpseExplosion).is_some());
+        assert!(!g.level.corpses.iter().any(|c| c.kind == M_SKELETON), "the skeleton is gone for good");
+        let gob = &g.level.monsters[mi];
+        assert!(!gob.alive || gob.hp < MONSTERS[M_GOBLIN].hp);
+
+        // Blood Magic pays in health.
+        let mut g = game();
+        g.bonus.bloodmagic = true;
+        g.p.mp = 0;
+        let hp = g.p.hp;
+        assert!(g.use_skill(Skill::SmokeBomb).is_some());
+        assert_eq!(g.p.hp, hp - Skill::SmokeBomb.mp() * 2);
+        assert!(g.p.invis > 0);
+    }
+
+    #[test]
+    fn soul_anchor_cheats_death_once() {
+        let mut g = game();
+        g.bonus.anchor = true;
+        g.p.max_hp = 50;
+        g.p.hp = 5;
+        g.player_hit(100, DeathCause::OwnFire, false);
+        assert!(g.over.is_none());
+        assert_eq!(g.p.hp, 20);
+        g.player_hit(100, DeathCause::OwnFire, false);
+        assert!(g.over.is_some());
+    }
+
+    #[test]
+    fn boons_apply() {
+        let mut g = game();
+        g.bonus.pockets = 2;
+        assert_eq!(g.inv_cap(), MAX_INV + 6);
+        g.bonus.ironwill = 2;
+        assert!(!g.add_poison(10, "x".into()));
+        assert_eq!(g.p.poison, 0);
+        g.bonus.coup = 2;
+        g.bonus.hunter = 1;
+        assert!((g.dmg_mult_vs(true, true) - 1.15 * 1.3).abs() < 1e-4);
+        g.bonus.carto = 1;
+        let mut rng = StdRng::seed_from_u64(3);
+        let mut lv = generate(4, &mut rng);
+        chart_level(&mut lv, 1);
+        assert!(lv.explored[lv.idx(lv.down.0, lv.down.1)]);
     }
 }
