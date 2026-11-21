@@ -114,6 +114,40 @@ pub enum MAbil {
     FrostTouch,
     /// Its blows drain your mana.
     ManaDrain,
+    /// Calls sleeping and idle kin of its faction to the hunt.
+    Rally,
+    /// Leaps a short distance onto its prey.
+    Pounce,
+    /// Spits a web that roots its prey in place.
+    Web,
+    /// Seizes an adjacent foe, holding it fast.
+    Grab,
+    /// Braces behind shield or stone hide: +4 armour for a few turns.
+    Guard,
+    /// Strikes twice in a frenzy.
+    Flurry,
+    /// Throws grit or darkness into its prey's eyes.
+    Blind,
+    /// Saps life from afar and heals itself with it.
+    LifeSap,
+    /// Slams the ground: damages and staggers everything nearby.
+    Quake,
+    /// Hurls a boulder.
+    Throw,
+    /// Bursts into a cloud of paralysing spores.
+    Spores,
+    /// Splits in two when wounded.
+    Split,
+    /// Heals a wounded ally of its kind.
+    Mend,
+    /// Its sting or claws can paralyse.
+    Paralyze,
+    /// Bashes with a shield, staggering its foe.
+    Bash,
+    /// A gaze that turns limbs to stone for a moment.
+    Gaze,
+    /// A deafening shriek that staggers and chills.
+    Shriek,
 }
 
 const BASE: MonsterDef = MonsterDef {
@@ -331,179 +365,1212 @@ const ART_RATKING: &[&str] = &[
     r"  ()  ()  ()     ",
 ];
 
+const ART_CENTIPEDE: &[&str] = &[
+    r"  __ __ __ __   ",
+    r" (§§)OO-OO-OO>- ",
+    r"  /\ /\ /\ /\   ",
+];
+const ART_SLIME: &[&str] = &[
+    r"   .-~~-.   ",
+    r"  / §  § \  ",
+    r" (   ~~   ) ",
+    r"  '~-..-~'  ",
+];
+const ART_MYCONID: &[&str] = &[
+    r"  _.---._  ",
+    r" (o  o  o) ",
+    r"  '-----'  ",
+    r"   |§ §|   ",
+    r"   | ~ |   ",
+    r"  _|   |_  ",
+];
+const ART_SHAMAN: &[&str] = &[
+    r"  _/^\_  ",
+    r" <(§ §)> ",
+    r"   /~\   ",
+    r" */|=|\  ",
+    r" | |_|   ",
+    r" | / \   ",
+];
+const ART_SCORPION: &[&str] = &[
+    r"  _      __, ",
+    r" ( \_§§_/  \ ",
+    r"  \=OOOO=   v",
+    r"  /\/\/\/\   ",
+];
+const ART_HOBGOBLIN: &[&str] = &[
+    r"  _/V\_  ",
+    r" ( § § ) ",
+    r"  \ww /  ",
+    r" /|###|\ ",
+    r"O |###| |",
+    r"  |_|_|  ",
+    r"  /   \  ",
+];
+const ART_BEAR: &[&str] = &[
+    r"  ()_____()  ",
+    r"  / §   § \  ",
+    r" |    w    | ",
+    r"  \  '-'  /  ",
+    r" /'-------'\ ",
+    r"|  |     |  |",
+    r" \_|_____|_/ ",
+    r"   ||   ||   ",
+];
+const ART_GARGOYLE: &[&str] = &[
+    r"\\  /^^\  //",
+    r" \\(§  §)// ",
+    r"  \/'vv'\/  ",
+    r"   /|##|\   ",
+    r"    /  \    ",
+];
+const ART_WIGHT: &[&str] = &[
+    r"   _____   ",
+    r"  /§   §\  ",
+    r"  \_===_/  ",
+    r"  /|\ /|\  ",
+    r" / | v | \ ",
+    r"   |   |   ",
+    r"  _/   \_  ",
+];
+const ART_BANSHEE: &[&str] = &[
+    r"   .~~~.   ",
+    r"  ( §O§ )  ",
+    r"  /\ O /\  ",
+    r" / /   \ \ ",
+    r"  ~ ~ ~ ~  ",
+];
+const ART_ELEMENTAL: &[&str] = &[
+    r"   ( ) (    ",
+    r"  ) (§ §)   ",
+    r" ( \(^^^)/  ",
+    r"  ) )   ( ( ",
+    r"   ( ) ( )  ",
+    r"    \ ~ /   ",
+];
+const ART_BASILISK: &[&str] = &[
+    r"   __            ",
+    r"  /§§\_____      ",
+    r" <___ ^^^^^\__   ",
+    r"   /\/\  /\/\ \~ ",
+];
+const ART_FIEND: &[&str] = &[
+    r" \\__    __// ",
+    r"   (§ \/ §)   ",
+    r"    \VVVV/    ",
+    r" /\_/####\_/\ ",
+    r"/  |######|  \",
+    r"   |##||##|   ",
+    r"   /_/  \_\   ",
+];
+const ART_GUARDIAN: &[&str] = &[
+    r"    /\  /\    ",
+    r"   <  §§  >   ",
+    r"  /|\====/|\  ",
+    r" / | \||/ | \ ",
+    r"<  |  /\  |  >",
+    r"   | /  \ |   ",
+    r"  _/\/  \/\_  ",
+];
+
 pub const M_WOLF: usize = 8;
+/// The Prism Guardian, torn out of a ward prism when you strike it.
+pub const M_GUARDIAN: usize = 42;
 pub const M_WARDEN: usize = 18;
 
 pub static MONSTERS: &[MonsterDef] = &[
     MonsterDef {
-        name: "giant rat", glyph: 'r', color: Rgb(150, 120, 100), hp: 4, hit: 1, dmg: (1, 3),
-        speed: 90.0, xp: 2, faction: Faction::Vermin, size: 0.35, voice: VoiceKind::Squeak,
-        depth: (1, 3), revive: (40.0, 80.0), sight: 6, art: ART_RAT, ..BASE
+        name: "giant rat",
+        glyph: 'r',
+        color: Rgb(150, 120, 100),
+        hp: 4,
+        hit: 1,
+        dmg: (1, 3),
+        speed: 90.0,
+        xp: 2,
+        faction: Faction::Vermin,
+        size: 0.35,
+        voice: VoiceKind::Squeak,
+        depth: (1, 3),
+        revive: (40.0, 80.0),
+        sight: 6,
+        art: ART_RAT,
+        abil: &[MAbil::Rally],
+        ..BASE
     },
     MonsterDef {
-        name: "cave bat", glyph: 'b', color: Rgb(130, 105, 140), hp: 4, hit: 2, dmg: (1, 3), ac: 2,
-        speed: 60.0, xp: 3, faction: Faction::Vermin, size: 0.3, float: 0.45, voice: VoiceKind::Screech,
-        depth: (1, 4), erratic: true, revive: (40.0, 80.0), art: ART_BAT, ..BASE
+        name: "cave bat",
+        glyph: 'b',
+        color: Rgb(130, 105, 140),
+        hp: 4,
+        hit: 2,
+        dmg: (1, 3),
+        ac: 2,
+        speed: 60.0,
+        xp: 3,
+        faction: Faction::Vermin,
+        size: 0.3,
+        float: 0.45,
+        voice: VoiceKind::Screech,
+        depth: (1, 4),
+        erratic: true,
+        revive: (40.0, 80.0),
+        art: ART_BAT,
+        abil: &[MAbil::Pounce],
+        ..BASE
     },
     MonsterDef {
-        name: "kobold", glyph: 'k', color: Rgb(190, 120, 60), hp: 7, hit: 2, dmg: (1, 5), ac: 1,
-        xp: 5, faction: Faction::Greenskin, size: 0.55, voice: VoiceKind::Yap, depth: (1, 4),
-        ranged: Some(RangedAtk { verb: "slings a stone", dmg: (1, 3), range: 5, element: Element::Phys, color: Rgb(160, 160, 160), ch: 'o', chance: 0.25 }),
-        revive: (60.0, 120.0), death: DeathKind::Brute, art: ART_KOBOLD, ..BASE
+        name: "kobold",
+        glyph: 'k',
+        color: Rgb(190, 120, 60),
+        hp: 7,
+        hit: 2,
+        dmg: (1, 5),
+        ac: 1,
+        xp: 5,
+        faction: Faction::Greenskin,
+        size: 0.55,
+        voice: VoiceKind::Yap,
+        depth: (1, 4),
+        ranged: Some(RangedAtk {
+            verb: "slings a stone",
+            dmg: (1, 3),
+            range: 5,
+            element: Element::Phys,
+            color: Rgb(160, 160, 160),
+            ch: 'o',
+            chance: 0.25,
+        }),
+        revive: (60.0, 120.0),
+        death: DeathKind::Brute,
+        art: ART_KOBOLD,
+        abil: &[MAbil::Rally],
+        ..BASE
     },
     MonsterDef {
-        name: "goblin", glyph: 'g', color: Rgb(100, 170, 60), hp: 9, hit: 3, dmg: (2, 6), ac: 2,
-        xp: 7, faction: Faction::Greenskin, size: 0.6, voice: VoiceKind::Yap, depth: (1, 5),
-        death: DeathKind::Brute, art: ART_GOBLIN, ..BASE
+        name: "goblin",
+        glyph: 'g',
+        color: Rgb(100, 170, 60),
+        hp: 9,
+        hit: 3,
+        dmg: (2, 6),
+        ac: 2,
+        xp: 7,
+        faction: Faction::Greenskin,
+        size: 0.6,
+        voice: VoiceKind::Yap,
+        depth: (1, 5),
+        death: DeathKind::Brute,
+        art: ART_GOBLIN,
+        abil: &[MAbil::Blind],
+        ..BASE
     },
     MonsterDef {
-        name: "skeleton", glyph: 's', color: Rgb(225, 220, 195), eye: Rgb(80, 200, 255), hp: 13, hit: 4,
-        dmg: (2, 7), ac: 3, xp: 11, faction: Faction::Undead, size: 0.85, voice: VoiceKind::Rattle,
-        depth: (2, 7), revive: (15.0, 40.0), death: DeathKind::Undead, art: ART_SKELETON, ..BASE
+        name: "skeleton",
+        glyph: 's',
+        color: Rgb(225, 220, 195),
+        eye: Rgb(80, 200, 255),
+        hp: 13,
+        hit: 4,
+        dmg: (2, 7),
+        ac: 3,
+        xp: 11,
+        faction: Faction::Undead,
+        size: 0.85,
+        voice: VoiceKind::Rattle,
+        depth: (2, 7),
+        revive: (15.0, 40.0),
+        death: DeathKind::Undead,
+        art: ART_SKELETON,
+        abil: &[MAbil::Guard],
+        ..BASE
     },
     MonsterDef {
-        name: "zombie", glyph: 'z', color: Rgb(110, 155, 100), eye: Rgb(220, 220, 60), hp: 20, hit: 3,
-        dmg: (3, 7), ac: 1, speed: 150.0, xp: 11, faction: Faction::Undead, size: 0.85, voice: VoiceKind::Moan,
-        depth: (2, 6), revive: (20.0, 50.0), death: DeathKind::Undead, art: ART_ZOMBIE, ..BASE
+        name: "zombie",
+        glyph: 'z',
+        color: Rgb(110, 155, 100),
+        eye: Rgb(220, 220, 60),
+        hp: 20,
+        hit: 3,
+        dmg: (3, 7),
+        ac: 1,
+        speed: 150.0,
+        xp: 11,
+        faction: Faction::Undead,
+        size: 0.85,
+        voice: VoiceKind::Moan,
+        depth: (2, 6),
+        revive: (20.0, 50.0),
+        death: DeathKind::Undead,
+        art: ART_ZOMBIE,
+        abil: &[MAbil::Grab],
+        ..BASE
     },
     MonsterDef {
-        name: "giant spider", glyph: 'S', color: Rgb(100, 80, 100), eye: Rgb(255, 30, 30), hp: 15, hit: 5,
-        dmg: (2, 6), ac: 3, speed: 80.0, xp: 15, faction: Faction::Vermin, size: 0.45, voice: VoiceKind::Hiss,
-        depth: (3, 7), poison: true, art: ART_SPIDER, ..BASE
+        name: "giant spider",
+        glyph: 'S',
+        color: Rgb(100, 80, 100),
+        eye: Rgb(255, 30, 30),
+        hp: 15,
+        hit: 5,
+        dmg: (2, 6),
+        ac: 3,
+        speed: 80.0,
+        xp: 15,
+        faction: Faction::Vermin,
+        size: 0.45,
+        voice: VoiceKind::Hiss,
+        depth: (3, 7),
+        poison: true,
+        art: ART_SPIDER,
+        abil: &[MAbil::Web],
+        ..BASE
     },
     MonsterDef {
-        name: "orc", glyph: 'o', color: Rgb(105, 145, 75), hp: 22, hit: 5, dmg: (3, 9), ac: 3,
-        xp: 20, faction: Faction::Greenskin, size: 0.9, voice: VoiceKind::Growl, depth: (3, 8),
-        revive: (80.0, 150.0), death: DeathKind::Brute, art: ART_ORC, ..BASE
+        name: "orc",
+        glyph: 'o',
+        color: Rgb(105, 145, 75),
+        hp: 22,
+        hit: 5,
+        dmg: (3, 9),
+        ac: 3,
+        xp: 20,
+        faction: Faction::Greenskin,
+        size: 0.9,
+        voice: VoiceKind::Growl,
+        depth: (3, 8),
+        revive: (80.0, 150.0),
+        death: DeathKind::Brute,
+        art: ART_ORC,
+        abil: &[MAbil::Berserk],
+        ..BASE
     },
     MonsterDef {
-        name: "dire wolf", glyph: 'w', color: Rgb(150, 150, 160), eye: Rgb(255, 210, 40), hp: 16, hit: 5,
-        dmg: (2, 7), ac: 2, speed: 70.0, xp: 14, faction: Faction::Beast, size: 0.55, voice: VoiceKind::Snarl,
-        depth: (2, 6), sight: 9, art: ART_WOLF, ..BASE
+        name: "dire wolf",
+        glyph: 'w',
+        color: Rgb(150, 150, 160),
+        eye: Rgb(255, 210, 40),
+        hp: 16,
+        hit: 5,
+        dmg: (2, 7),
+        ac: 2,
+        speed: 70.0,
+        xp: 14,
+        faction: Faction::Beast,
+        size: 0.55,
+        voice: VoiceKind::Snarl,
+        depth: (2, 6),
+        sight: 9,
+        art: ART_WOLF,
+        abil: &[MAbil::Pounce, MAbil::Rally],
+        ..BASE
     },
     MonsterDef {
-        name: "ghoul", glyph: 'G', color: Rgb(135, 165, 135), eye: Rgb(200, 255, 120), hp: 24, hit: 6,
-        dmg: (3, 8), ac: 3, speed: 90.0, xp: 24, faction: Faction::Undead, size: 0.8, voice: VoiceKind::Moan,
-        depth: (4, 8), poison: true, revive: (20.0, 50.0), death: DeathKind::Undead, art: ART_GHOUL, ..BASE
+        name: "ghoul",
+        glyph: 'G',
+        color: Rgb(135, 165, 135),
+        eye: Rgb(200, 255, 120),
+        hp: 24,
+        hit: 6,
+        dmg: (3, 8),
+        ac: 3,
+        speed: 90.0,
+        xp: 24,
+        faction: Faction::Undead,
+        size: 0.8,
+        voice: VoiceKind::Moan,
+        depth: (4, 8),
+        poison: true,
+        revive: (20.0, 50.0),
+        death: DeathKind::Undead,
+        art: ART_GHOUL,
+        abil: &[MAbil::Paralyze],
+        ..BASE
     },
     MonsterDef {
-        name: "dark elf", glyph: 'e', color: Rgb(130, 105, 170), eye: Rgb(255, 255, 255), hp: 20, hit: 7,
-        dmg: (3, 7), ac: 4, speed: 90.0, xp: 28, faction: Faction::Dark, size: 0.8, voice: VoiceKind::Human,
+        name: "dark elf",
+        glyph: 'e',
+        color: Rgb(130, 105, 170),
+        eye: Rgb(255, 255, 255),
+        hp: 20,
+        hit: 7,
+        dmg: (3, 7),
+        ac: 4,
+        speed: 90.0,
+        xp: 28,
+        faction: Faction::Dark,
+        size: 0.8,
+        voice: VoiceKind::Human,
         depth: (5, 9),
-        ranged: Some(RangedAtk { verb: "fires a crossbow bolt", dmg: (3, 8), range: 7, element: Element::Phys, color: Rgb(200, 200, 220), ch: '-', chance: 0.5 }),
-        revive: (80.0, 150.0), sight: 9, death: DeathKind::Brute, art: ART_DARKELF, ..BASE
+        ranged: Some(RangedAtk {
+            verb: "fires a crossbow bolt",
+            dmg: (3, 8),
+            range: 7,
+            element: Element::Phys,
+            color: Rgb(200, 200, 220),
+            ch: '-',
+            chance: 0.5,
+        }),
+        revive: (80.0, 150.0),
+        sight: 9,
+        death: DeathKind::Brute,
+        art: ART_DARKELF,
+        abil: &[MAbil::Blink, MAbil::Blind],
+        ..BASE
     },
     MonsterDef {
-        name: "imp", glyph: 'i', color: Rgb(225, 85, 45), eye: Rgb(255, 255, 80), hp: 12, hit: 6, dmg: (2, 5),
-        ac: 4, speed: 70.0, xp: 18, faction: Faction::Demon, size: 0.45, float: 0.2, voice: VoiceKind::Cackle,
-        depth: (5, 10), erratic: true,
-        ranged: Some(RangedAtk { verb: "hurls a firebolt", dmg: (3, 8), range: 6, element: Element::Fire, color: Rgb(255, 140, 30), ch: '*', chance: 0.4 }),
-        revive: (50.0, 100.0), death: DeathKind::Demon, art: ART_IMP, ..BASE
+        name: "imp",
+        glyph: 'i',
+        color: Rgb(225, 85, 45),
+        eye: Rgb(255, 255, 80),
+        hp: 12,
+        hit: 6,
+        dmg: (2, 5),
+        ac: 4,
+        speed: 70.0,
+        xp: 18,
+        faction: Faction::Demon,
+        size: 0.45,
+        float: 0.2,
+        voice: VoiceKind::Cackle,
+        depth: (5, 10),
+        erratic: true,
+        ranged: Some(RangedAtk {
+            verb: "hurls a firebolt",
+            dmg: (3, 8),
+            range: 6,
+            element: Element::Fire,
+            color: Rgb(255, 140, 30),
+            ch: '*',
+            chance: 0.4,
+        }),
+        revive: (50.0, 100.0),
+        death: DeathKind::Demon,
+        art: ART_IMP,
+        abil: &[MAbil::Blink],
+        ..BASE
     },
     MonsterDef {
-        name: "troll", glyph: 'T', color: Rgb(95, 135, 95), eye: Rgb(255, 120, 0), hp: 45, hit: 8, dmg: (5, 12),
-        ac: 4, speed: 110.0, xp: 45, faction: Faction::Beast, size: 1.0, voice: VoiceKind::Roar, depth: (6, 10),
-        regen: true, crush: true, revive: (30.0, 60.0), death: DeathKind::Crushed, art: ART_TROLL, ..BASE
+        name: "troll",
+        glyph: 'T',
+        color: Rgb(95, 135, 95),
+        eye: Rgb(255, 120, 0),
+        hp: 45,
+        hit: 8,
+        dmg: (5, 12),
+        ac: 4,
+        speed: 110.0,
+        xp: 45,
+        faction: Faction::Beast,
+        size: 1.0,
+        voice: VoiceKind::Roar,
+        depth: (6, 10),
+        regen: true,
+        crush: true,
+        revive: (30.0, 60.0),
+        death: DeathKind::Crushed,
+        art: ART_TROLL,
+        abil: &[MAbil::Throw],
+        ..BASE
     },
     MonsterDef {
-        name: "wraith", glyph: 'W', color: Rgb(175, 185, 225), eye: Rgb(120, 255, 255), hp: 28, hit: 8,
-        dmg: (4, 10), ac: 5, speed: 80.0, xp: 40, faction: Faction::Undead, size: 0.85, float: 0.15,
-        voice: VoiceKind::Wail, depth: (6, 10), revive: (20.0, 40.0), death: DeathKind::Undead, art: ART_WRAITH, ghost: true, ..BASE
+        name: "wraith",
+        glyph: 'W',
+        color: Rgb(175, 185, 225),
+        eye: Rgb(120, 255, 255),
+        hp: 28,
+        hit: 8,
+        dmg: (4, 10),
+        ac: 5,
+        speed: 80.0,
+        xp: 40,
+        faction: Faction::Undead,
+        size: 0.85,
+        float: 0.15,
+        voice: VoiceKind::Wail,
+        depth: (6, 10),
+        revive: (20.0, 40.0),
+        death: DeathKind::Undead,
+        art: ART_WRAITH,
+        ghost: true,
+        abil: &[MAbil::LifeSap],
+        ..BASE
     },
     MonsterDef {
-        name: "ogre", glyph: 'O', color: Rgb(175, 135, 95), hp: 55, hit: 8, dmg: (6, 15), ac: 3, speed: 120.0,
-        xp: 50, faction: Faction::Greenskin, size: 1.05, voice: VoiceKind::Roar, depth: (6, 10), crush: true,
-        revive: (80.0, 150.0), death: DeathKind::Crushed, art: ART_OGRE, ..BASE
+        name: "ogre",
+        glyph: 'O',
+        color: Rgb(175, 135, 95),
+        hp: 55,
+        hit: 8,
+        dmg: (6, 15),
+        ac: 3,
+        speed: 120.0,
+        xp: 50,
+        faction: Faction::Greenskin,
+        size: 1.05,
+        voice: VoiceKind::Roar,
+        depth: (6, 10),
+        crush: true,
+        revive: (80.0, 150.0),
+        death: DeathKind::Crushed,
+        art: ART_OGRE,
+        abil: &[MAbil::Quake],
+        ..BASE
     },
     MonsterDef {
-        name: "hellhound", glyph: 'h', color: Rgb(200, 65, 35), eye: Rgb(255, 230, 0), hp: 30, hit: 9, dmg: (4, 10),
-        ac: 5, speed: 70.0, xp: 45, faction: Faction::Demon, size: 0.6, voice: VoiceKind::Snarl, depth: (7, 10),
-        ranged: Some(RangedAtk { verb: "breathes fire", dmg: (5, 12), range: 4, element: Element::Fire, color: Rgb(255, 100, 20), ch: '~', chance: 0.35 }),
-        revive: (50.0, 100.0), sight: 9, death: DeathKind::Demon, art: ART_HOUND, ..BASE
+        name: "hellhound",
+        glyph: 'h',
+        color: Rgb(200, 65, 35),
+        eye: Rgb(255, 230, 0),
+        hp: 30,
+        hit: 9,
+        dmg: (4, 10),
+        ac: 5,
+        speed: 70.0,
+        xp: 45,
+        faction: Faction::Demon,
+        size: 0.6,
+        voice: VoiceKind::Snarl,
+        depth: (7, 10),
+        ranged: Some(RangedAtk {
+            verb: "breathes fire",
+            dmg: (5, 12),
+            range: 4,
+            element: Element::Fire,
+            color: Rgb(255, 100, 20),
+            ch: '~',
+            chance: 0.35,
+        }),
+        revive: (50.0, 100.0),
+        sight: 9,
+        death: DeathKind::Demon,
+        art: ART_HOUND,
+        abil: &[MAbil::Pounce],
+        ..BASE
     },
     MonsterDef {
-        name: "minotaur", glyph: 'M', color: Rgb(140, 95, 65), hp: 65, hit: 10, dmg: (7, 16), ac: 5,
-        xp: 70, faction: Faction::Dark, size: 1.1, voice: VoiceKind::Roar, depth: (8, 10), crush: true,
-        revive: (100.0, 200.0), death: DeathKind::Crushed, art: ART_MINOTAUR, ..BASE
+        name: "minotaur",
+        glyph: 'M',
+        color: Rgb(140, 95, 65),
+        hp: 65,
+        hit: 10,
+        dmg: (7, 16),
+        ac: 5,
+        xp: 70,
+        faction: Faction::Dark,
+        size: 1.1,
+        voice: VoiceKind::Roar,
+        depth: (8, 10),
+        crush: true,
+        revive: (100.0, 200.0),
+        death: DeathKind::Crushed,
+        art: ART_MINOTAUR,
+        abil: &[MAbil::Charge],
+        ..BASE
     },
     MonsterDef {
-        name: "lich", glyph: 'L', color: Rgb(185, 165, 225), eye: Rgb(90, 255, 140), hp: 50, hit: 10, dmg: (4, 10),
-        ac: 6, xp: 90, faction: Faction::Undead, size: 0.9, voice: VoiceKind::Chant, depth: (8, 10),
-        ranged: Some(RangedAtk { verb: "casts a necrotic bolt", dmg: (7, 14), range: 8, element: Element::Magic, color: Rgb(120, 255, 120), ch: '*', chance: 0.55 }),
-        revive: (30.0, 60.0), sight: 9, death: DeathKind::Undead, art: ART_LICH, ..BASE
+        name: "lich",
+        glyph: 'L',
+        color: Rgb(185, 165, 225),
+        eye: Rgb(90, 255, 140),
+        hp: 50,
+        hit: 10,
+        dmg: (4, 10),
+        ac: 6,
+        xp: 90,
+        faction: Faction::Undead,
+        size: 0.9,
+        voice: VoiceKind::Chant,
+        depth: (8, 10),
+        ranged: Some(RangedAtk {
+            verb: "casts a necrotic bolt",
+            dmg: (7, 14),
+            range: 8,
+            element: Element::Magic,
+            color: Rgb(120, 255, 120),
+            ch: '*',
+            chance: 0.55,
+        }),
+        revive: (30.0, 60.0),
+        sight: 9,
+        death: DeathKind::Undead,
+        art: ART_LICH,
+        abil: &[MAbil::Raise, MAbil::LifeSap],
+        ..BASE
     },
     MonsterDef {
-        name: "Vorth, Warden of GRAZZARK", glyph: 'V', color: Rgb(205, 45, 45), eye: Rgb(255, 255, 120), hp: 180,
-        hit: 13, dmg: (10, 22), ac: 8, xp: 400, faction: Faction::Demon, size: 1.25, voice: VoiceKind::Demon,
-        depth: (99, 99), boss: true, crush: true,
-        ranged: Some(RangedAtk { verb: "unleashes hellfire", dmg: (8, 16), range: 7, element: Element::Fire, color: Rgb(255, 60, 20), ch: '#', chance: 0.3 }),
-        revive: (0.0, 0.0), sight: 10, death: DeathKind::Demon, art: ART_WARDEN, ..BASE
+        name: "Vorth, Warden of GRAZZARK",
+        glyph: 'V',
+        color: Rgb(205, 45, 45),
+        eye: Rgb(255, 255, 120),
+        hp: 180,
+        hit: 13,
+        dmg: (10, 22),
+        ac: 8,
+        xp: 400,
+        faction: Faction::Demon,
+        size: 1.25,
+        voice: VoiceKind::Demon,
+        depth: (99, 99),
+        boss: true,
+        crush: true,
+        ranged: Some(RangedAtk {
+            verb: "unleashes hellfire",
+            dmg: (8, 16),
+            range: 7,
+            element: Element::Fire,
+            color: Rgb(255, 60, 20),
+            ch: '#',
+            chance: 0.3,
+        }),
+        revive: (0.0, 0.0),
+        sight: 10,
+        death: DeathKind::Demon,
+        art: ART_WARDEN,
+        abil: &[MAbil::Summon(11, 2), MAbil::Quake, MAbil::Charge],
+        ..BASE
     },
     // ------------------------------------------------ floor uniques (one per depth)
     MonsterDef {
-        name: "Gnawbone, the Rat King", glyph: 'R', color: Rgb(185, 150, 110), eye: Rgb(255, 40, 40), hp: 38, hit: 4,
-        dmg: (2, 7), ac: 2, speed: 85.0, xp: 45, faction: Faction::Vermin, size: 0.6, voice: VoiceKind::Squeak,
-        depth: (99, 99), revive: (0.0, 0.0), sight: 8, art: ART_RATKING, unique: 1,
-        abil: &[MAbil::Summon(0, 3)], sig: 0, ..BASE
+        name: "Gnawbone, the Rat King",
+        glyph: 'R',
+        color: Rgb(185, 150, 110),
+        eye: Rgb(255, 40, 40),
+        hp: 38,
+        hit: 4,
+        dmg: (2, 7),
+        ac: 2,
+        speed: 85.0,
+        xp: 45,
+        faction: Faction::Vermin,
+        size: 0.6,
+        voice: VoiceKind::Squeak,
+        depth: (99, 99),
+        revive: (0.0, 0.0),
+        sight: 8,
+        art: ART_RATKING,
+        unique: 1,
+        abil: &[MAbil::Summon(0, 3)],
+        sig: 0,
+        ..BASE
     },
     MonsterDef {
-        name: "Grutch the Warchief", glyph: 'C', color: Rgb(140, 190, 70), eye: Rgb(255, 200, 40), hp: 55, hit: 5,
-        dmg: (3, 9), ac: 3, xp: 70, faction: Faction::Greenskin, size: 0.8, voice: VoiceKind::Growl,
-        depth: (99, 99), revive: (0.0, 0.0), death: DeathKind::Brute, art: ART_GOBLIN, unique: 2,
-        abil: &[MAbil::Berserk, MAbil::Summon(2, 2)], sig: 1, ..BASE
+        name: "Grutch the Warchief",
+        glyph: 'C',
+        color: Rgb(140, 190, 70),
+        eye: Rgb(255, 200, 40),
+        hp: 55,
+        hit: 5,
+        dmg: (3, 9),
+        ac: 3,
+        xp: 70,
+        faction: Faction::Greenskin,
+        size: 0.8,
+        voice: VoiceKind::Growl,
+        depth: (99, 99),
+        revive: (0.0, 0.0),
+        death: DeathKind::Brute,
+        art: ART_GOBLIN,
+        unique: 2,
+        abil: &[MAbil::Berserk, MAbil::Summon(2, 2)],
+        sig: 1,
+        ..BASE
     },
     MonsterDef {
-        name: "the Weeping Bride", glyph: 'B', color: Rgb(210, 220, 255), eye: Rgb(160, 230, 255), hp: 60, hit: 6,
-        dmg: (3, 9), ac: 4, speed: 85.0, xp: 95, faction: Faction::Undead, size: 0.85, float: 0.2, voice: VoiceKind::Wail,
-        depth: (99, 99), revive: (0.0, 0.0), sight: 9, death: DeathKind::Undead, art: ART_WRAITH, ghost: true, unique: 3,
-        abil: &[MAbil::FrostTouch, MAbil::Blink], sig: 2, ..BASE
+        name: "the Weeping Bride",
+        glyph: 'B',
+        color: Rgb(210, 220, 255),
+        eye: Rgb(160, 230, 255),
+        hp: 60,
+        hit: 6,
+        dmg: (3, 9),
+        ac: 4,
+        speed: 85.0,
+        xp: 95,
+        faction: Faction::Undead,
+        size: 0.85,
+        float: 0.2,
+        voice: VoiceKind::Wail,
+        depth: (99, 99),
+        revive: (0.0, 0.0),
+        sight: 9,
+        death: DeathKind::Undead,
+        art: ART_WRAITH,
+        ghost: true,
+        unique: 3,
+        abil: &[MAbil::FrostTouch, MAbil::Blink],
+        sig: 2,
+        ..BASE
     },
     MonsterDef {
-        name: "Old Mossback", glyph: 'Q', color: Rgb(90, 160, 70), eye: Rgb(255, 230, 60), hp: 95, hit: 7,
-        dmg: (4, 11), ac: 4, speed: 110.0, xp: 130, faction: Faction::Beast, size: 1.05, voice: VoiceKind::Roar,
-        depth: (99, 99), regen: true, crush: true, revive: (0.0, 0.0), death: DeathKind::Crushed, art: ART_TROLL, unique: 4,
-        abil: &[MAbil::Vampiric], sig: 3, ..BASE
+        name: "Old Mossback",
+        glyph: 'Q',
+        color: Rgb(90, 160, 70),
+        eye: Rgb(255, 230, 60),
+        hp: 95,
+        hit: 7,
+        dmg: (4, 11),
+        ac: 4,
+        speed: 110.0,
+        xp: 130,
+        faction: Faction::Beast,
+        size: 1.05,
+        voice: VoiceKind::Roar,
+        depth: (99, 99),
+        regen: true,
+        crush: true,
+        revive: (0.0, 0.0),
+        death: DeathKind::Crushed,
+        art: ART_TROLL,
+        unique: 4,
+        abil: &[MAbil::Vampiric],
+        sig: 3,
+        ..BASE
     },
     MonsterDef {
-        name: "Xal'Veth the Drowned", glyph: 'X', color: Rgb(80, 150, 170), eye: Rgb(120, 255, 230), hp: 80, hit: 8,
-        dmg: (4, 10), ac: 5, speed: 90.0, xp: 160, faction: Faction::Dark, size: 0.85, voice: VoiceKind::Chant,
-        depth: (99, 99), revive: (0.0, 0.0), sight: 9, death: DeathKind::Brute, art: ART_DARKELF, unique: 5,
-        ranged: Some(RangedAtk { verb: "hurls a lance of black ice", dmg: (5, 11), range: 7, element: Element::Frost, color: Rgb(140, 220, 255), ch: '*', chance: 0.45 }),
-        abil: &[MAbil::Blink, MAbil::FrostTouch], sig: 4, ..BASE
+        name: "Xal'Veth the Drowned",
+        glyph: 'X',
+        color: Rgb(80, 150, 170),
+        eye: Rgb(120, 255, 230),
+        hp: 80,
+        hit: 8,
+        dmg: (4, 10),
+        ac: 5,
+        speed: 90.0,
+        xp: 160,
+        faction: Faction::Dark,
+        size: 0.85,
+        voice: VoiceKind::Chant,
+        depth: (99, 99),
+        revive: (0.0, 0.0),
+        sight: 9,
+        death: DeathKind::Brute,
+        art: ART_DARKELF,
+        unique: 5,
+        ranged: Some(RangedAtk {
+            verb: "hurls a lance of black ice",
+            dmg: (5, 11),
+            range: 7,
+            element: Element::Frost,
+            color: Rgb(140, 220, 255),
+            ch: '*',
+            chance: 0.45,
+        }),
+        abil: &[MAbil::Blink, MAbil::FrostTouch],
+        sig: 4,
+        ..BASE
     },
     MonsterDef {
-        name: "Vyrmatha, Queen of Webs", glyph: 'Y', color: Rgb(120, 60, 120), eye: Rgb(255, 60, 200), hp: 90, hit: 9,
-        dmg: (4, 10), ac: 5, speed: 75.0, xp: 190, faction: Faction::Vermin, size: 0.7, voice: VoiceKind::Hiss,
-        depth: (99, 99), poison: true, revive: (0.0, 0.0), art: ART_SPIDER, unique: 6,
-        abil: &[MAbil::Summon(6, 2), MAbil::Vampiric], sig: 5, ..BASE
+        name: "Vyrmatha, Queen of Webs",
+        glyph: 'Y',
+        color: Rgb(120, 60, 120),
+        eye: Rgb(255, 60, 200),
+        hp: 90,
+        hit: 9,
+        dmg: (4, 10),
+        ac: 5,
+        speed: 75.0,
+        xp: 190,
+        faction: Faction::Vermin,
+        size: 0.7,
+        voice: VoiceKind::Hiss,
+        depth: (99, 99),
+        poison: true,
+        revive: (0.0, 0.0),
+        art: ART_SPIDER,
+        unique: 6,
+        abil: &[MAbil::Summon(6, 2), MAbil::Vampiric],
+        sig: 5,
+        ..BASE
     },
     MonsterDef {
-        name: "Kragh the Obsidian Colossus", glyph: 'K', color: Rgb(70, 60, 85), eye: Rgb(255, 120, 40), hp: 150, hit: 10,
-        dmg: (7, 16), ac: 8, speed: 115.0, xp: 240, faction: Faction::Greenskin, size: 1.2, voice: VoiceKind::Roar,
-        depth: (99, 99), crush: true, revive: (0.0, 0.0), death: DeathKind::Crushed, art: ART_OGRE, unique: 7,
-        abil: &[MAbil::Charge], sig: 6, ..BASE
+        name: "Kragh the Obsidian Colossus",
+        glyph: 'K',
+        color: Rgb(70, 60, 85),
+        eye: Rgb(255, 120, 40),
+        hp: 150,
+        hit: 10,
+        dmg: (7, 16),
+        ac: 8,
+        speed: 115.0,
+        xp: 240,
+        faction: Faction::Greenskin,
+        size: 1.2,
+        voice: VoiceKind::Roar,
+        depth: (99, 99),
+        crush: true,
+        revive: (0.0, 0.0),
+        death: DeathKind::Crushed,
+        art: ART_OGRE,
+        unique: 7,
+        abil: &[MAbil::Charge],
+        sig: 6,
+        ..BASE
     },
     MonsterDef {
-        name: "Ignar the Cinderlord", glyph: 'I', color: Rgb(255, 110, 40), eye: Rgb(255, 255, 160), hp: 120, hit: 10,
-        dmg: (5, 12), ac: 6, speed: 80.0, xp: 270, faction: Faction::Demon, size: 0.8, float: 0.15, voice: VoiceKind::Cackle,
-        depth: (99, 99), revive: (0.0, 0.0), sight: 9, death: DeathKind::Demon, art: ART_IMP, unique: 8,
-        ranged: Some(RangedAtk { verb: "hurls a gout of cinders", dmg: (6, 13), range: 7, element: Element::Fire, color: Rgb(255, 150, 40), ch: '*', chance: 0.4 }),
-        abil: &[MAbil::FireAura, MAbil::Summon(11, 2)], sig: 7, ..BASE
+        name: "Ignar the Cinderlord",
+        glyph: 'I',
+        color: Rgb(255, 110, 40),
+        eye: Rgb(255, 255, 160),
+        hp: 120,
+        hit: 10,
+        dmg: (5, 12),
+        ac: 6,
+        speed: 80.0,
+        xp: 270,
+        faction: Faction::Demon,
+        size: 0.8,
+        float: 0.15,
+        voice: VoiceKind::Cackle,
+        depth: (99, 99),
+        revive: (0.0, 0.0),
+        sight: 9,
+        death: DeathKind::Demon,
+        art: ART_IMP,
+        unique: 8,
+        ranged: Some(RangedAtk {
+            verb: "hurls a gout of cinders",
+            dmg: (6, 13),
+            range: 7,
+            element: Element::Fire,
+            color: Rgb(255, 150, 40),
+            ch: '*',
+            chance: 0.4,
+        }),
+        abil: &[MAbil::FireAura, MAbil::Summon(11, 2)],
+        sig: 7,
+        ..BASE
     },
     MonsterDef {
-        name: "Asterion the Tormentor", glyph: 'A', color: Rgb(170, 70, 50), eye: Rgb(255, 40, 40), hp: 170, hit: 12,
-        dmg: (8, 18), ac: 6, speed: 95.0, xp: 320, faction: Faction::Dark, size: 1.2, voice: VoiceKind::Roar,
-        depth: (99, 99), crush: true, revive: (0.0, 0.0), sight: 10, death: DeathKind::Crushed, art: ART_MINOTAUR, unique: 9,
-        abil: &[MAbil::Charge, MAbil::Berserk], sig: 8, ..BASE
+        name: "Asterion the Tormentor",
+        glyph: 'A',
+        color: Rgb(170, 70, 50),
+        eye: Rgb(255, 40, 40),
+        hp: 170,
+        hit: 12,
+        dmg: (8, 18),
+        ac: 6,
+        speed: 95.0,
+        xp: 320,
+        faction: Faction::Dark,
+        size: 1.2,
+        voice: VoiceKind::Roar,
+        depth: (99, 99),
+        crush: true,
+        revive: (0.0, 0.0),
+        sight: 10,
+        death: DeathKind::Crushed,
+        art: ART_MINOTAUR,
+        unique: 9,
+        abil: &[MAbil::Charge, MAbil::Berserk],
+        sig: 8,
+        ..BASE
     },
     MonsterDef {
-        name: "Malzareth the Undying", glyph: 'Z', color: Rgb(150, 120, 220), eye: Rgb(255, 80, 255), hp: 150, hit: 12,
-        dmg: (6, 13), ac: 7, xp: 380, faction: Faction::Undead, size: 1.0, float: 0.1, voice: VoiceKind::Chant,
-        depth: (99, 99), revive: (0.0, 0.0), sight: 10, death: DeathKind::Undead, art: ART_LICH, unique: 10,
-        ranged: Some(RangedAtk { verb: "unleashes a soulfire bolt", dmg: (8, 16), range: 8, element: Element::Magic, color: Rgb(220, 120, 255), ch: '*', chance: 0.5 }),
-        abil: &[MAbil::Raise, MAbil::Blink, MAbil::ManaDrain], sig: 9, ..BASE
+        name: "Malzareth the Undying",
+        glyph: 'Z',
+        color: Rgb(150, 120, 220),
+        eye: Rgb(255, 80, 255),
+        hp: 150,
+        hit: 12,
+        dmg: (6, 13),
+        ac: 7,
+        xp: 380,
+        faction: Faction::Undead,
+        size: 1.0,
+        float: 0.1,
+        voice: VoiceKind::Chant,
+        depth: (99, 99),
+        revive: (0.0, 0.0),
+        sight: 10,
+        death: DeathKind::Undead,
+        art: ART_LICH,
+        unique: 10,
+        ranged: Some(RangedAtk {
+            verb: "unleashes a soulfire bolt",
+            dmg: (8, 16),
+            range: 8,
+            element: Element::Magic,
+            color: Rgb(220, 120, 255),
+            ch: '*',
+            chance: 0.5,
+        }),
+        abil: &[MAbil::Raise, MAbil::Blink, MAbil::ManaDrain],
+        sig: 9,
+        ..BASE
+    },
+    // ---- the wider bestiary (appended so saved indices stay valid)
+    MonsterDef {
+        name: "giant centipede",
+        glyph: 'c',
+        color: Rgb(170, 90, 50),
+        eye: Rgb(255, 200, 60),
+        hp: 6,
+        hit: 2,
+        dmg: (1, 4),
+        speed: 75.0,
+        xp: 4,
+        faction: Faction::Vermin,
+        size: 0.3,
+        voice: VoiceKind::Hiss,
+        depth: (1, 5),
+        poison: true,
+        revive: (40.0, 80.0),
+        art: ART_CENTIPEDE,
+        abil: &[MAbil::Flurry],
+        ..BASE
+    },
+    MonsterDef {
+        name: "green slime",
+        glyph: 'j',
+        color: Rgb(110, 200, 90),
+        eye: Rgb(20, 60, 10),
+        hp: 14,
+        hit: 1,
+        dmg: (1, 4),
+        speed: 140.0,
+        xp: 4,
+        faction: Faction::Vermin,
+        size: 0.4,
+        voice: VoiceKind::Moan,
+        depth: (1, 4),
+        revive: (30.0, 70.0),
+        sight: 5,
+        art: ART_SLIME,
+        abil: &[MAbil::Split],
+        ..BASE
+    },
+    MonsterDef {
+        name: "myconid",
+        glyph: 'm',
+        color: Rgb(200, 150, 190),
+        eye: Rgb(255, 255, 160),
+        hp: 12,
+        hit: 3,
+        dmg: (2, 5),
+        ac: 1,
+        speed: 120.0,
+        xp: 8,
+        faction: Faction::Vermin,
+        size: 0.6,
+        voice: VoiceKind::Hiss,
+        depth: (2, 6),
+        poison: true,
+        revive: (50.0, 100.0),
+        sight: 6,
+        art: ART_MYCONID,
+        abil: &[MAbil::Spores],
+        ..BASE
+    },
+    MonsterDef {
+        name: "goblin shaman",
+        glyph: 'n',
+        color: Rgb(120, 190, 140),
+        eye: Rgb(255, 120, 255),
+        hp: 10,
+        hit: 3,
+        dmg: (1, 4),
+        ac: 1,
+        xp: 12,
+        faction: Faction::Greenskin,
+        size: 0.6,
+        voice: VoiceKind::Yap,
+        depth: (2, 6),
+        ranged: Some(RangedAtk {
+            verb: "hurls a hex",
+            dmg: (2, 6),
+            range: 6,
+            element: Element::Magic,
+            color: Rgb(200, 100, 255),
+            ch: '*',
+            chance: 0.45,
+        }),
+        sight: 8,
+        death: DeathKind::Brute,
+        art: ART_SHAMAN,
+        abil: &[MAbil::Mend],
+        ..BASE
+    },
+    MonsterDef {
+        name: "giant scorpion",
+        glyph: 'x',
+        color: Rgb(160, 120, 60),
+        eye: Rgb(255, 60, 30),
+        hp: 20,
+        hit: 5,
+        dmg: (3, 7),
+        ac: 5,
+        speed: 90.0,
+        xp: 18,
+        faction: Faction::Vermin,
+        size: 0.45,
+        voice: VoiceKind::Hiss,
+        depth: (3, 8),
+        poison: true,
+        revive: (60.0, 120.0),
+        art: ART_SCORPION,
+        abil: &[MAbil::Paralyze],
+        ..BASE
+    },
+    MonsterDef {
+        name: "hobgoblin",
+        glyph: 'H',
+        color: Rgb(170, 110, 60),
+        eye: Rgb(255, 220, 60),
+        hp: 26,
+        hit: 6,
+        dmg: (3, 9),
+        ac: 4,
+        xp: 22,
+        faction: Faction::Greenskin,
+        size: 0.85,
+        voice: VoiceKind::Growl,
+        depth: (3, 7),
+        revive: (80.0, 150.0),
+        death: DeathKind::Brute,
+        art: ART_HOBGOBLIN,
+        abil: &[MAbil::Bash],
+        ..BASE
+    },
+    MonsterDef {
+        name: "cave bear",
+        glyph: 'U',
+        color: Rgb(120, 85, 60),
+        eye: Rgb(255, 180, 60),
+        hp: 40,
+        hit: 7,
+        dmg: (4, 11),
+        ac: 3,
+        speed: 110.0,
+        xp: 35,
+        faction: Faction::Beast,
+        size: 0.95,
+        voice: VoiceKind::Roar,
+        depth: (4, 8),
+        crush: true,
+        death: DeathKind::Crushed,
+        art: ART_BEAR,
+        abil: &[MAbil::Charge],
+        ..BASE
+    },
+    MonsterDef {
+        name: "gargoyle",
+        glyph: 'E',
+        color: Rgb(130, 130, 140),
+        eye: Rgb(255, 90, 40),
+        hp: 32,
+        hit: 7,
+        dmg: (3, 9),
+        ac: 8,
+        speed: 90.0,
+        xp: 38,
+        faction: Faction::Dark,
+        size: 0.8,
+        float: 0.1,
+        voice: VoiceKind::Screech,
+        depth: (5, 9),
+        revive: (0.0, 0.0),
+        death: DeathKind::Crushed,
+        art: ART_GARGOYLE,
+        abil: &[MAbil::Guard, MAbil::Pounce],
+        ..BASE
+    },
+    MonsterDef {
+        name: "wight",
+        glyph: 'J',
+        color: Rgb(170, 180, 160),
+        eye: Rgb(120, 200, 255),
+        hp: 30,
+        hit: 8,
+        dmg: (3, 9),
+        ac: 5,
+        xp: 36,
+        faction: Faction::Undead,
+        size: 0.85,
+        voice: VoiceKind::Wail,
+        depth: (5, 9),
+        revive: (20.0, 50.0),
+        death: DeathKind::Undead,
+        art: ART_WIGHT,
+        abil: &[MAbil::Vampiric, MAbil::Grab],
+        ..BASE
+    },
+    MonsterDef {
+        name: "banshee",
+        glyph: 'F',
+        color: Rgb(200, 220, 240),
+        eye: Rgb(150, 255, 255),
+        hp: 24,
+        hit: 8,
+        dmg: (3, 8),
+        ac: 5,
+        speed: 75.0,
+        xp: 42,
+        faction: Faction::Undead,
+        size: 0.8,
+        float: 0.25,
+        voice: VoiceKind::Wail,
+        depth: (6, 10),
+        ghost: true,
+        ranged: Some(RangedAtk {
+            verb: "lets loose a keening shriek",
+            dmg: (4, 9),
+            range: 5,
+            element: Element::Frost,
+            color: Rgb(180, 230, 255),
+            ch: '~',
+            chance: 0.3,
+        }),
+        revive: (25.0, 50.0),
+        death: DeathKind::Undead,
+        art: ART_BANSHEE,
+        abil: &[MAbil::FrostTouch, MAbil::Shriek],
+        ..BASE
+    },
+    MonsterDef {
+        name: "fire elemental",
+        glyph: 'f',
+        color: Rgb(255, 130, 40),
+        eye: Rgb(255, 255, 200),
+        hp: 36,
+        hit: 9,
+        dmg: (4, 10),
+        ac: 4,
+        speed: 85.0,
+        xp: 50,
+        faction: Faction::Demon,
+        size: 0.9,
+        float: 0.05,
+        voice: VoiceKind::Demon,
+        depth: (7, 10),
+        revive: (40.0, 80.0),
+        death: DeathKind::Demon,
+        art: ART_ELEMENTAL,
+        abil: &[MAbil::FireAura, MAbil::Blink],
+        ..BASE
+    },
+    MonsterDef {
+        name: "basilisk",
+        glyph: 'l',
+        color: Rgb(90, 140, 80),
+        eye: Rgb(255, 255, 0),
+        hp: 42,
+        hit: 9,
+        dmg: (4, 10),
+        ac: 6,
+        speed: 110.0,
+        xp: 52,
+        faction: Faction::Beast,
+        size: 0.5,
+        voice: VoiceKind::Hiss,
+        depth: (6, 10),
+        poison: true,
+        ranged: Some(RangedAtk {
+            verb: "fixes you with a freezing gaze",
+            dmg: (3, 7),
+            range: 6,
+            element: Element::Frost,
+            color: Rgb(200, 255, 120),
+            ch: '*',
+            chance: 0.3,
+        }),
+        art: ART_BASILISK,
+        abil: &[MAbil::Gaze],
+        ..BASE
+    },
+    MonsterDef {
+        name: "pit fiend",
+        glyph: 'P',
+        color: Rgb(170, 40, 40),
+        eye: Rgb(255, 200, 0),
+        hp: 75,
+        hit: 11,
+        dmg: (7, 16),
+        ac: 6,
+        speed: 95.0,
+        xp: 95,
+        faction: Faction::Demon,
+        size: 1.15,
+        voice: VoiceKind::Demon,
+        depth: (8, 10),
+        crush: true,
+        ranged: Some(RangedAtk {
+            verb: "spits hellfire",
+            dmg: (6, 12),
+            range: 6,
+            element: Element::Fire,
+            color: Rgb(255, 80, 20),
+            ch: '#',
+            chance: 0.3,
+        }),
+        revive: (60.0, 120.0),
+        sight: 9,
+        death: DeathKind::Demon,
+        art: ART_FIEND,
+        abil: &[MAbil::Charge, MAbil::Summon(11, 1)],
+        ..BASE
+    },
+    MonsterDef {
+        name: "Prism Guardian",
+        glyph: '&',
+        color: Rgb(150, 230, 255),
+        eye: Rgb(255, 255, 255),
+        hp: 40,
+        hit: 7,
+        dmg: (3, 8),
+        ac: 6,
+        xp: 120,
+        faction: Faction::Dark,
+        size: 1.1,
+        voice: VoiceKind::Chant,
+        depth: (99, 99),
+        ranged: Some(RangedAtk {
+            verb: "hurls a shard of crystal",
+            dmg: (3, 7),
+            range: 6,
+            element: Element::Magic,
+            color: Rgb(160, 240, 255),
+            ch: '*',
+            chance: 0.4,
+        }),
+        revive: (0.0, 0.0),
+        sight: 10,
+        death: DeathKind::Crushed,
+        art: ART_GUARDIAN,
+        abil: &[MAbil::Guard],
+        ..BASE
     },
 ];
+
+/// How likely a monster is to be chosen at `depth`: highest in the middle of
+/// its range and tapering off toward either end, so weaker creatures crowd the
+/// upper floors and stronger ones the lower.
+pub fn spawn_weight(d: &MonsterDef, depth: u32) -> f32 {
+    if d.boss || d.unique > 0 || depth < d.depth.0 || depth > d.depth.1 {
+        return 0.0;
+    }
+    let home = (d.depth.0 + d.depth.1) as f32 / 2.0;
+    let spread = ((d.depth.1 - d.depth.0) as f32 / 2.0).max(1.0) * 1.1;
+    let z = (depth as f32 - home) / spread;
+    (-z * z).exp().max(0.05)
+}
+
+/// Bestiary display order: common monsters by depth, then the Warden, then
+/// the floor uniques in order.
+pub fn bestiary_order() -> Vec<usize> {
+    let mut common: Vec<usize> = (0..MONSTERS.len())
+        .filter(|&i| !MONSTERS[i].boss && MONSTERS[i].unique == 0)
+        .collect();
+    common.sort_by_key(|&i| (MONSTERS[i].depth.0, MONSTERS[i].xp));
+    let mut v = common;
+    v.extend((0..MONSTERS.len()).filter(|&i| MONSTERS[i].boss));
+    let mut uniq: Vec<usize> = (0..MONSTERS.len())
+        .filter(|&i| MONSTERS[i].unique > 0)
+        .collect();
+    uniq.sort_by_key(|&i| MONSTERS[i].unique);
+    v.extend(uniq);
+    v
+}
 
 /// Index of the first floor unique in MONSTERS; floor N's unique is at M_UNIQUE0 + N - 1.
 pub const M_UNIQUE0: usize = 19;
@@ -539,6 +1606,20 @@ pub static MONSTER_LORE: &[&str] = &[
     "Lord of the molten stair, wreathed in flame. Everything near Ignar burns, and imps flock to his call.",
     "The minotaur jailer of the halls of torment. Asterion charges headlong at its prey and flies into a berserk frenzy when wounded.",
     "A lich-king who has cheated death a thousand times. Malzareth raises the fallen, drains the minds of the living, and steps through space at will.",
+    "A rust-red centipede as long as a man's arm, scuttling on a hundred legs. Its bite carries a stinging venom, and it is quicker than anything that size has a right to be.",
+    "A quivering mound of acidic jelly that oozes along the flagstones. Slow and witless, but it soaks up blows like a sponge and slowly dissolves whatever it engulfs.",
+    "A walking fungus with a cap of pale spores. Its touch seeds its rot into your blood, and its spores drift long after the creature itself has fallen.",
+    "A goblin mystic draped in bones and feathers who hurls crackling hexes from behind its kin. Kill it first, or its curses will wear you down.",
+    "An armoured scorpion the size of a hound. Its plates turn aside weak blows, and its tail drips venom that burns long after the sting.",
+    "The larger, crueller cousin of the goblin: disciplined, well-armed, and fond of shields. Hobgoblins drill the warbands and lead from the front.",
+    "A shaggy cave bear driven mad by the dungeon's dark. Its claws can crush plate armour, but it sleeps deeply and stays dead once slain.",
+    "A winged demon of carved stone that perches unmoving among the statues. Its stony hide is among the hardest in the dungeon, and when broken it never rises again.",
+    "A barrow-lord risen in rusted mail, its touch stealing the warmth from the living to feed its own. Every blow it lands mends its rotten flesh.",
+    "The ghost of a mourning woman who drifts through solid stone. Her keening shriek chills the blood, and her touch freezes you where you stand.",
+    "A living whirl of flame summoned from the molten depths. Everything that stands beside it burns, friend or foe alike.",
+    "A great grey lizard with a crown of horns and a gaze that numbs the limbs. Its bite is venomous, and its hide is thick enough to turn a sword.",
+    "A towering demon of the deepest pits, armoured in black scale. It crushes bone with its fists and spits gouts of hellfire at anything it cannot reach.",
+    "A golem of living crystal that bursts out of a ward prism when it is struck. It seals the room behind walls of crystal, hurls razor shards, and shields the ward for as long as it stands. Break it, and the ward breaks with it.",
 ];
 
 impl MAbil {
@@ -553,6 +1634,23 @@ impl MAbil {
             MAbil::FireAura => "burns everything adjacent".to_string(),
             MAbil::FrostTouch => "freezing touch slows you".to_string(),
             MAbil::ManaDrain => "drains your mana".to_string(),
+            MAbil::Rally => "calls its kin to the hunt".to_string(),
+            MAbil::Pounce => "pounces from a distance".to_string(),
+            MAbil::Web => "spits webs that root you in place".to_string(),
+            MAbil::Grab => "seizes and holds you fast".to_string(),
+            MAbil::Guard => "braces to harden its defences".to_string(),
+            MAbil::Flurry => "strikes twice in a frenzy".to_string(),
+            MAbil::Blind => "blinds you".to_string(),
+            MAbil::LifeSap => "saps your life from afar to heal itself".to_string(),
+            MAbil::Quake => "slams the ground, staggering all nearby".to_string(),
+            MAbil::Throw => "hurls boulders".to_string(),
+            MAbil::Spores => "bursts into clouds of paralysing spores".to_string(),
+            MAbil::Split => "splits in two when wounded".to_string(),
+            MAbil::Mend => "heals its wounded kin".to_string(),
+            MAbil::Paralyze => "can paralyse with its strikes".to_string(),
+            MAbil::Bash => "shield-bashes, staggering you".to_string(),
+            MAbil::Gaze => "a gaze that turns limbs to stone".to_string(),
+            MAbil::Shriek => "a deafening, chilling shriek".to_string(),
         }
     }
 }
@@ -573,13 +1671,26 @@ pub struct LoreTiers {
 }
 
 /// Common monsters are slain by the hundred.
-pub const LORE_COMMON: LoreTiers = LoreTiers { name: 1, basic: 10, desc: 100, adv: 100, master: 200 };
+pub const LORE_COMMON: LoreTiers = LoreTiers {
+    name: 1,
+    basic: 10,
+    desc: 100,
+    adv: 100,
+    master: 200,
+};
 /// Uniques and the Warden are met at most once a run.
-pub const LORE_RARE: LoreTiers = LoreTiers { name: 1, basic: 3, desc: 5, adv: 7, master: 10 };
+pub const LORE_RARE: LoreTiers = LoreTiers {
+    name: 1,
+    basic: 3,
+    desc: 5,
+    adv: 7,
+    master: 10,
+};
 
 impl MonsterDef {
     pub fn lore(&self) -> LoreTiers {
-        if self.boss || self.unique > 0 {
+        // Bosses, uniques and the Prism Guardian are met only a few times a run.
+        if self.boss || self.unique > 0 || self.depth.0 >= 99 {
             LORE_RARE
         } else {
             LORE_COMMON
@@ -632,22 +1743,150 @@ pub struct UniqueDef {
 /// The first ten are the signature drops of the floor uniques (in floor
 /// order); the rest can only be found on champions slain on depth 10.
 pub static UNIQUES: &[UniqueDef] = &[
-    UniqueDef { name: "Gnawbone's Signet", slot: USlot::Ring, base: 0, bonus: 0, power: UPower::Soulfeast, desc: "Every kill feeds you: +3 HP and +2 MP.", color: Rgb(220, 180, 120) },
-    UniqueDef { name: "Grutch's Cleaver", slot: USlot::Weapon, base: 4, bonus: 2, power: UPower::Executioner, desc: "+12% critical chance; critical hits deal triple damage.", color: Rgb(200, 230, 120) },
-    UniqueDef { name: "Locket of the Weeping Bride", slot: USlot::Amulet, base: 0, bonus: 0, power: UPower::Undying, desc: "Once per floor, a killing blow leaves you at 1 HP instead.", color: Rgb(180, 220, 255) },
-    UniqueDef { name: "Mossback Hide", slot: USlot::Armor, base: 3, bonus: 2, power: UPower::Regrowth, desc: "Your wounds knit shut: regenerate 1 HP every turn.", color: Rgb(110, 190, 90) },
-    UniqueDef { name: "Tidecaller", slot: USlot::Weapon, base: 6, bonus: 2, power: UPower::Frost, desc: "Hits have a 25% chance to freeze the foe solid.", color: Rgb(120, 210, 255) },
-    UniqueDef { name: "Vyrmatha's Fang", slot: USlot::Weapon, base: 0, bonus: 4, power: UPower::Vampiric, desc: "Drinks blood: heal 20% of the damage you deal.", color: Rgb(220, 80, 200) },
-    UniqueDef { name: "Obsidian Bulwark", slot: USlot::Armor, base: 7, bonus: 1, power: UPower::Stoneskin, desc: "Every blow against you is reduced by 2.", color: Rgb(120, 100, 150) },
-    UniqueDef { name: "Cinderbrand", slot: USlot::Weapon, base: 12, bonus: 2, power: UPower::Flame, desc: "Your strikes burn for 1d6 + depth/2 extra fire damage.", color: Rgb(255, 130, 40) },
-    UniqueDef { name: "Hoof of Asterion", slot: USlot::Ring, base: 0, bonus: 0, power: UPower::Swift, desc: "Your steps are swift: moving takes 30% less time.", color: Rgb(230, 110, 80) },
-    UniqueDef { name: "Malzareth's Phylactery", slot: USlot::Amulet, base: 0, bonus: 0, power: UPower::Arcane, desc: "Skills cost half mana, and mana returns faster.", color: Rgb(200, 130, 255) },
-    UniqueDef { name: "Briarmail", slot: USlot::Armor, base: 4, bonus: 3, power: UPower::Thorns, desc: "Foes that strike you in melee are torn by thorns.", color: Rgb(140, 170, 90) },
-    UniqueDef { name: "Stormcaller", slot: USlot::Weapon, base: 2, bonus: 3, power: UPower::Storm, desc: "Hits arc lightning into another nearby foe.", color: Rgb(170, 200, 255) },
-    UniqueDef { name: "Eye of the Deep", slot: USlot::Amulet, base: 0, bonus: 0, power: UPower::Deathsight, desc: "You sense every living thing on the floor (maps).", color: Rgb(120, 255, 200) },
-    UniqueDef { name: "Ring of Avarice", slot: USlot::Ring, base: 0, bonus: 0, power: UPower::Fortune, desc: "Slain foes drop treasure far more often.", color: Rgb(255, 215, 80) },
-    UniqueDef { name: "Shadowweave", slot: USlot::Armor, base: 2, bonus: 3, power: UPower::Shadow, desc: "You move like a shadow: +3 stealth.", color: Rgb(110, 110, 160) },
-    UniqueDef { name: "Wrathstone Band", slot: USlot::Ring, base: 0, bonus: 0, power: UPower::Wrath, desc: "Burning fury: +3 damage to every strike.", color: Rgb(255, 80, 60) },
+    UniqueDef {
+        name: "Gnawbone's Signet",
+        slot: USlot::Ring,
+        base: 0,
+        bonus: 0,
+        power: UPower::Soulfeast,
+        desc: "Every kill feeds you: +3 HP and +2 MP.",
+        color: Rgb(220, 180, 120),
+    },
+    UniqueDef {
+        name: "Grutch's Cleaver",
+        slot: USlot::Weapon,
+        base: 4,
+        bonus: 2,
+        power: UPower::Executioner,
+        desc: "+12% critical chance; critical hits deal triple damage.",
+        color: Rgb(200, 230, 120),
+    },
+    UniqueDef {
+        name: "Locket of the Weeping Bride",
+        slot: USlot::Amulet,
+        base: 0,
+        bonus: 0,
+        power: UPower::Undying,
+        desc: "Once per floor, a killing blow leaves you at 1 HP instead.",
+        color: Rgb(180, 220, 255),
+    },
+    UniqueDef {
+        name: "Mossback Hide",
+        slot: USlot::Armor,
+        base: 3,
+        bonus: 2,
+        power: UPower::Regrowth,
+        desc: "Your wounds knit shut: regenerate 1 HP every turn.",
+        color: Rgb(110, 190, 90),
+    },
+    UniqueDef {
+        name: "Tidecaller",
+        slot: USlot::Weapon,
+        base: 6,
+        bonus: 2,
+        power: UPower::Frost,
+        desc: "Hits have a 25% chance to freeze the foe solid.",
+        color: Rgb(120, 210, 255),
+    },
+    UniqueDef {
+        name: "Vyrmatha's Fang",
+        slot: USlot::Weapon,
+        base: 0,
+        bonus: 4,
+        power: UPower::Vampiric,
+        desc: "Drinks blood: heal 20% of the damage you deal.",
+        color: Rgb(220, 80, 200),
+    },
+    UniqueDef {
+        name: "Obsidian Bulwark",
+        slot: USlot::Armor,
+        base: 7,
+        bonus: 1,
+        power: UPower::Stoneskin,
+        desc: "Every blow against you is reduced by 2.",
+        color: Rgb(120, 100, 150),
+    },
+    UniqueDef {
+        name: "Cinderbrand",
+        slot: USlot::Weapon,
+        base: 12,
+        bonus: 2,
+        power: UPower::Flame,
+        desc: "Your strikes burn for 1d6 + depth/2 extra fire damage.",
+        color: Rgb(255, 130, 40),
+    },
+    UniqueDef {
+        name: "Hoof of Asterion",
+        slot: USlot::Ring,
+        base: 0,
+        bonus: 0,
+        power: UPower::Swift,
+        desc: "Your steps are swift: moving takes 30% less time.",
+        color: Rgb(230, 110, 80),
+    },
+    UniqueDef {
+        name: "Malzareth's Phylactery",
+        slot: USlot::Amulet,
+        base: 0,
+        bonus: 0,
+        power: UPower::Arcane,
+        desc: "Skills cost half mana, and mana returns faster.",
+        color: Rgb(200, 130, 255),
+    },
+    UniqueDef {
+        name: "Briarmail",
+        slot: USlot::Armor,
+        base: 4,
+        bonus: 3,
+        power: UPower::Thorns,
+        desc: "Foes that strike you in melee are torn by thorns.",
+        color: Rgb(140, 170, 90),
+    },
+    UniqueDef {
+        name: "Stormcaller",
+        slot: USlot::Weapon,
+        base: 2,
+        bonus: 3,
+        power: UPower::Storm,
+        desc: "Hits arc lightning into another nearby foe.",
+        color: Rgb(170, 200, 255),
+    },
+    UniqueDef {
+        name: "Eye of the Deep",
+        slot: USlot::Amulet,
+        base: 0,
+        bonus: 0,
+        power: UPower::Deathsight,
+        desc: "You sense every living thing on the floor (maps).",
+        color: Rgb(120, 255, 200),
+    },
+    UniqueDef {
+        name: "Ring of Avarice",
+        slot: USlot::Ring,
+        base: 0,
+        bonus: 0,
+        power: UPower::Fortune,
+        desc: "Slain foes drop treasure far more often.",
+        color: Rgb(255, 215, 80),
+    },
+    UniqueDef {
+        name: "Shadowweave",
+        slot: USlot::Armor,
+        base: 2,
+        bonus: 3,
+        power: UPower::Shadow,
+        desc: "You move like a shadow: +3 stealth.",
+        color: Rgb(110, 110, 160),
+    },
+    UniqueDef {
+        name: "Wrathstone Band",
+        slot: USlot::Ring,
+        base: 0,
+        bonus: 0,
+        power: UPower::Wrath,
+        desc: "Burning fury: +3 damage to every strike.",
+        color: Rgb(255, 80, 60),
+    },
 ];
 
 /// Number of signature items (the rest form the depth-10 champion pool).
@@ -685,20 +1924,188 @@ const STEEL: Rgb = Rgb(190, 200, 210);
 const WOOD: Rgb = Rgb(150, 105, 60);
 
 pub static WEAPONS: &[WeaponDef] = &[
-    WeaponDef { name: "Dagger", art: WArt::Dagger, dmg: (1, 4), hit: 2, speed: 80.0, crit: 0.15, stun: 0.0, range: 0, depth: 1, color: STEEL, glow: false },
-    WeaponDef { name: "Short Sword", art: WArt::Blade, dmg: (2, 6), hit: 1, speed: 100.0, crit: 0.08, stun: 0.0, range: 0, depth: 1, color: STEEL, glow: false },
-    WeaponDef { name: "Long Sword", art: WArt::Blade, dmg: (3, 8), hit: 0, speed: 100.0, crit: 0.08, stun: 0.0, range: 0, depth: 2, color: STEEL, glow: false },
-    WeaponDef { name: "Mace", art: WArt::Blunt, dmg: (3, 7), hit: 0, speed: 110.0, crit: 0.05, stun: 0.15, range: 0, depth: 1, color: Rgb(170, 170, 180), glow: false },
-    WeaponDef { name: "Battle Axe", art: WArt::Axe, dmg: (4, 10), hit: -1, speed: 120.0, crit: 0.1, stun: 0.0, range: 0, depth: 3, color: STEEL, glow: false },
-    WeaponDef { name: "War Hammer", art: WArt::Blunt, dmg: (5, 12), hit: -1, speed: 130.0, crit: 0.05, stun: 0.25, range: 0, depth: 4, color: Rgb(150, 150, 160), glow: false },
-    WeaponDef { name: "Spear", art: WArt::Spear, dmg: (3, 9), hit: 1, speed: 105.0, crit: 0.07, stun: 0.0, range: 0, depth: 2, color: STEEL, glow: false },
-    WeaponDef { name: "Greatsword", art: WArt::Blade, dmg: (6, 14), hit: -1, speed: 140.0, crit: 0.1, stun: 0.05, range: 0, depth: 5, color: STEEL, glow: false },
-    WeaponDef { name: "Quarterstaff", art: WArt::Staff, dmg: (2, 6), hit: 1, speed: 100.0, crit: 0.05, stun: 0.05, range: 0, depth: 1, color: WOOD, glow: true },
-    WeaponDef { name: "Short Bow", art: WArt::Bow, dmg: (2, 6), hit: 1, speed: 100.0, crit: 0.08, stun: 0.0, range: 8, depth: 1, color: WOOD, glow: false },
-    WeaponDef { name: "Long Bow", art: WArt::Bow, dmg: (3, 9), hit: 1, speed: 110.0, crit: 0.1, stun: 0.0, range: 10, depth: 4, color: WOOD, glow: false },
-    WeaponDef { name: "Crossbow", art: WArt::Bow, dmg: (5, 11), hit: 2, speed: 150.0, crit: 0.12, stun: 0.0, range: 8, depth: 5, color: Rgb(120, 90, 70), glow: false },
-    WeaponDef { name: "Runeblade", art: WArt::Blade, dmg: (5, 12), hit: 2, speed: 100.0, crit: 0.12, stun: 0.0, range: 0, depth: 7, color: Rgb(120, 180, 255), glow: true },
-    WeaponDef { name: "Soulreaver", art: WArt::Axe, dmg: (8, 17), hit: 1, speed: 120.0, crit: 0.15, stun: 0.0, range: 0, depth: 9, color: Rgb(200, 90, 255), glow: true },
+    WeaponDef {
+        name: "Dagger",
+        art: WArt::Dagger,
+        dmg: (1, 4),
+        hit: 2,
+        speed: 80.0,
+        crit: 0.15,
+        stun: 0.0,
+        range: 0,
+        depth: 1,
+        color: STEEL,
+        glow: false,
+    },
+    WeaponDef {
+        name: "Short Sword",
+        art: WArt::Blade,
+        dmg: (2, 6),
+        hit: 1,
+        speed: 100.0,
+        crit: 0.08,
+        stun: 0.0,
+        range: 0,
+        depth: 1,
+        color: STEEL,
+        glow: false,
+    },
+    WeaponDef {
+        name: "Long Sword",
+        art: WArt::Blade,
+        dmg: (3, 8),
+        hit: 0,
+        speed: 100.0,
+        crit: 0.08,
+        stun: 0.0,
+        range: 0,
+        depth: 2,
+        color: STEEL,
+        glow: false,
+    },
+    WeaponDef {
+        name: "Mace",
+        art: WArt::Blunt,
+        dmg: (3, 7),
+        hit: 0,
+        speed: 110.0,
+        crit: 0.05,
+        stun: 0.15,
+        range: 0,
+        depth: 1,
+        color: Rgb(170, 170, 180),
+        glow: false,
+    },
+    WeaponDef {
+        name: "Battle Axe",
+        art: WArt::Axe,
+        dmg: (4, 10),
+        hit: -1,
+        speed: 120.0,
+        crit: 0.1,
+        stun: 0.0,
+        range: 0,
+        depth: 3,
+        color: STEEL,
+        glow: false,
+    },
+    WeaponDef {
+        name: "War Hammer",
+        art: WArt::Blunt,
+        dmg: (5, 12),
+        hit: -1,
+        speed: 130.0,
+        crit: 0.05,
+        stun: 0.25,
+        range: 0,
+        depth: 4,
+        color: Rgb(150, 150, 160),
+        glow: false,
+    },
+    WeaponDef {
+        name: "Spear",
+        art: WArt::Spear,
+        dmg: (3, 9),
+        hit: 1,
+        speed: 105.0,
+        crit: 0.07,
+        stun: 0.0,
+        range: 0,
+        depth: 2,
+        color: STEEL,
+        glow: false,
+    },
+    WeaponDef {
+        name: "Greatsword",
+        art: WArt::Blade,
+        dmg: (6, 14),
+        hit: -1,
+        speed: 140.0,
+        crit: 0.1,
+        stun: 0.05,
+        range: 0,
+        depth: 5,
+        color: STEEL,
+        glow: false,
+    },
+    WeaponDef {
+        name: "Quarterstaff",
+        art: WArt::Staff,
+        dmg: (2, 6),
+        hit: 1,
+        speed: 100.0,
+        crit: 0.05,
+        stun: 0.05,
+        range: 0,
+        depth: 1,
+        color: WOOD,
+        glow: true,
+    },
+    WeaponDef {
+        name: "Short Bow",
+        art: WArt::Bow,
+        dmg: (2, 6),
+        hit: 1,
+        speed: 100.0,
+        crit: 0.08,
+        stun: 0.0,
+        range: 8,
+        depth: 1,
+        color: WOOD,
+        glow: false,
+    },
+    WeaponDef {
+        name: "Long Bow",
+        art: WArt::Bow,
+        dmg: (3, 9),
+        hit: 1,
+        speed: 110.0,
+        crit: 0.1,
+        stun: 0.0,
+        range: 10,
+        depth: 4,
+        color: WOOD,
+        glow: false,
+    },
+    WeaponDef {
+        name: "Crossbow",
+        art: WArt::Bow,
+        dmg: (5, 11),
+        hit: 2,
+        speed: 150.0,
+        crit: 0.12,
+        stun: 0.0,
+        range: 8,
+        depth: 5,
+        color: Rgb(120, 90, 70),
+        glow: false,
+    },
+    WeaponDef {
+        name: "Runeblade",
+        art: WArt::Blade,
+        dmg: (5, 12),
+        hit: 2,
+        speed: 100.0,
+        crit: 0.12,
+        stun: 0.0,
+        range: 0,
+        depth: 7,
+        color: Rgb(120, 180, 255),
+        glow: true,
+    },
+    WeaponDef {
+        name: "Soulreaver",
+        art: WArt::Axe,
+        dmg: (8, 17),
+        hit: 1,
+        speed: 120.0,
+        crit: 0.15,
+        stun: 0.0,
+        range: 0,
+        depth: 9,
+        color: Rgb(200, 90, 255),
+        glow: true,
+    },
 ];
 
 pub struct ArmorDef {
@@ -708,14 +2115,46 @@ pub struct ArmorDef {
 }
 
 pub static ARMORS: &[ArmorDef] = &[
-    ArmorDef { name: "Rags", ac: 0, depth: 99 },
-    ArmorDef { name: "Robe", ac: 1, depth: 1 },
-    ArmorDef { name: "Leather Armor", ac: 2, depth: 1 },
-    ArmorDef { name: "Studded Leather", ac: 3, depth: 2 },
-    ArmorDef { name: "Chain Mail", ac: 4, depth: 3 },
-    ArmorDef { name: "Scale Mail", ac: 5, depth: 5 },
-    ArmorDef { name: "Mithril Coat", ac: 6, depth: 7 },
-    ArmorDef { name: "Plate Armor", ac: 7, depth: 8 },
+    ArmorDef {
+        name: "Rags",
+        ac: 0,
+        depth: 99,
+    },
+    ArmorDef {
+        name: "Robe",
+        ac: 1,
+        depth: 1,
+    },
+    ArmorDef {
+        name: "Leather Armor",
+        ac: 2,
+        depth: 1,
+    },
+    ArmorDef {
+        name: "Studded Leather",
+        ac: 3,
+        depth: 2,
+    },
+    ArmorDef {
+        name: "Chain Mail",
+        ac: 4,
+        depth: 3,
+    },
+    ArmorDef {
+        name: "Scale Mail",
+        ac: 5,
+        depth: 5,
+    },
+    ArmorDef {
+        name: "Mithril Coat",
+        ac: 6,
+        depth: 7,
+    },
+    ArmorDef {
+        name: "Plate Armor",
+        ac: 7,
+        depth: 8,
+    },
 ];
 
 // ---------------------------------------------------------------- items
@@ -730,7 +2169,11 @@ pub struct Gear {
 
 impl Gear {
     pub fn plain(def: usize, bonus: i32) -> Gear {
-        Gear { def, bonus, uniq: None }
+        Gear {
+            def,
+            bonus,
+            uniq: None,
+        }
     }
 }
 
@@ -766,8 +2209,16 @@ pub enum Item {
 pub fn unique_item(u: usize) -> Item {
     let d = &UNIQUES[u];
     match d.slot {
-        USlot::Weapon => Item::Weapon(Gear { def: d.base, bonus: d.bonus, uniq: Some(u as u8) }),
-        USlot::Armor => Item::Armor(Gear { def: d.base, bonus: d.bonus, uniq: Some(u as u8) }),
+        USlot::Weapon => Item::Weapon(Gear {
+            def: d.base,
+            bonus: d.bonus,
+            uniq: Some(u as u8),
+        }),
+        USlot::Armor => Item::Armor(Gear {
+            def: d.base,
+            bonus: d.bonus,
+            uniq: Some(u as u8),
+        }),
         USlot::Ring | USlot::Amulet => Item::Trinket(u as u8),
     }
 }
@@ -835,15 +2286,21 @@ impl Item {
             Item::Potion(_) => '!',
             Item::Scroll(_) => '?',
             Item::Amulet => '"',
-            Item::Trinket(u) => if UNIQUES[*u as usize].slot == USlot::Ring { '=' } else { '"' },
+            Item::Trinket(u) => {
+                if UNIQUES[*u as usize].slot == USlot::Ring {
+                    '='
+                } else {
+                    '"'
+                }
+            }
         }
     }
 
     pub fn color(&self) -> Rgb {
         match self {
-            Item::Weapon(Gear { uniq: Some(u), .. }) | Item::Armor(Gear { uniq: Some(u), .. }) | Item::Trinket(u) => {
-                UNIQUES[*u as usize].color
-            }
+            Item::Weapon(Gear { uniq: Some(u), .. })
+            | Item::Armor(Gear { uniq: Some(u), .. })
+            | Item::Trinket(u) => UNIQUES[*u as usize].color,
             Item::Weapon(g) => WEAPONS[g.def].color,
             Item::Armor(_) => Rgb(170, 160, 140),
             Item::Potion(p) => match p {
@@ -865,14 +2322,22 @@ impl Item {
             Item::Potion(_) => ART_POTION,
             Item::Scroll(_) => ART_SCROLL,
             Item::Amulet => ART_AMULET,
-            Item::Trinket(u) => if UNIQUES[*u as usize].slot == USlot::Ring { ART_RING } else { ART_AMULET },
+            Item::Trinket(u) => {
+                if UNIQUES[*u as usize].slot == USlot::Ring {
+                    ART_RING
+                } else {
+                    ART_AMULET
+                }
+            }
         }
     }
 
     /// The unique this item is, if any.
     pub fn unique(&self) -> Option<usize> {
         match self {
-            Item::Weapon(Gear { uniq: Some(u), .. }) | Item::Armor(Gear { uniq: Some(u), .. }) | Item::Trinket(u) => Some(*u as usize),
+            Item::Weapon(Gear { uniq: Some(u), .. })
+            | Item::Armor(Gear { uniq: Some(u), .. })
+            | Item::Trinket(u) => Some(*u as usize),
             _ => None,
         }
     }
@@ -1008,17 +2473,33 @@ impl Skill {
             Skill::RaiseDead => "Raise a nearby corpse as your thrall.",
             Skill::DrainLife => "Steal life from the foe in front of you.",
             Skill::Blink => "Teleport up to 4 tiles forward.",
-            Skill::SoulBurst => "Blast every foe within 2 tiles with soulfire; heals you for each foe hit.",
+            Skill::SoulBurst => {
+                "Blast every foe within 2 tiles with soulfire; heals you for each foe hit."
+            }
             Skill::PhaseWard => "A holy ward absorbs the next 20+ damage.",
             Skill::SecondWind => "Instantly heal half your health and shrug off poison.",
-            Skill::BattleCry => "A terrible roar: nearby foes flee, and you deal +50% damage for 8 turns.",
-            Skill::Shadowstep => "Vanish and reappear behind a visible foe, striking it as an unseen backstab.",
-            Skill::SmokeBomb => "Foes within 4 tiles are blinded and lose you; you vanish for 5 turns.",
-            Skill::ChainLightning => "A bolt that leaps between up to 5 foes, weakening with each jump.",
-            Skill::Smite => "Call down holy fire on the foe ahead. Double damage to undead and demons.",
+            Skill::BattleCry => {
+                "A terrible roar: nearby foes flee, and you deal +50% damage for 8 turns."
+            }
+            Skill::Shadowstep => {
+                "Vanish and reappear behind a visible foe, striking it as an unseen backstab."
+            }
+            Skill::SmokeBomb => {
+                "Foes within 4 tiles are blinded and lose you; you vanish for 5 turns."
+            }
+            Skill::ChainLightning => {
+                "A bolt that leaps between up to 5 foes, weakening with each jump."
+            }
+            Skill::Smite => {
+                "Call down holy fire on the foe ahead. Double damage to undead and demons."
+            }
             Skill::PiercingShot => "An arrow that tears through every foe in a line.",
-            Skill::RainOfArrows => "Arrows rain on the area ahead, striking every foe within 1 tile.",
-            Skill::CorpseExplosion => "Detonate every corpse within 6 tiles. The dead never rise again.",
+            Skill::RainOfArrows => {
+                "Arrows rain on the area ahead, striking every foe within 1 tile."
+            }
+            Skill::CorpseExplosion => {
+                "Detonate every corpse within 6 tiles. The dead never rise again."
+            }
         }
     }
 
@@ -1061,34 +2542,94 @@ pub const C_NECRO: usize = 5;
 
 pub static CLASSES: &[ClassDef] = &[
     ClassDef {
-        name: "Warrior", desc: "A hardened fighter in chain mail. High health, strong melee, few tricks.",
-        hp: 30, mp: 6, hp_lvl: 8, mp_lvl: 1, hit: 4, weapon: 2, armor: 4,
-        skills: [Skill::Cleave, Skill::WarStomp], unlock: None, stealth: 0, color: Rgb(220, 90, 70),
+        name: "Warrior",
+        desc: "A hardened fighter in chain mail. High health, strong melee, few tricks.",
+        hp: 30,
+        mp: 6,
+        hp_lvl: 8,
+        mp_lvl: 1,
+        hit: 4,
+        weapon: 2,
+        armor: 4,
+        skills: [Skill::Cleave, Skill::WarStomp],
+        unlock: None,
+        stealth: 0,
+        color: Rgb(220, 90, 70),
     },
     ClassDef {
-        name: "Rogue", desc: "Quick and quiet. Spots traps, and backstabs unaware foes for triple damage.",
-        hp: 22, mp: 10, hp_lvl: 5, mp_lvl: 2, hit: 5, weapon: 0, armor: 2,
-        skills: [Skill::ShadowVeil, Skill::FanOfKnives], unlock: None, stealth: 3, color: Rgb(150, 150, 170),
+        name: "Rogue",
+        desc: "Quick and quiet. Spots traps, and backstabs unaware foes for triple damage.",
+        hp: 22,
+        mp: 10,
+        hp_lvl: 5,
+        mp_lvl: 2,
+        hit: 5,
+        weapon: 0,
+        armor: 2,
+        skills: [Skill::ShadowVeil, Skill::FanOfKnives],
+        unlock: None,
+        stealth: 3,
+        color: Rgb(150, 150, 170),
     },
     ClassDef {
-        name: "Mage", desc: "Frail but devastating. Fireballs and frost, with fast mana regeneration.",
-        hp: 16, mp: 22, hp_lvl: 4, mp_lvl: 4, hit: 1, weapon: 8, armor: 1,
-        skills: [Skill::Fireball, Skill::FrostNova], unlock: None, stealth: 1, color: Rgb(100, 140, 255),
+        name: "Mage",
+        desc: "Frail but devastating. Fireballs and frost, with fast mana regeneration.",
+        hp: 16,
+        mp: 22,
+        hp_lvl: 4,
+        mp_lvl: 4,
+        hit: 1,
+        weapon: 8,
+        armor: 1,
+        skills: [Skill::Fireball, Skill::FrostNova],
+        unlock: None,
+        stealth: 1,
+        color: Rgb(100, 140, 255),
     },
     ClassDef {
-        name: "Cleric", desc: "A holy warrior. Heals wounds and burns the undead with sacred light.",
-        hp: 26, mp: 14, hp_lvl: 6, mp_lvl: 3, hit: 3, weapon: 3, armor: 3,
-        skills: [Skill::Heal, Skill::TurnUndead], unlock: None, stealth: 0, color: Rgb(240, 220, 120),
+        name: "Cleric",
+        desc: "A holy warrior. Heals wounds and burns the undead with sacred light.",
+        hp: 26,
+        mp: 14,
+        hp_lvl: 6,
+        mp_lvl: 3,
+        hit: 3,
+        weapon: 3,
+        armor: 3,
+        skills: [Skill::Heal, Skill::TurnUndead],
+        unlock: None,
+        stealth: 0,
+        color: Rgb(240, 220, 120),
     },
     ClassDef {
-        name: "Ranger", desc: "Archer of the deep wilds. Fights at range and summons a wolf companion.",
-        hp: 22, mp: 12, hp_lvl: 5, mp_lvl: 2, hit: 5, weapon: 9, armor: 2,
-        skills: [Skill::Multishot, Skill::SummonWolf], unlock: Some("class_ranger"), stealth: 2, color: Rgb(90, 200, 90),
+        name: "Ranger",
+        desc: "Archer of the deep wilds. Fights at range and summons a wolf companion.",
+        hp: 22,
+        mp: 12,
+        hp_lvl: 5,
+        mp_lvl: 2,
+        hit: 5,
+        weapon: 9,
+        armor: 2,
+        skills: [Skill::Multishot, Skill::SummonWolf],
+        unlock: Some("class_ranger"),
+        stealth: 2,
+        color: Rgb(90, 200, 90),
     },
     ClassDef {
-        name: "Necromancer", desc: "Master of death. Raises corpses as thralls and drains the living.",
-        hp: 18, mp: 18, hp_lvl: 4, mp_lvl: 4, hit: 2, weapon: 0, armor: 1,
-        skills: [Skill::RaiseDead, Skill::DrainLife], unlock: Some("class_necro"), stealth: 1, color: Rgb(150, 90, 200),
+        name: "Necromancer",
+        desc: "Master of death. Raises corpses as thralls and drains the living.",
+        hp: 18,
+        mp: 18,
+        hp_lvl: 4,
+        mp_lvl: 4,
+        hit: 2,
+        weapon: 0,
+        armor: 1,
+        skills: [Skill::RaiseDead, Skill::DrainLife],
+        unlock: Some("class_necro"),
+        stealth: 1,
+        color: Rgb(150, 90, 200),
     },
 ];
 
@@ -1119,14 +2660,53 @@ pub struct UpgradeDef {
     pub ranks: &'static [u32],
 }
 
-const fn stat(id: &'static str, name: &'static str, desc: &'static str, max: u32, cost: u32) -> UpgradeDef {
-    UpgradeDef { id, name, desc, max, cost, skill: None, cat: UCat::Stat, ranks: &[] }
+const fn stat(
+    id: &'static str,
+    name: &'static str,
+    desc: &'static str,
+    max: u32,
+    cost: u32,
+) -> UpgradeDef {
+    UpgradeDef {
+        id,
+        name,
+        desc,
+        max,
+        cost,
+        skill: None,
+        cat: UCat::Stat,
+        ranks: &[],
+    }
 }
-const fn boon(id: &'static str, name: &'static str, desc: &'static str, max: u32, cost: u32) -> UpgradeDef {
-    UpgradeDef { id, name, desc, max, cost, skill: None, cat: UCat::Boon, ranks: &[] }
+const fn boon(
+    id: &'static str,
+    name: &'static str,
+    desc: &'static str,
+    max: u32,
+    cost: u32,
+) -> UpgradeDef {
+    UpgradeDef {
+        id,
+        name,
+        desc,
+        max,
+        cost,
+        skill: None,
+        cat: UCat::Boon,
+        ranks: &[],
+    }
 }
 const fn cskill(id: &'static str, class: usize, s: Skill, cost: u32) -> UpgradeDef {
-    UpgradeDef { id, name: "", desc: "", max: 1, cost, skill: Some(s), cat: UCat::Skill(class), ranks: &[] }
+    UpgradeDef {
+        id,
+        name: "",
+        desc: "",
+        max: 1,
+        cost,
+        skill: Some(s),
+        cat: UCat::Skill(class),
+        ranks: &[],
+    }
 }
 
 pub static UPGRADES: &[UpgradeDef] = &[
@@ -1173,6 +2753,16 @@ pub static UPGRADES: &[UpgradeDef] = &[
     cskill("g_rain", 4, Skill::RainOfArrows, 500),
     cskill("n_corpse", 5, Skill::CorpseExplosion, 450),
     cskill("n_burst", 5, Skill::SoulBurst, 400),
+    UpgradeDef {
+        id: "n_rebind",
+        name: "Undying Bond",
+        desc: "Passive: the body of a fallen thrall can be raised one more time, at about 50% more max HP upkeep",
+        max: 1,
+        cost: 500,
+        skill: None,
+        cat: UCat::Skill(5),
+        ranks: &[],
+    },
 ];
 
 impl UpgradeDef {
@@ -1185,14 +2775,20 @@ impl UpgradeDef {
     }
     pub fn text(&self) -> String {
         match self.skill {
-            Some(s) => format!("{} ({} mp, {} turn cooldown)", s.desc(), s.mp(), s.cooldown()),
+            Some(s) => format!(
+                "{} ({} mp, {} turn cooldown)",
+                s.desc(),
+                s.mp(),
+                s.cooldown()
+            ),
             None => self.desc.to_string(),
         }
     }
 }
 
 /// Upgrades from older versions of the altar, refunded when the profile loads.
-pub static LEGACY_UPGRADES: &[(&str, u32)] = &[("blink", 250), ("burst", 350), ("ward", 300), ("wind", 400)];
+pub static LEGACY_UPGRADES: &[(&str, u32)] =
+    &[("blink", 250), ("burst", 350), ("ward", 300), ("wind", 400)];
 
 // ---------------------------------------------------------------- difficulty
 
@@ -1209,41 +2805,161 @@ pub struct DiffDef {
 }
 
 pub static DIFFICULTIES: [DiffDef; 4] = [
-    DiffDef { name: "Normal", desc: "The dungeon as GRAZZARK made it. Souls come 20% thinner here.", hp: 1.0, dmg: 1.0, souls: 0.8, color: Rgb(170, 220, 170) },
-    DiffDef { name: "Hard", desc: "Monsters have 30% more health and deal 20% more damage.", hp: 1.3, dmg: 1.2, souls: 1.5, color: Rgb(240, 210, 110) },
-    DiffDef { name: "Difficult", desc: "Monsters have 60% more health and deal 40% more damage.", hp: 1.6, dmg: 1.4, souls: 2.0, color: Rgb(255, 140, 70) },
-    DiffDef { name: "Chaotic", desc: "Monsters have double health and deal 70% more damage.", hp: 2.0, dmg: 1.7, souls: 3.0, color: Rgb(255, 60, 90) },
+    DiffDef {
+        name: "Normal",
+        desc: "The dungeon as GRAZZARK made it. Souls come 20% thinner here.",
+        hp: 1.0,
+        dmg: 1.0,
+        souls: 0.8,
+        color: Rgb(170, 220, 170),
+    },
+    DiffDef {
+        name: "Hard",
+        desc: "Monsters have 30% more health and deal 20% more damage.",
+        hp: 1.3,
+        dmg: 1.2,
+        souls: 1.5,
+        color: Rgb(240, 210, 110),
+    },
+    DiffDef {
+        name: "Difficult",
+        desc: "Monsters have 60% more health and deal 40% more damage.",
+        hp: 1.6,
+        dmg: 1.4,
+        souls: 2.0,
+        color: Rgb(255, 140, 70),
+    },
+    DiffDef {
+        name: "Chaotic",
+        desc: "Monsters have double health and deal 70% more damage.",
+        hp: 2.0,
+        dmg: 1.7,
+        souls: 3.0,
+        color: Rgb(255, 60, 90),
+    },
 ];
 
-/// Wall styles for depths 1-9; a run deals three of them out in random
-/// order. Style 3 is reserved for the Sanctum on depth 10.
-pub const FLOOR_THEMES: [u8; 5] = [0, 1, 2, 4, 5];
+/// Wall styles near the surface (depths 1-3): cellars, crypts, gaols, sewers.
+pub const SHALLOW_THEMES: [u8; 4] = [0, 6, 7, 8];
+/// The middle depths (4-6): caves, mines, ice and drowned ruins.
+pub const MIDDLE_THEMES: [u8; 5] = [1, 4, 9, 10, 11];
+/// The deep (7-9): the strangest places of all.
+pub const DEEP_THEMES: [u8; 6] = [2, 5, 12, 13, 14, 15];
+/// Every style a floor above the Sanctum can have.
+#[allow(dead_code)]
+pub const FLOOR_THEMES: [u8; 15] = [0, 6, 7, 8, 1, 4, 9, 10, 11, 2, 5, 12, 13, 14, 15];
 pub const SANCTUM_STYLE: u8 = 3;
 
 /// The names a theme's floors take, in the order you reach them.
 fn theme_names(style: u8) -> [&'static str; 4] {
     match style {
-        0 => ["The Old Cellars", "The Rat Warrens", "The Forgotten Crypts", "The Drowned Cisterns"],
-        1 => ["The Mossy Halls", "The Sunken Galleries", "The Fungal Deep", "The Rotting Gardens"],
-        2 => ["The Obsidian Vaults", "The Molten Stair", "The Halls of Torment", "The Ember Forges"],
-        4 => ["The Frozen Catacombs", "The Rime Halls", "The Glacial Tombs", "The Howling Cold"],
-        5 => ["The Glittering Grotto", "The Crystal Caverns", "The Prism Deep", "The Shard Halls"],
+        0 => [
+            "The Old Cellars",
+            "The Rat Warrens",
+            "The Forgotten Crypts",
+            "The Drowned Cisterns",
+        ],
+        1 => [
+            "The Mossy Halls",
+            "The Sunken Galleries",
+            "The Fungal Deep",
+            "The Rotting Gardens",
+        ],
+        2 => [
+            "The Obsidian Vaults",
+            "The Molten Stair",
+            "The Halls of Torment",
+            "The Ember Forges",
+        ],
+        4 => [
+            "The Frozen Catacombs",
+            "The Rime Halls",
+            "The Glacial Tombs",
+            "The Howling Cold",
+        ],
+        5 => [
+            "The Glittering Grotto",
+            "The Crystal Caverns",
+            "The Prism Deep",
+            "The Shard Halls",
+        ],
+        6 => [
+            "The Old Crypt",
+            "The Burial Vaults",
+            "The Catacombs",
+            "The Charnel Niches",
+        ],
+        7 => [
+            "The Dank Dungeon",
+            "The Oubliettes",
+            "The Weeping Cells",
+            "The Gaol Pits",
+        ],
+        8 => [
+            "The Sewers",
+            "The Cistern Tunnels",
+            "The Overflow",
+            "The Drowned Drains",
+        ],
+        9 => [
+            "The Fungal Grotto",
+            "The Glowcap Caves",
+            "The Spore Gardens",
+            "The Mycelium Deep",
+        ],
+        10 => [
+            "The Drowned Temple",
+            "The Flooded Nave",
+            "The Tidal Sanctum",
+            "The Sunken Shrine",
+        ],
+        11 => [
+            "The Old Mines",
+            "The Collapsed Shafts",
+            "The Dwarven Workings",
+            "The Deep Seam",
+        ],
+        12 => [
+            "The Ossuary",
+            "The Bone Galleries",
+            "The Halls of the Dead",
+            "The Skull Stacks",
+        ],
+        13 => [
+            "The Starless Abyss",
+            "The Void Halls",
+            "The Edge of Nothing",
+            "The Black Between",
+        ],
+        14 => [
+            "The Blood Temple",
+            "The Crimson Nave",
+            "The Altar of Veins",
+            "The Scarlet Halls",
+        ],
+        15 => [
+            "The Infernal Foundry",
+            "The Iron Furnaces",
+            "The Slag Halls",
+            "The Hellforge",
+        ],
         _ => ["The Sanctum of GRAZZARK"; 4],
     }
 }
 
-/// Lay out the themes for depths 1-9: three bands of 2-4 floors each, each
-/// band a different style.
+/// Lay out the themes for depths 1-9. Each tier of three floors (near the
+/// surface, the middle depths, the deep) draws from its own pool, using one
+/// theme for all three floors or two themes split 2+1.
 pub fn roll_themes(rng: &mut rand::rngs::StdRng) -> Vec<u8> {
     use rand::seq::SliceRandom;
-    let mut pool = FLOOR_THEMES.to_vec();
-    pool.shuffle(rng);
-    let splits: [[usize; 3]; 7] = [[3, 3, 3], [2, 3, 4], [4, 3, 2], [3, 2, 4], [2, 4, 3], [4, 2, 3], [3, 4, 2]];
-    let split = splits.choose(rng).copied().unwrap_or([3, 3, 3]);
+    use rand::Rng;
     let mut v = Vec::with_capacity(9);
-    for (b, &len) in split.iter().enumerate() {
-        for _ in 0..len {
-            v.push(pool[b]);
+    for pool in [&SHALLOW_THEMES[..], &MIDDLE_THEMES[..], &DEEP_THEMES[..]] {
+        let picks: Vec<u8> = pool.choose_multiple(rng, 2).copied().collect();
+        match rng.gen_range(0..3) {
+            0 => v.extend([picks[0]; 3]),
+            1 => v.extend([picks[0], picks[0], picks[1]]),
+            _ => v.extend([picks[0], picks[1], picks[1]]),
         }
     }
     v

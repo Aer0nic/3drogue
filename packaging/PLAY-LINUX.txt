@@ -1,0 +1,16 @@
+GRAZZARK - a first-person ASCII roguelike
+
+TO PLAY
+  * From a terminal:   ./grazzark
+  * Or double-click "grazzark" in your file manager. If it was not started
+    from a terminal, the game opens itself in a terminal window
+    (gnome-terminal, konsole, xfce4-terminal, kitty, alacritty, xterm, ...).
+  * To add it to your applications menu: ./install-linux.sh
+
+A terminal of at least 120x36 characters with true colour looks best.
+On first launch you name your profile; with several profiles the game
+asks which one to play. You can add or switch profiles from the title menu.
+Options: --no-audio, --256 (for terminals without true colour), --help
+
+Profiles (soul points, upgrades, bestiary, saved run) are kept in
+~/.local/share/grazzark/profiles/

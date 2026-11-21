@@ -1,0 +1,16 @@
+GRAZZARK - a first-person ASCII roguelike
+
+TO PLAY
+  * Double-click grazzark.exe. It opens in its own console window.
+  * Or run it from Command Prompt / PowerShell / Windows Terminal:
+        grazzark.exe
+    and it plays right there in that window.
+
+Make the window big (at least 120x36 characters) for the best view.
+Windows 10 or newer is needed for colour. Windows Terminal looks best.
+On first launch you name your profile; with several profiles the game
+asks which one to play. You can add or switch profiles from the title menu.
+Options: --no-audio, --256, --help
+
+Profiles (soul points, upgrades, bestiary, saved run) are kept in
+%APPDATA%\grazzark\profiles\

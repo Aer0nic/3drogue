@@ -18,7 +18,176 @@ pub const LOGO: &[&str] = &[
     r" \____|_| \_\/_/   \_\/____/____/_/   \_\_| \_\_|\_\",
 ];
 
-pub const TITLE_ITEMS: [&str; 7] = ["Continue Descent", "New Descent", "Soul Altar", "Bestiary", "Hall of the Dead", "How to Play", "Quit"];
+pub const TITLE_ITEMS: [&str; 10] = [
+    "Continue Descent",
+    "New Descent",
+    "Soul Altar",
+    "Bestiary",
+    "Hall of the Dead",
+    "The Legend",
+    "Change Profile",
+    "New Profile",
+    "How to Play",
+    "Quit",
+];
+
+/// Why anyone would go down there: the legend of GRAZZARK and his heart.
+pub const STORY: &[&str] = &[
+    "Long ago the demon GRAZZARK clawed his way up from the world below and made",
+    "the hills above Hollowmere his body. His halls are his veins. His stones are",
+    "his bones. The things that crawl through them are his thoughts.",
+    "",
+    "The old kings could not kill him, so the Order of the Last Light tore out his",
+    "heart: a burning stone that holds his will. They bound it in gold, the Amulet,",
+    "and meant to carry it into the sun, where nothing of GRAZZARK can endure.",
+    "They never reached the surface. The dungeon swallowed them, and the heart has",
+    "lain in the deepest hall ever since, beating, guarded by his Warden, Vorth.",
+    "",
+    "While the heart beats in the dark, GRAZZARK grows. The wells of Hollowmere run",
+    "red. Crops rot overnight. The dead climb out of the churchyard and walk down",
+    "into the hills. Every year the dungeon reaches a little further.",
+    "",
+    "Only sunlight can end him. Carry the Amulet up through every hall he owns and",
+    "into the light of day, and his heart will burn, and the hills will be only",
+    "hills again.",
+    "",
+    "He knows this. The moment you take his heart the whole dungeon will wake. The",
+    "walls will grow flesh. The faces in his stones will scream. Everything he is",
+    "will try to stop you.",
+    "",
+    "Many have gone down. None has come back up with it.",
+];
+
+// ================================================================ profiles
+
+pub fn draw_profiles(
+    c: &mut Canvas,
+    list: &[crate::profile::ProfileEntry],
+    sel: usize,
+    current: Option<&str>,
+    t: f32,
+) {
+    let w = c.w as i32;
+    let h = c.h as i32;
+    c.fill(0, 0, w, h, ' ', Rgb::WHITE, Rgb(6, 6, 12));
+    c.center(1, "CHOOSE YOUR PROFILE", Rgb(255, 200, 120));
+    c.center(
+        2,
+        "Each profile keeps its own soul points, upgrades, bestiary and saved run.",
+        Rgb(150, 140, 130),
+    );
+    let top = 4;
+    let rows = (h - top - 3).max(1) as usize;
+    let start = if sel >= rows { sel + 1 - rows } else { 0 };
+    let lw = 64.min(w - 4);
+    let x0 = (w - lw) / 2;
+    for (row, i) in (start..list.len()).enumerate() {
+        if row >= rows {
+            break;
+        }
+        let e = &list[i];
+        let y = top + row as i32;
+        let mark = if current == Some(e.name.as_str()) {
+            "*"
+        } else {
+            " "
+        };
+        let save = if e.has_save {
+            "  [run in progress]"
+        } else {
+            ""
+        };
+        let line = format!(
+            "{}{:<17} {:>4} descents {:>3} wins {:>6} souls{}",
+            mark, e.name, e.runs, e.wins, e.points, save
+        );
+        let line: String = line.chars().take(lw as usize).collect();
+        if i == sel {
+            let col = Rgb(255, 230, 150).lerp(Rgb::WHITE, 0.4 + 0.3 * (t * 4.0).sin());
+            c.text_bg(
+                x0,
+                y,
+                &format!("{:<w$}", line, w = lw as usize),
+                Rgb::BLACK,
+                col,
+            );
+        } else {
+            c.text(x0, y, &line, Rgb(200, 190, 170));
+        }
+    }
+    let hint = if current.is_some() {
+        "Up/Down + Enter: load   N: new profile   Esc: back"
+    } else {
+        "Up/Down + Enter: load   N: new profile   Esc: quit"
+    };
+    c.center(h - 1, hint, Rgb(120, 110, 100));
+}
+
+pub fn draw_new_profile(c: &mut Canvas, name: &str, err: &str, first: bool, t: f32) {
+    let w = c.w as i32;
+    let h = c.h as i32;
+    c.fill(0, 0, w, h, ' ', Rgb::WHITE, Rgb(6, 6, 12));
+    let my = (h / 2 - 4).max(1);
+    if first {
+        c.center(
+            my - 2,
+            "Welcome to the dungeon of GRAZZARK.",
+            Rgb(255, 200, 120),
+        );
+    }
+    c.center(my, "NAME YOUR PROFILE", Rgb(255, 200, 120));
+    c.center(
+        my + 1,
+        "Your soul points, upgrades, bestiary and saved run are kept under this name.",
+        Rgb(150, 140, 130),
+    );
+    let bw = (crate::profile::NAME_MAX as i32 + 4).max(20);
+    let bx = (w - bw) / 2;
+    c.frame(bx, my + 3, bw, 3, Rgb(200, 170, 110), Rgb(14, 12, 10));
+    let cursor = if (t * 2.5) as i32 % 2 == 0 { "_" } else { " " };
+    c.text(
+        bx + 2,
+        my + 4,
+        &format!("{}{}", name, cursor),
+        Rgb(255, 240, 200),
+    );
+    if !err.is_empty() {
+        c.center(my + 7, err, Rgb(255, 110, 90));
+    }
+    let hint = if first {
+        "Type a name, then Enter   Esc: quit"
+    } else {
+        "Type a name, then Enter   Esc: cancel"
+    };
+    c.center(h - 1, hint, Rgb(120, 110, 100));
+}
+
+pub fn draw_story(c: &mut Canvas, t: f32) {
+    let w = c.w as i32;
+    let h = c.h as i32;
+    c.fill(0, 0, w, h, ' ', Rgb::WHITE, Rgb(8, 4, 6));
+    let pulse = 0.5 + 0.5 * (t * 1.2).sin();
+    c.center(
+        1,
+        "THE LEGEND OF GRAZZARK",
+        Rgb(255, 120, 80).lerp(Rgb(255, 210, 120), pulse),
+    );
+    let top = 3.max((h - STORY.len() as i32 - 4) / 2);
+    for (i, line) in STORY.iter().enumerate() {
+        let y = top + i as i32;
+        if y >= h - 2 {
+            break;
+        }
+        let s: String = line.chars().take((w - 2).max(1) as usize).collect();
+        let col = if line.starts_with("Many") {
+            Rgb(255, 110, 90)
+        } else {
+            Rgb(215, 200, 180)
+        };
+        c.center(y, &s, col);
+    }
+    c.center(h - 1, "Press Enter to continue", Rgb(150, 130, 110));
+}
 
 // ================================================================ fire
 
@@ -31,7 +200,11 @@ pub struct Fire {
 
 impl Fire {
     pub fn new() -> Fire {
-        Fire { w: 0, h: 0, heat: Vec::new() }
+        Fire {
+            w: 0,
+            h: 0,
+            heat: Vec::new(),
+        }
     }
 
     pub fn resize(&mut self, w: usize, h: usize) {
@@ -51,7 +224,11 @@ impl Fire {
         let mut rng = rand::thread_rng();
         for x in 0..w {
             let i = (h - 1) * w + x;
-            self.heat[i] = if on { 36 - rng.gen_range(0..5) } else { self.heat[i].saturating_sub(3) };
+            self.heat[i] = if on {
+                36 - rng.gen_range(0..5)
+            } else {
+                self.heat[i].saturating_sub(3)
+            };
         }
         for y in 1..h {
             for x in 0..w {
@@ -136,10 +313,23 @@ pub fn draw_title(c: &mut Canvas, fire: &Fire, t: f32, sel: usize, prof: &Profil
     }
     c.center(ly + 6, "~ the Descent for the Amulet ~", Rgb(200, 170, 130));
 
-    let my = ly + 9;
     let first = if has_save { 0 } else { 1 };
+    let rows = (TITLE_ITEMS.len() - first) as i32;
+    // Two lines per item when there is room, one when the window is short.
+    let mut my = ly + 9;
+    let step = if my + rows * 2 + 3 < h { 2 } else { 1 };
+    if step == 1 {
+        my = (ly + 8).min(h - rows - 4).max(0);
+    }
+    if !prof.name.is_empty() {
+        c.center(
+            my - 1,
+            &format!("Profile: {}", prof.name),
+            Rgb(150, 200, 255),
+        );
+    }
     for (i, item) in TITLE_ITEMS.iter().enumerate().skip(first) {
-        let y = my + (i - first) as i32 * 2;
+        let y = my + (i - first) as i32 * step;
         if i == sel {
             let s = format!(">>  {}  <<", item);
             let col = Rgb(255, 230, 150).lerp(Rgb::WHITE, 0.5 + 0.5 * (t * 4.0).sin());
@@ -152,10 +342,13 @@ pub fn draw_title(c: &mut Canvas, fire: &Fire, t: f32, sel: usize, prof: &Profil
         "Soul Points: {}    Descents: {}    Victories: {}    Deepest: {}",
         prof.points, prof.runs, prof.wins, prof.best_depth
     );
-    let rows = (TITLE_ITEMS.len() - first) as i32;
-    c.center(my + rows * 2 + 1, &stats, Rgb(190, 140, 255));
+    c.center(my + rows * step + 1, &stats, Rgb(190, 140, 255));
     if has_save && sel == 1 {
-        c.center(my + rows * 2 + 2, "(a new descent abandons your saved run)", Rgb(200, 120, 100));
+        c.center(
+            my + rows * step + 2,
+            "(a new descent abandons your saved run)",
+            Rgb(200, 120, 100),
+        );
     }
     c.center(h - 1, "Up/Down + Enter to choose", Rgb(120, 100, 90));
 }
@@ -171,12 +364,25 @@ pub fn draw_class_select(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     for (i, cd) in CLASSES.iter().enumerate() {
         let y = 4 + i as i32 * 2;
         let unlocked = prof.class_unlocked(cd);
-        let label = if unlocked { cd.name.to_string() } else { format!("{} (locked)", cd.name) };
+        let label = if unlocked {
+            cd.name.to_string()
+        } else {
+            format!("{} (locked)", cd.name)
+        };
         if i == sel {
             let col = cd.color.lerp(Rgb::WHITE, 0.3 + 0.2 * (t * 4.0).sin());
             c.text(lx, y, &format!("> {}", label), col);
         } else {
-            c.text(lx + 2, y, &label, if unlocked { cd.color.scale(0.8) } else { Rgb(90, 90, 90) });
+            c.text(
+                lx + 2,
+                y,
+                &label,
+                if unlocked {
+                    cd.color.scale(0.8)
+                } else {
+                    Rgb(90, 90, 90)
+                },
+            );
         }
     }
     let cd = &CLASSES[sel];
@@ -192,35 +398,112 @@ pub fn draw_class_select(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     }
     y += 1;
     let b = prof.bonuses();
-    c.text(px + 2, y, &format!("Health {}   Mana {}   Accuracy +{}", cd.hp + b.hp, cd.mp + b.mp, cd.hit), Rgb(200, 180, 160));
+    c.text(
+        px + 2,
+        y,
+        &format!(
+            "Health {}   Mana {}   Accuracy +{}",
+            cd.hp + b.hp,
+            cd.mp + b.mp,
+            cd.hit
+        ),
+        Rgb(200, 180, 160),
+    );
     y += 1;
-    c.text(px + 2, y, &format!("Weapon: {}   Armor: {}", WEAPONS[cd.weapon].name, ARMORS[cd.armor].name), Rgb(180, 180, 200));
+    c.text(
+        px + 2,
+        y,
+        &format!(
+            "Weapon: {}   Armor: {}",
+            WEAPONS[cd.weapon].name, ARMORS[cd.armor].name
+        ),
+        Rgb(180, 180, 200),
+    );
     y += 2;
     c.text(px + 2, y, "Skills:", Rgb(255, 220, 140));
     y += 1;
     for (i, s) in cd.skills.iter().enumerate() {
-        c.text(px + 4, y, &format!("[{}] {} ({} mp) - {}", i + 1, s.name(), s.mp(), s.desc()), Rgb(170, 230, 170));
+        c.text(
+            px + 4,
+            y,
+            &format!("[{}] {} ({} mp) - {}", i + 1, s.name(), s.mp(), s.desc()),
+            Rgb(170, 230, 170),
+        );
         y += 1;
     }
     let mut slot = 3;
     for u in UPGRADES.iter().filter(|u| u.cat == UCat::Skill(sel)) {
-        let Some(s) = u.skill else { continue };
+        let Some(s) = u.skill else {
+            let owned = prof.rank(u.id) > 0;
+            let (txt, col) = if owned {
+                (
+                    format!("[passive] {} - {}", u.name, u.desc),
+                    Rgb(200, 160, 255),
+                )
+            } else {
+                (
+                    format!(
+                        "[-] {} (passive) - learn at the Soul Altar ({} pts)",
+                        u.name, u.cost
+                    ),
+                    Rgb(100, 90, 110),
+                )
+            };
+            c.text(px + 4, y, &txt, col);
+            y += 1;
+            continue;
+        };
         if b.skills.contains(&s) {
-            c.text(px + 4, y, &format!("[{}] {} ({} mp) - {}", slot, s.name(), s.mp(), s.desc()), Rgb(200, 160, 255));
+            c.text(
+                px + 4,
+                y,
+                &format!("[{}] {} ({} mp) - {}", slot, s.name(), s.mp(), s.desc()),
+                Rgb(200, 160, 255),
+            );
             slot += 1;
         } else {
-            c.text(px + 4, y, &format!("[-] {} - learn at the Soul Altar ({} pts)", s.name(), u.cost), Rgb(100, 90, 110));
+            c.text(
+                px + 4,
+                y,
+                &format!(
+                    "[-] {} - learn at the Soul Altar ({} pts)",
+                    s.name(),
+                    u.cost
+                ),
+                Rgb(100, 90, 110),
+            );
         }
         y += 1;
     }
     y += 1;
     if !prof.class_unlocked(cd) {
-        let cost = UPGRADES.iter().find(|u| Some(u.id) == cd.unlock).map(|u| u.cost).unwrap_or(0);
-        c.text(px + 2, y, &format!("LOCKED - unlock at the Soul Altar for {} soul points.", cost), Rgb(255, 100, 100));
+        let cost = UPGRADES
+            .iter()
+            .find(|u| Some(u.id) == cd.unlock)
+            .map(|u| u.cost)
+            .unwrap_or(0);
+        c.text(
+            px + 2,
+            y,
+            &format!(
+                "LOCKED - unlock at the Soul Altar for {} soul points.",
+                cost
+            ),
+            Rgb(255, 100, 100),
+        );
     } else {
-        c.text(px + 2, y, "Press Enter to choose a difficulty.", Rgb(255, 230, 150));
+        c.text(
+            px + 2,
+            y,
+            "Press Enter to choose a difficulty.",
+            Rgb(255, 230, 150),
+        );
     }
-    c.center(h - 2, "Up/Down: choose   Enter: next   Esc: back", Rgb(120, 110, 100));
+    c.center(
+        h - 2,
+        "Up/Down: choose   Enter: next   Esc: back",
+        Rgb(120, 110, 100),
+    );
 }
 
 pub fn wrap(s: &str, width: usize) -> Vec<String> {
@@ -259,8 +542,16 @@ pub fn draw_altar(c: &mut Canvas, sel: usize, prof: &Profile, t: f32, note: &str
     c.fill(0, 0, w, h, ' ', Rgb::WHITE, Rgb(8, 4, 14));
     let fh = (h / 5).max(4);
     fire.draw(c, 0, h - fh, 3);
-    c.center(1, "~ THE SOUL ALTAR ~", Rgb(200, 150, 255).lerp(Rgb::WHITE, 0.3 + 0.3 * (t * 2.0).sin()));
-    c.center(2, &format!("Soul Points: {}", prof.points), Rgb(230, 200, 255));
+    c.center(
+        1,
+        "~ THE SOUL ALTAR ~",
+        Rgb(200, 150, 255).lerp(Rgb::WHITE, 0.3 + 0.3 * (t * 2.0).sin()),
+    );
+    c.center(
+        2,
+        &format!("Soul Points: {}", prof.points),
+        Rgb(230, 200, 255),
+    );
 
     // Rows: Some(i) is upgrade i, None(k) a section heading for upgrade k.
     let mut rows: Vec<(bool, usize)> = Vec::new();
@@ -273,7 +564,12 @@ pub fn draw_altar(c: &mut Canvas, sel: usize, prof: &Profile, t: f32, note: &str
     let top = 4;
     let avail = (h - top - fh - 4).max(4);
     let sel_row = rows.iter().position(|&(it, i)| it && i == sel).unwrap_or(0) as i32;
-    let start = if sel_row - 1 >= avail { sel_row - avail + 1 } else { 0 }.max(0);
+    let start = if sel_row - 1 >= avail {
+        sel_row - avail + 1
+    } else {
+        0
+    }
+    .max(0);
     let lx = 3;
     for (row, &(is_item, i)) in rows.iter().enumerate().skip(start as usize) {
         let y = top + row as i32 - start;
@@ -302,7 +598,13 @@ pub fn draw_altar(c: &mut Canvas, sel: usize, prof: &Profile, t: f32, note: &str
         let line = format!("{:<22} {:<8} {}", u.title(), pips, cost);
         let affordable = prof.next_cost(i).map_or(false, |cst| cst <= prof.points);
         if i == sel {
-            c.text_bg(lx, y, &format!("> {}", line), Rgb::BLACK, Rgb(200, 150, 255));
+            c.text_bg(
+                lx,
+                y,
+                &format!("> {}", line),
+                Rgb::BLACK,
+                Rgb(200, 150, 255),
+            );
         } else {
             let col = if r >= u.max {
                 Rgb(255, 215, 100)
@@ -337,7 +639,11 @@ pub fn draw_altar(c: &mut Canvas, sel: usize, prof: &Profile, t: f32, note: &str
     if !note.is_empty() {
         c.text(lx, dy - 1, note, Rgb(255, 230, 150));
     }
-    c.center(h - 1, "Up/Down: choose   Enter: buy   Esc: back", Rgb(160, 140, 180));
+    c.center(
+        h - 1,
+        "Up/Down: choose   Enter: buy   Esc: back",
+        Rgb(160, 140, 180),
+    );
 }
 
 // ================================================================ difficulty
@@ -353,12 +659,29 @@ pub fn draw_difficulty(c: &mut Canvas, sel: usize, class: usize, prof: &Profile,
     for (i, d) in DIFFICULTIES.iter().enumerate() {
         let y = 5 + i as i32 * 2;
         let open = prof.diff_unlocked(i);
-        let label = if open { d.name.to_string() } else { format!("{} (locked)", d.name) };
+        let label = if open {
+            d.name.to_string()
+        } else {
+            format!("{} (locked)", d.name)
+        };
         if i == sel {
-            let col = if open { d.color.lerp(Rgb::WHITE, 0.3 + 0.2 * (t * 4.0).sin()) } else { Rgb(150, 110, 110) };
+            let col = if open {
+                d.color.lerp(Rgb::WHITE, 0.3 + 0.2 * (t * 4.0).sin())
+            } else {
+                Rgb(150, 110, 110)
+            };
             c.text(lx, y, &format!("> {}", label), col);
         } else {
-            c.text(lx + 2, y, &label, if open { d.color.scale(0.8) } else { Rgb(90, 80, 80) });
+            c.text(
+                lx + 2,
+                y,
+                &label,
+                if open {
+                    d.color.scale(0.8)
+                } else {
+                    Rgb(90, 80, 80)
+                },
+            );
         }
     }
     let d = &DIFFICULTIES[sel];
@@ -373,24 +696,53 @@ pub fn draw_difficulty(c: &mut Canvas, sel: usize, class: usize, prof: &Profile,
         y += 1;
     }
     y += 1;
-    c.text(px + 2, y, &format!("Monster health  x{:.1}", d.hp), Rgb(230, 160, 160));
+    c.text(
+        px + 2,
+        y,
+        &format!("Monster health  x{:.1}", d.hp),
+        Rgb(230, 160, 160),
+    );
     y += 1;
-    c.text(px + 2, y, &format!("Monster damage  x{:.1}", d.dmg), Rgb(230, 160, 160));
+    c.text(
+        px + 2,
+        y,
+        &format!("Monster damage  x{:.1}", d.dmg),
+        Rgb(230, 160, 160),
+    );
     y += 1;
-    c.text(px + 2, y, &format!("Soul points     x{:.1}", d.souls), Rgb(200, 160, 255));
+    c.text(
+        px + 2,
+        y,
+        &format!("Soul points     x{:.1}", d.souls),
+        Rgb(200, 160, 255),
+    );
     y += 2;
     if prof.diff_unlocked(sel) {
-        c.text(px + 2, y, "Press Enter to begin your descent.", Rgb(255, 230, 150));
+        c.text(
+            px + 2,
+            y,
+            "Press Enter to begin your descent.",
+            Rgb(255, 230, 150),
+        );
     } else {
         let prev = DIFFICULTIES[sel - 1].name;
-        c.text(px + 2, y, &format!("LOCKED - escape with the Amulet on {} to unlock.", prev), Rgb(255, 100, 100));
+        c.text(
+            px + 2,
+            y,
+            &format!("LOCKED - escape with the Amulet on {} to unlock.", prev),
+            Rgb(255, 100, 100),
+        );
     }
-    c.center(h - 2, "Up/Down: choose   Enter: begin   Esc: back", Rgb(120, 110, 100));
+    c.center(
+        h - 2,
+        "Up/Down: choose   Enter: begin   Esc: back",
+        Rgb(120, 110, 100),
+    );
 }
 
 // ================================================================ bestiary
 
-fn speed_word(ticks: f64) -> &'static str {
+pub fn speed_word(ticks: f64) -> &'static str {
     match ticks as i32 {
         i32::MIN..=70 => "very fast",
         71..=89 => "fast",
@@ -400,7 +752,7 @@ fn speed_word(ticks: f64) -> &'static str {
     }
 }
 
-fn faction_word(f: crate::entity::Faction) -> &'static str {
+pub fn faction_word(f: crate::entity::Faction) -> &'static str {
     use crate::entity::Faction::*;
     match f {
         Vermin => "vermin",
@@ -418,27 +770,51 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     let h = c.h as i32;
     c.fill(0, 0, w, h, ' ', Rgb::WHITE, Rgb(8, 8, 6));
     c.center(1, "THE BESTIARY", Rgb(230, 210, 150));
-    let known = MONSTERS.iter().filter(|m| prof.kills_of(m.name) >= m.lore().name).count();
-    let stars = MONSTERS.iter().filter(|m| prof.kills_of(m.name) >= m.lore().master).count();
-    c.center(2, &format!("{} of {} creatures known   {} mastered", known, MONSTERS.len(), stars), Rgb(160, 150, 120));
+    let known = MONSTERS
+        .iter()
+        .filter(|m| prof.kills_of(m.name) >= m.lore().name)
+        .count();
+    let stars = MONSTERS
+        .iter()
+        .filter(|m| prof.kills_of(m.name) >= m.lore().master)
+        .count();
+    c.center(
+        2,
+        &format!(
+            "{} of {} creatures known   {} mastered",
+            known,
+            MONSTERS.len(),
+            stars
+        ),
+        Rgb(160, 150, 120),
+    );
 
     let lw = 38.min(w / 2 - 2);
     let top = 4;
     let rows = (h - top - 2).max(4);
-    let start = if sel as i32 >= rows { sel as i32 - rows + 1 } else { 0 };
-    for (row, i) in (start as usize..MONSTERS.len()).enumerate() {
+    let start = if sel as i32 >= rows {
+        sel as i32 - rows + 1
+    } else {
+        0
+    };
+    let order = bestiary_order();
+    for (row, pos) in (start as usize..order.len()).enumerate() {
         if row as i32 >= rows {
             break;
         }
-        let m = &MONSTERS[i];
+        let m = &MONSTERS[order[pos]];
         let k = prof.kills_of(m.name);
         let lt = m.lore();
         let y = top + row as i32;
         let star = if k >= lt.master { '*' } else { ' ' };
-        let name = if k >= lt.name { m.name.to_string() } else { "???".to_string() };
+        let name = if k >= lt.name {
+            m.name.to_string()
+        } else {
+            "???".to_string()
+        };
         let name: String = name.chars().take((lw - 10).max(4) as usize).collect();
         let line = format!("{}{:<w$}{:>6}", star, name, k, w = (lw - 8).max(4) as usize);
-        if i == sel {
+        if pos == sel {
             c.text_bg(1, y, &format!(" {}", line), Rgb::BLACK, Rgb(220, 200, 140));
         } else {
             let col = if k >= lt.master {
@@ -453,7 +829,8 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     }
 
     // Detail panel.
-    let m = &MONSTERS[sel];
+    let mi = order[sel.min(order.len() - 1)];
+    let m = &MONSTERS[mi];
     let k = prof.kills_of(m.name);
     let lt = m.lore();
     let px = lw + 3;
@@ -470,10 +847,19 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
         c.text(tx, y + 2, "Slay one to learn its name.", Rgb(120, 110, 100));
         return;
     }
-    let title_col = if k >= lt.master { Rgb(255, 215, 90).lerp(Rgb::WHITE, 0.3 + 0.3 * (t * 3.0).sin()) } else { m.color };
+    let title_col = if k >= lt.master {
+        Rgb(255, 215, 90).lerp(Rgb::WHITE, 0.3 + 0.3 * (t * 3.0).sin())
+    } else {
+        m.color
+    };
     let star = if k >= lt.master { "* " } else { "" };
     c.text(tx, y, &format!("{}{}", star, cap_first(m.name)), title_col);
-    c.text(tx + pw - 18, y, &format!("{:>5} slain", k), Rgb(180, 170, 140));
+    c.text(
+        tx + pw - 18,
+        y,
+        &format!("{:>5} slain", k),
+        Rgb(180, 170, 140),
+    );
     y += 2;
     // Portrait.
     for line in m.art.iter() {
@@ -489,16 +875,37 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
         c.text(tx, y, &next(lt.basic), Rgb(120, 110, 100));
         return;
     }
-    let hp_txt = if m.hp > 0 { m.hp.to_string() } else { "?".into() };
-    c.text(tx, y, &format!("Health {}   Damage {}-{}   Armour {}   Speed: {}", hp_txt, m.dmg.0, m.dmg.1, m.ac, speed_word(m.speed)), Rgb(220, 200, 160));
+    let hp_txt = if m.hp > 0 {
+        m.hp.to_string()
+    } else {
+        "?".into()
+    };
+    c.text(
+        tx,
+        y,
+        &format!(
+            "Health {}   Damage {}-{}   Armour {}   Speed: {}",
+            hp_txt,
+            m.dmg.0,
+            m.dmg.1,
+            m.ac,
+            speed_word(m.speed)
+        ),
+        Rgb(220, 200, 160),
+    );
     y += 1;
-    c.text(tx, y, &format!("Kind: {}", faction_word(m.faction)), Rgb(190, 180, 150));
+    c.text(
+        tx,
+        y,
+        &format!("Kind: {}", faction_word(m.faction)),
+        Rgb(190, 180, 150),
+    );
     y += 2;
     if k < lt.desc {
         c.text(tx, y, &next(lt.desc), Rgb(120, 110, 100));
         return;
     }
-    let lore = MONSTER_LORE.get(sel).copied().unwrap_or("");
+    let lore = MONSTER_LORE.get(mi).copied().unwrap_or("");
     for line in wrap(lore, tw) {
         if y >= h - 6 {
             break;
@@ -521,16 +928,25 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
         format!("depths {}-{}", m.depth.0, m.depth.1)
     };
     let mut adv = vec![
-        format!("Found on {}.  Accuracy +{}.  Sight {}.  {} XP.", depth, m.hit, m.sight, m.xp),
+        format!(
+            "Found on {}.  Accuracy +{}.  Sight {}.  {} XP.",
+            depth, m.hit, m.sight, m.xp
+        ),
         if m.revive.1 > 0.0 {
-            format!("Rises again {:.0}-{:.0} turns after death.", m.revive.0, m.revive.1)
+            format!(
+                "Rises again {:.0}-{:.0} turns after death.",
+                m.revive.0, m.revive.1
+            )
         } else {
             "Stays dead once slain.".to_string()
         },
     ];
     let mut traits: Vec<String> = Vec::new();
     if let Some(r) = &m.ranged {
-        traits.push(format!("{} ({}-{}, range {})", r.verb, r.dmg.0, r.dmg.1, r.range));
+        traits.push(format!(
+            "{} ({}-{}, range {})",
+            r.verb, r.dmg.0, r.dmg.1, r.range
+        ));
     }
     if m.poison {
         traits.push("poisonous".into());
@@ -565,10 +981,20 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     y += 1;
     if k < lt.master {
         if y < h - 2 {
-            c.text(tx, y, &format!("({} more kills to master it)", lt.master - k), Rgb(120, 110, 100));
+            c.text(
+                tx,
+                y,
+                &format!("({} more kills to master it)", lt.master - k),
+                Rgb(120, 110, 100),
+            );
         }
     } else if y < h - 2 {
-        c.text(tx, y, "MASTERED: +1.5% crit chance and +2% crit damage against it.", Rgb(255, 215, 90));
+        c.text(
+            tx,
+            y,
+            "MASTERED: +1.5% crit chance and +2% crit damage against it.",
+            Rgb(255, 215, 90),
+        );
     }
 }
 
@@ -587,9 +1013,20 @@ pub fn draw_hall(c: &mut Canvas, prof: &Profile) {
     let h = c.h as i32;
     c.fill(0, 0, w, h, ' ', Rgb::WHITE, Rgb(6, 6, 10));
     c.center(1, "HALL OF THE DEAD", Rgb(200, 200, 230));
-    c.center(2, &format!("{} descents, {} victories, {} soul points earned in total", prof.runs, prof.wins, prof.total_points), Rgb(140, 140, 170));
+    c.center(
+        2,
+        &format!(
+            "{} descents, {} victories, {} soul points earned in total",
+            prof.runs, prof.wins, prof.total_points
+        ),
+        Rgb(140, 140, 170),
+    );
     if prof.history.is_empty() {
-        c.center(5, "No one has yet entered the dungeon of GRAZZARK.", Rgb(150, 150, 150));
+        c.center(
+            5,
+            "No one has yet entered the dungeon of GRAZZARK.",
+            Rgb(150, 150, 150),
+        );
     }
     for (i, r) in prof.history.iter().rev().enumerate() {
         let y = 4 + i as i32;
@@ -603,10 +1040,23 @@ pub fn draw_hall(c: &mut Canvas, prof: &Profile) {
             r.level,
             r.depth,
             r.points,
-            if r.won { "ESCAPED WITH THE AMULET!".to_string() } else { r.cause.clone() }
+            if r.won {
+                "ESCAPED WITH THE AMULET!".to_string()
+            } else {
+                r.cause.clone()
+            }
         );
         let s: String = line.chars().take((w - 4).max(0) as usize).collect();
-        c.text(2, y, &s, if r.won { Rgb(255, 220, 100) } else { Rgb(190, 170, 160) });
+        c.text(
+            2,
+            y,
+            &s,
+            if r.won {
+                Rgb(255, 220, 100)
+            } else {
+                Rgb(190, 170, 160)
+            },
+        );
     }
     c.center(h - 1, "Esc: back", Rgb(120, 120, 140));
 }
@@ -674,20 +1124,67 @@ impl DeathScreen {
                 let n = a_name(*k);
                 match MONSTERS[*k].death {
                     DeathKind::Beast => (BloodRain, "DEVOURED", format!("Torn apart by {}.", n)),
-                    DeathKind::Undead => (GhostMist, "JOINED THE RESTLESS DEAD", format!("Slain by {}. Your bones will rise again...", n)),
-                    DeathKind::Brute => (BloodRain, "SLAIN IN BATTLE", format!("Cut down by {}.", n)),
+                    DeathKind::Undead => (
+                        GhostMist,
+                        "JOINED THE RESTLESS DEAD",
+                        format!("Slain by {}. Your bones will rise again...", n),
+                    ),
+                    DeathKind::Brute => {
+                        (BloodRain, "SLAIN IN BATTLE", format!("Cut down by {}.", n))
+                    }
                     DeathKind::Crushed => (Cracks, "CRUSHED", format!("Pulverized by {}.", n)),
-                    DeathKind::Demon => (Fire, "CLAIMED BY THE ABYSS", format!("Dragged into the abyss by {}.", n)),
+                    DeathKind::Demon => (
+                        Fire,
+                        "CLAIMED BY THE ABYSS",
+                        format!("Dragged into the abyss by {}.", n),
+                    ),
                 }
             }
-            DeathCause::Spell(k) => (Arcane, "UNMADE BY SORCERY", format!("Blasted apart by the magic of {}.", a_name(*k))),
-            DeathCause::OwnFire => (Ash, "HOIST BY YOUR OWN FIREBALL", "Burned to ash by your own spell. The dungeon laughs.".to_string()),
-            DeathCause::Poison(s) => (Toxic, "POISONED", format!("Succumbed to the venom of {}.", s)),
-            DeathCause::Trap(TrapKind::Spikes) => (Spikes, "IMPALED", "Skewered on a hidden spike trap.".to_string()),
-            DeathCause::Trap(TrapKind::Gas) => (Toxic, "CHOKED", "Choked to death on poison gas.".to_string()),
-            DeathCause::Trap(TrapKind::Fire) => (Fire, "IMMOLATED", "Consumed by a roaring fire trap.".to_string()),
-            DeathCause::Trap(TrapKind::Alarm) => (Cracks, "OVERWHELMED", "The alarm summoned your doom.".to_string()),
-            DeathCause::Abandoned => (GhostMist, "LOST TO MADNESS", "Fled screaming into the dark, never to be seen again.".to_string()),
+            DeathCause::Spell(k) => (
+                Arcane,
+                "UNMADE BY SORCERY",
+                format!("Blasted apart by the magic of {}.", a_name(*k)),
+            ),
+            DeathCause::OwnFire => (
+                Ash,
+                "HOIST BY YOUR OWN FIREBALL",
+                "Burned to ash by your own spell. The dungeon laughs.".to_string(),
+            ),
+            DeathCause::Poison(s) => (
+                Toxic,
+                "POISONED",
+                format!("Succumbed to the venom of {}.", s),
+            ),
+            DeathCause::Trap(TrapKind::Spikes) => (
+                Spikes,
+                "IMPALED",
+                "Skewered on a hidden spike trap.".to_string(),
+            ),
+            DeathCause::Trap(TrapKind::Gas) => (
+                Toxic,
+                "CHOKED",
+                "Choked to death on poison gas.".to_string(),
+            ),
+            DeathCause::Trap(TrapKind::Fire) => (
+                Fire,
+                "IMMOLATED",
+                "Consumed by a roaring fire trap.".to_string(),
+            ),
+            DeathCause::Trap(TrapKind::Alarm) => (
+                Cracks,
+                "OVERWHELMED",
+                "The alarm summoned your doom.".to_string(),
+            ),
+            DeathCause::Trap(TrapKind::Maw) => (
+                BloodRain,
+                "DEVOURED BY THE DUNGEON",
+                "Swallowed whole by a maw in the living floor.".to_string(),
+            ),
+            DeathCause::Abandoned => (
+                GhostMist,
+                "LOST TO MADNESS",
+                "Fled screaming into the dark, never to be seen again.".to_string(),
+            ),
         };
         DeathScreen {
             kind,
@@ -720,11 +1217,20 @@ impl DeathScreen {
         match self.kind {
             DeathFx::Fire | DeathFx::Ash => {
                 self.fire.resize(w, h);
-                self.fire.step(self.t < 6.0 || self.kind == DeathFx::Fire, 2);
+                self.fire
+                    .step(self.t < 6.0 || self.kind == DeathFx::Fire, 2);
             }
             DeathFx::BloodRain => {
                 for _ in 0..(w / 8).max(2) {
-                    self.parts.push(SP { x: rng.gen::<f32>() * wf, y: 0.0, vx: 0.0, vy: rng.gen_range(18.0..34.0), ch: if rng.gen_bool(0.5) { '|' } else { ':' }, c: Rgb(rng.gen_range(140..220), 0, 0), life: 5.0 });
+                    self.parts.push(SP {
+                        x: rng.gen::<f32>() * wf,
+                        y: 0.0,
+                        vx: 0.0,
+                        vy: rng.gen_range(18.0..34.0),
+                        ch: if rng.gen_bool(0.5) { '|' } else { ':' },
+                        c: Rgb(rng.gen_range(140..220), 0, 0),
+                        life: 5.0,
+                    });
                 }
                 for p in self.parts.iter_mut() {
                     p.y += p.vy * dt;
@@ -741,11 +1247,35 @@ impl DeathScreen {
                 let n = (w / 12).max(2);
                 for _ in 0..n {
                     let toxic = self.kind == DeathFx::Toxic;
-                    let ch = if toxic { ['o', 'O', '.', 'o'][rng.gen_range(0..4)] } else { ['~', 'o', '.', '\''][rng.gen_range(0..4)] };
-                    let c = if toxic { Rgb(rng.gen_range(60..140), rng.gen_range(180..255), 40) } else { Rgb(rng.gen_range(150..220), 255, rng.gen_range(180..230)) };
-                    self.parts.push(SP { x: rng.gen::<f32>() * wf, y: hf, vx: 0.0, vy: -rng.gen_range(3.0..9.0), ch, c, life: rng.gen_range(3.0..7.0) });
+                    let ch = if toxic {
+                        ['o', 'O', '.', 'o'][rng.gen_range(0..4)]
+                    } else {
+                        ['~', 'o', '.', '\''][rng.gen_range(0..4)]
+                    };
+                    let c = if toxic {
+                        Rgb(rng.gen_range(60..140), rng.gen_range(180..255), 40)
+                    } else {
+                        Rgb(rng.gen_range(150..220), 255, rng.gen_range(180..230))
+                    };
+                    self.parts.push(SP {
+                        x: rng.gen::<f32>() * wf,
+                        y: hf,
+                        vx: 0.0,
+                        vy: -rng.gen_range(3.0..9.0),
+                        ch,
+                        c,
+                        life: rng.gen_range(3.0..7.0),
+                    });
                     if toxic && rng.gen_bool(0.3) {
-                        self.parts.push(SP { x: rng.gen::<f32>() * wf, y: 0.0, vx: 0.0, vy: rng.gen_range(6.0..14.0), ch: '|', c: Rgb(90, 200, 40), life: 4.0 });
+                        self.parts.push(SP {
+                            x: rng.gen::<f32>() * wf,
+                            y: 0.0,
+                            vx: 0.0,
+                            vy: rng.gen_range(6.0..14.0),
+                            ch: '|',
+                            c: Rgb(90, 200, 40),
+                            life: 4.0,
+                        });
                     }
                 }
                 let t = self.t;
@@ -758,7 +1288,8 @@ impl DeathScreen {
             DeathFx::Cracks => {
                 if self.heads.is_empty() && self.cracks.is_empty() {
                     for _ in 0..7 {
-                        self.heads.push((wf / 2.0, hf / 2.0, rng.gen::<f32>() * TAU));
+                        self.heads
+                            .push((wf / 2.0, hf / 2.0, rng.gen::<f32>() * TAU));
                     }
                 }
                 let mut newheads = Vec::new();
@@ -782,13 +1313,22 @@ impl DeathScreen {
                     }
                 }
                 self.heads.extend(newheads);
-                self.heads.retain(|hd| hd.0 >= 0.0 && hd.1 >= 0.0 && hd.0 < wf && hd.1 < hf);
+                self.heads
+                    .retain(|hd| hd.0 >= 0.0 && hd.1 >= 0.0 && hd.0 < wf && hd.1 < hf);
             }
             DeathFx::Spikes => {
                 if rng.gen_bool(0.4) {
                     let x = rng.gen::<f32>() * wf;
                     let top = hf - (hf / 3.0) * (self.t / 1.2).min(1.0);
-                    self.parts.push(SP { x, y: top, vx: 0.0, vy: rng.gen_range(4.0..10.0), ch: '\'', c: Rgb(200, 0, 0), life: 2.0 });
+                    self.parts.push(SP {
+                        x,
+                        y: top,
+                        vx: 0.0,
+                        vy: rng.gen_range(4.0..10.0),
+                        ch: '\'',
+                        c: Rgb(200, 0, 0),
+                        life: 2.0,
+                    });
                 }
                 for p in self.parts.iter_mut() {
                     p.y += p.vy * dt;
@@ -800,7 +1340,15 @@ impl DeathScreen {
                     let mut x = rng.gen::<f32>() * wf;
                     let mut y = 0.0;
                     while y < hf {
-                        self.parts.push(SP { x, y, vx: 0.0, vy: 0.0, ch: ['/', '\\', '|'][rng.gen_range(0..3)], c: Rgb(200, 160, 255), life: 0.25 });
+                        self.parts.push(SP {
+                            x,
+                            y,
+                            vx: 0.0,
+                            vy: 0.0,
+                            ch: ['/', '\\', '|'][rng.gen_range(0..3)],
+                            c: Rgb(200, 160, 255),
+                            life: 0.25,
+                        });
                         x += rng.gen_range(-1.5..1.5);
                         y += 1.0;
                     }
@@ -810,7 +1358,8 @@ impl DeathScreen {
                 }
             }
         }
-        self.parts.retain(|p| p.life > 0.0 && p.y >= -1.0 && p.y <= hf + 1.0);
+        self.parts
+            .retain(|p| p.life > 0.0 && p.y >= -1.0 && p.y <= hf + 1.0);
         if self.parts.len() > 4000 {
             let ex = self.parts.len() - 4000;
             self.parts.drain(0..ex);
@@ -856,8 +1405,20 @@ impl DeathScreen {
                     for k in 0..hgt {
                         let y = h - 1 - k;
                         let phase = x % 3;
-                        let ch = if k == hgt - 1 { '^' } else if phase == 0 { '/' } else if phase == 2 { '\\' } else { '|' };
-                        let col = if k > hgt - 3 { Rgb(220, 30, 30) } else { Rgb(150, 150, 160) };
+                        let ch = if k == hgt - 1 {
+                            '^'
+                        } else if phase == 0 {
+                            '/'
+                        } else if phase == 2 {
+                            '\\'
+                        } else {
+                            '|'
+                        };
+                        let col = if k > hgt - 3 {
+                            Rgb(220, 30, 30)
+                        } else {
+                            Rgb(150, 150, 160)
+                        };
                         c.set(x, y, ch, col, Rgb(20, 20, 24));
                     }
                 }
@@ -870,8 +1431,10 @@ impl DeathScreen {
                     let r = r0 * (1.0 + 0.08 * (t * 2.0 + i as f32).sin());
                     let x = w as f32 / 2.0 + a.cos() * r;
                     let y = h as f32 / 2.0 + a.sin() * r * 0.5;
-                    let ch = ['*', '+', 'x', '%', '&', '$', '#', '@'][(hash2(i, (t * 3.0) as i32) % 8) as usize];
-                    let col = Rgb(140, 80, 255).lerp(Rgb(120, 220, 255), 0.5 + 0.5 * (a * 3.0).sin());
+                    let ch = ['*', '+', 'x', '%', '&', '$', '#', '@']
+                        [(hash2(i, (t * 3.0) as i32) % 8) as usize];
+                    let col =
+                        Rgb(140, 80, 255).lerp(Rgb(120, 220, 255), 0.5 + 0.5 * (a * 3.0).sin());
                     c.put(x as i32, y as i32, ch, col);
                 }
             }
@@ -914,15 +1477,29 @@ impl DeathScreen {
 
         let tcol = Rgb(200, 0, 0).lerp(Rgb(255, 120, 80), 0.5 + 0.5 * (t * 3.0).sin());
         let title_y = (ty - 3).max(0);
-        c.text_bg((w - self.title.len() as i32) / 2, title_y, &self.title, tcol, Rgb::BLACK);
+        c.text_bg(
+            (w - self.title.len() as i32) / 2,
+            title_y,
+            &self.title,
+            tcol,
+            Rgb::BLACK,
+        );
         let by = ty + TOMB.len() as i32 + 1;
         for (i, l) in self.info.iter().skip(1).enumerate() {
-            let col = if l.contains("Soul") { Rgb(210, 160, 255) } else { Rgb(220, 220, 220) };
+            let col = if l.contains("Soul") {
+                Rgb(210, 160, 255)
+            } else {
+                Rgb(220, 220, 220)
+            };
             let x = (w - l.len() as i32) / 2;
             c.text_bg(x, by + i as i32, l, col, Rgb::BLACK);
         }
         if t > 1.5 {
-            c.center(h - 1, "Press Enter to return to the surface world", Rgb(160, 160, 160));
+            c.center(
+                h - 1,
+                "Press Enter to return to the surface world",
+                Rgb(160, 160, 160),
+            );
         }
     }
 }
@@ -936,9 +1513,17 @@ pub fn draw_victory(c: &mut Canvas, t: f32, info: &[String]) {
     let rise = (t / 6.0).min(1.0);
     for y in 0..h {
         let k = y as f32 / horizon.max(1) as f32;
-        let sky = Rgb(8, 10, 40).lerp(Rgb(60, 40, 120), k).lerp(Rgb(255, 140, 60), (k * k * k) * rise);
+        let sky = Rgb(8, 10, 40)
+            .lerp(Rgb(60, 40, 120), k)
+            .lerp(Rgb(255, 140, 60), (k * k * k) * rise);
         for x in 0..w {
-            c.set(x, y, ' ', Rgb::WHITE, if y < horizon { sky } else { Rgb(10, 14, 8) });
+            c.set(
+                x,
+                y,
+                ' ',
+                Rgb::WHITE,
+                if y < horizon { sky } else { Rgb(10, 14, 8) },
+            );
         }
     }
     // stars fading out
@@ -946,7 +1531,12 @@ pub fn draw_victory(c: &mut Canvas, t: f32, info: &[String]) {
         let x = (hash2(i, 1) % w.max(1) as u32) as i32;
         let y = (hash2(i, 2) % (horizon.max(2) as u32 / 2)) as i32;
         let tw = 0.5 + 0.5 * (t * 3.0 + i as f32).sin();
-        c.put(x, y, if tw > 0.7 { '*' } else { '.' }, Rgb(255, 255, 255).scale((1.0 - rise) * tw));
+        c.put(
+            x,
+            y,
+            if tw > 0.7 { '*' } else { '.' },
+            Rgb(255, 255, 255).scale((1.0 - rise) * tw),
+        );
     }
     // sun
     let sx = w as f32 / 2.0;
@@ -962,8 +1552,23 @@ pub fn draw_victory(c: &mut Canvas, t: f32, info: &[String]) {
                 break;
             }
             if k % 3 == 0 {
-                let ch = if (a.sin() * a.cos()).abs() < 0.2 { if a.cos().abs() > 0.5 { '-' } else { '|' } } else if a.sin() * a.cos() > 0.0 { '\\' } else { '/' };
-                c.put(x as i32, y as i32, ch, Rgb(255, 220, 120).scale(rise * (1.0 - k as f32 / (w as f32 / 2.0))));
+                let ch = if (a.sin() * a.cos()).abs() < 0.2 {
+                    if a.cos().abs() > 0.5 {
+                        '-'
+                    } else {
+                        '|'
+                    }
+                } else if a.sin() * a.cos() > 0.0 {
+                    '\\'
+                } else {
+                    '/'
+                };
+                c.put(
+                    x as i32,
+                    y as i32,
+                    ch,
+                    Rgb(255, 220, 120).scale(rise * (1.0 - k as f32 / (w as f32 / 2.0))),
+                );
             }
         }
     }
@@ -973,31 +1578,69 @@ pub fn draw_victory(c: &mut Canvas, t: f32, info: &[String]) {
             let y = sy as i32 + dy;
             if d <= sr && y < horizon && y >= 0 {
                 let col = Rgb(255, 250, 200).lerp(Rgb(255, 170, 40), d / sr);
-                c.set(sx as i32 + dx, y, if d < sr - 1.0 { '@' } else { 'O' }, col, col.scale(0.8));
+                c.set(
+                    sx as i32 + dx,
+                    y,
+                    if d < sr - 1.0 { '@' } else { 'O' },
+                    col,
+                    col.scale(0.8),
+                );
             }
         }
     }
     // mountains
     for x in 0..w {
-        let hgt = (6.0 + 5.0 * ((x as f32 * 0.07).sin() + 0.6 * (x as f32 * 0.19 + 1.3).sin()) + 3.0 * hashf(x / 4, 3)) as i32;
+        let hgt = (6.0
+            + 5.0 * ((x as f32 * 0.07).sin() + 0.6 * (x as f32 * 0.19 + 1.3).sin())
+            + 3.0 * hashf(x / 4, 3)) as i32;
         for k in 0..hgt.max(1) {
             let y = horizon - k;
             let ch = if k == hgt - 1 { '^' } else { '#' };
-            c.set(x, y, ch, Rgb(40, 30, 50).lerp(Rgb(120, 70, 60), rise * 0.5), Rgb(20, 14, 26));
+            c.set(
+                x,
+                y,
+                ch,
+                Rgb(40, 30, 50).lerp(Rgb(120, 70, 60), rise * 0.5),
+                Rgb(20, 14, 26),
+            );
         }
     }
     // birds
     for i in 0..5 {
         let bx = ((t * 6.0 + i as f32 * 17.0) % (w as f32 + 20.0)) as i32 - 10;
         let by = 3 + i * 2 + ((t * 2.0 + i as f32).sin() * 1.0) as i32;
-        c.put(bx, by, if ((t * 6.0) as i32 + i) % 2 == 0 { 'v' } else { '-' }, Rgb(30, 20, 30));
+        c.put(
+            bx,
+            by,
+            if ((t * 6.0) as i32 + i) % 2 == 0 {
+                'v'
+            } else {
+                '-'
+            },
+            Rgb(30, 20, 30),
+        );
     }
     let gold = Rgb(255, 200, 50).lerp(Rgb::WHITE, 0.5 + 0.5 * (t * 2.0).sin());
     c.center(2, "V  I  C  T  O  R  Y", gold);
-    c.center(4, "You climb from the dark with the Amulet of GRAZZARK!", Rgb(255, 240, 200));
+    c.center(
+        4,
+        "You climb from the dark with the Amulet of GRAZZARK!",
+        Rgb(255, 240, 200),
+    );
+    if t > 1.5 {
+        c.center(
+            6,
+            "In the light of day his heart blackens and burns. The hills are only hills again.",
+            Rgb(255, 200, 150),
+        );
+    }
     for (i, l) in info.iter().enumerate() {
         let y = horizon + 2 + i as i32;
-        let col = if l.contains("Soul") { Rgb(210, 160, 255) } else { Rgb(230, 230, 210) };
+        let col = if l.contains("Soul") {
+            Rgb(210, 160, 255)
+        } else {
+            Rgb(230, 230, 210)
+        };
         c.center(y, l, col);
     }
     if t > 2.0 {

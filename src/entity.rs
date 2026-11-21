@@ -48,6 +48,10 @@ pub enum Src {
     Env,
 }
 
+/// The Warden's health and damage with 0-4 ward prisms broken.
+pub const WARD_HP: [f32; 5] = [1.0, 0.8, 0.62, 0.46, 0.3];
+pub const WARD_DMG: [f32; 5] = [1.0, 0.87, 0.74, 0.6, 0.45];
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Monster {
     pub id: u32,
@@ -84,6 +88,18 @@ pub struct Monster {
     /// An overlord thrall's terrifying roar is ready again at this world time.
     #[serde(default)]
     pub roar_cd: f64,
+    /// How many times this thrall's body has been raised (2 = raised again).
+    #[serde(default)]
+    pub raises: u8,
+    /// Turns left braced behind its guard (+4 armour).
+    #[serde(default)]
+    pub guard: i32,
+    /// Extra damage on every blow (the Prism Guardian grows with depth).
+    #[serde(default)]
+    pub bonus_dmg: i32,
+    /// Ward prisms broken (the Warden only): each one weakens it.
+    #[serde(default)]
+    pub ward_weaken: u8,
     // presentation state
     pub rx: f32,
     pub ry: f32,
@@ -118,6 +134,10 @@ impl Monster {
             thrall: false,
             expires: 0.0,
             roar_cd: 0.0,
+            raises: 0,
+            guard: 0,
+            bonus_dmg: 0,
+            ward_weaken: 0,
             rx: x as f32,
             ry: y as f32,
             flash: 0.0,
@@ -154,6 +174,11 @@ impl Monster {
         }
     }
 
+    /// Armour class, with any guard it has raised.
+    pub fn ac(&self) -> i32 {
+        self.def().ac + if self.guard > 0 { 4 } else { 0 }
+    }
+
     pub fn is_unique(&self) -> bool {
         self.def().unique > 0
     }
@@ -168,6 +193,9 @@ impl Monster {
         }
         if self.raged {
             s *= 0.75;
+        }
+        if self.ward_weaken >= 3 {
+            s *= 1.25;
         }
         s
     }
@@ -186,7 +214,7 @@ impl Monster {
         if self.charging {
             k *= 1.5;
         }
-        k
+        k * WARD_DMG[self.ward_weaken.min(4) as usize]
     }
 
     /// The monster's name for messages, e.g. "champion orc".

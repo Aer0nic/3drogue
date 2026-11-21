@@ -11,6 +11,7 @@ mod data;
 mod entity;
 mod fx;
 mod game;
+mod launch;
 mod map;
 mod profile;
 mod render;
@@ -26,7 +27,9 @@ use game::{cap, Action, DeathCause, Game, Outcome, GREY};
 use profile::{Profile, RunRecord};
 use rand::Rng;
 use screens::{DeathScreen, Fire};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::AtomicI32;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use term::Term;
 
@@ -34,11 +37,22 @@ static SAVED_STDERR: AtomicI32 = AtomicI32::new(-1);
 
 /// The ALSA backend can print diagnostics to stderr, which would scribble
 /// over the game screen. Send stderr to /dev/null while the game runs.
+#[cfg(not(unix))]
+fn silence_stderr() {
+    let _ = &SAVED_STDERR;
+}
+#[cfg(not(unix))]
+fn restore_stderr() {}
+
+#[cfg(unix)]
 fn silence_stderr() {
     unsafe {
         let saved = libc::dup(2);
         SAVED_STDERR.store(saved, Ordering::SeqCst);
-        let devnull = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_WRONLY);
+        let devnull = libc::open(
+            b"/dev/null\0".as_ptr() as *const libc::c_char,
+            libc::O_WRONLY,
+        );
         if devnull >= 0 {
             libc::dup2(devnull, 2);
             libc::close(devnull);
@@ -46,6 +60,7 @@ fn silence_stderr() {
     }
 }
 
+#[cfg(unix)]
 fn restore_stderr() {
     let s = SAVED_STDERR.load(Ordering::SeqCst);
     if s >= 0 {
@@ -65,6 +80,12 @@ enum Screen {
     Bestiary,
     Hall,
     Help,
+    /// The legend of GRAZZARK.
+    Story,
+    /// Choose which profile to play.
+    Profiles,
+    /// Type a name for a new profile.
+    NewProfile,
     Game,
     Dead,
     Victory,
@@ -80,6 +101,12 @@ enum Overlay {
     Map,
     /// Choose what to pick up from a pile.
     Pickup,
+    /// Message history (L).
+    Log,
+    /// Choose which corpse to raise.
+    Raise,
+    /// The legend, told before your very first descent.
+    Story,
 }
 
 /// Screen-melt transition between dungeon levels.
@@ -97,6 +124,9 @@ struct App {
     best_sel: usize,
     altar_sel: usize,
     pause_sel: usize,
+    /// Lines scrolled back from the newest in the message log.
+    log_scroll: usize,
+    raise_sel: usize,
     profile: Profile,
     game: Option<Game>,
     audio: Audio,
@@ -115,6 +145,14 @@ struct App {
     note: String,
     /// A saved run exists on disk.
     has_save: bool,
+    /// Profiles found on disk, for the picker.
+    profiles: Vec<profile::ProfileEntry>,
+    prof_sel: usize,
+    /// The name being typed for a new profile, and any complaint about it.
+    name_buf: String,
+    name_err: String,
+    /// A profile has been chosen this session (so Esc can go back to the title).
+    loaded: bool,
 }
 
 impl App {
@@ -127,6 +165,8 @@ impl App {
             best_sel: 0,
             altar_sel: 0,
             pause_sel: 0,
+            log_scroll: 0,
+            raise_sel: 0,
             profile,
             game: None,
             audio,
@@ -143,8 +183,63 @@ impl App {
             over_timer: 0.0,
             quit: false,
             note: String::new(),
-            has_save: game::has_save(),
+            has_save: false,
+            profiles: Vec::new(),
+            prof_sel: 0,
+            name_buf: String::new(),
+            name_err: String::new(),
+            loaded: false,
         }
+    }
+
+    /// At startup: no profiles means naming a new one; a single profile loads
+    /// at once; with several, the player picks.
+    fn choose_profile_at_start(&mut self) {
+        self.profiles = Profile::list();
+        match self.profiles.len() {
+            0 => self.begin_new_profile(),
+            1 => {
+                let dir = self.profiles[0].dir.clone();
+                self.use_profile(&dir);
+            }
+            _ => self.open_profile_list(),
+        }
+    }
+
+    fn open_profile_list(&mut self) {
+        self.profiles = Profile::list();
+        let current = if self.loaded {
+            Some(self.profile.name.clone())
+        } else {
+            profile::last_used()
+        };
+        self.prof_sel = current
+            .and_then(|n| self.profiles.iter().position(|e| e.name == n))
+            .unwrap_or(0);
+        self.screen = Screen::Profiles;
+    }
+
+    fn begin_new_profile(&mut self) {
+        self.name_buf.clear();
+        self.name_err.clear();
+        self.screen = Screen::NewProfile;
+    }
+
+    /// Switch to the profile in `dir` and go to the title screen.
+    fn use_profile(&mut self, dir: &std::path::Path) {
+        self.profile = Profile::open(dir);
+        self.after_profile_loaded();
+    }
+
+    fn after_profile_loaded(&mut self) {
+        if let Some(v) = self.profile.volume {
+            self.audio.set_volume(v);
+        }
+        self.has_save = game::has_save();
+        self.sel = if self.has_save { 0 } else { 1 };
+        self.loaded = true;
+        self.note.clear();
+        self.screen = Screen::Title;
     }
 
     fn click(&self) {
@@ -157,8 +252,51 @@ impl App {
             self.save_and_quit();
             return;
         }
+        if self.screen == Screen::NewProfile {
+            match code {
+                KeyCode::Enter => match Profile::create(&self.name_buf) {
+                    Ok(p) => {
+                        self.click();
+                        self.profile = p;
+                        let _ = std::fs::write(
+                            profile::base_dir().join("last_profile.txt"),
+                            &self.profile.name,
+                        );
+                        self.after_profile_loaded();
+                    }
+                    Err(e) => self.name_err = e,
+                },
+                KeyCode::Esc => {
+                    // With nothing to go back to, Esc leaves the game.
+                    if self.loaded {
+                        self.screen = Screen::Title;
+                    } else if !Profile::list().is_empty() {
+                        self.open_profile_list();
+                    } else {
+                        self.quit = true;
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.name_buf.pop();
+                    self.name_err.clear();
+                }
+                KeyCode::Char(c) if profile::name_char_ok(c) => {
+                    if self.name_buf.chars().count() < profile::NAME_MAX
+                        && !(c == ' ' && self.name_buf.is_empty())
+                    {
+                        self.name_buf.push(c);
+                    }
+                    self.name_err.clear();
+                }
+                _ => {}
+            }
+            return;
+        }
         let up = matches!(code, KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('k'));
-        let down = matches!(code, KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('j'));
+        let down = matches!(
+            code,
+            KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('j')
+        );
         let enter = matches!(code, KeyCode::Enter | KeyCode::Char(' '));
         let esc = matches!(code, KeyCode::Esc | KeyCode::Char('q'));
         match self.screen {
@@ -170,10 +308,18 @@ impl App {
                     self.sel = first;
                 }
                 if up {
-                    self.sel = if self.sel <= first { n - 1 } else { self.sel - 1 };
+                    self.sel = if self.sel <= first {
+                        n - 1
+                    } else {
+                        self.sel - 1
+                    };
                     self.click();
                 } else if down {
-                    self.sel = if self.sel + 1 >= n { first } else { self.sel + 1 };
+                    self.sel = if self.sel + 1 >= n {
+                        first
+                    } else {
+                        self.sel + 1
+                    };
                     self.click();
                 } else if enter {
                     self.click();
@@ -186,11 +332,41 @@ impl App {
                         }
                         3 => self.screen = Screen::Bestiary,
                         4 => self.screen = Screen::Hall,
-                        5 => self.screen = Screen::Help,
+                        5 => self.screen = Screen::Story,
+                        6 => self.open_profile_list(),
+                        7 => self.begin_new_profile(),
+                        8 => self.screen = Screen::Help,
                         _ => self.quit = true,
                     }
                 } else if esc {
                     self.quit = true;
+                }
+            }
+            // Handled above, before keys are read as menu moves.
+            Screen::NewProfile => {}
+            Screen::Profiles => {
+                let n = self.profiles.len().max(1);
+                if up {
+                    self.prof_sel = (self.prof_sel + n - 1) % n;
+                    self.click();
+                } else if down {
+                    self.prof_sel = (self.prof_sel + 1) % n;
+                    self.click();
+                } else if enter {
+                    if let Some(e) = self.profiles.get(self.prof_sel) {
+                        self.click();
+                        let dir = e.dir.clone();
+                        self.use_profile(&dir);
+                    }
+                } else if matches!(code, KeyCode::Char('n') | KeyCode::Char('N')) {
+                    self.click();
+                    self.begin_new_profile();
+                } else if esc {
+                    if self.loaded {
+                        self.screen = Screen::Title;
+                    } else {
+                        self.quit = true;
+                    }
                 }
             }
             Screen::ClassSel => {
@@ -262,7 +438,7 @@ impl App {
                     self.screen = Screen::Title;
                 }
             }
-            Screen::Hall | Screen::Help => {
+            Screen::Hall | Screen::Help | Screen::Story => {
                 if esc || enter {
                     self.screen = Screen::Title;
                 }
@@ -352,8 +528,62 @@ impl App {
                 return;
             }
             Overlay::Map => {
-                if matches!(k.code, Esc | Char('m') | Char('M') | Tab | Enter | Char(' ')) {
+                if matches!(k.code, Esc | Char('m') | Tab | Enter | Char(' ')) {
                     self.overlay = Overlay::None;
+                }
+                return;
+            }
+            Overlay::Story => {
+                if matches!(k.code, Enter | Esc | Char(' ')) {
+                    self.overlay = Overlay::None;
+                }
+                return;
+            }
+            Overlay::Raise => {
+                let n = g.raise_menu.len();
+                let pick = |g: &mut Game, i: usize| {
+                    if let Some(o) = g.raise_menu.get(i).copied() {
+                        g.raise_menu.clear();
+                        g.do_action(Action::RaiseAt(o.x, o.y));
+                    }
+                };
+                match k.code {
+                    Up | Char('w') | Char('k') if n > 0 => {
+                        self.raise_sel = (self.raise_sel + n - 1) % n
+                    }
+                    Down | Char('s') | Char('j') if n > 0 => {
+                        self.raise_sel = (self.raise_sel + 1) % n
+                    }
+                    Enter | Char(' ') => {
+                        self.overlay = Overlay::None;
+                        pick(g, self.raise_sel);
+                    }
+                    Esc => {
+                        self.overlay = Overlay::None;
+                        g.raise_menu.clear();
+                    }
+                    Char(c) if c.is_ascii_lowercase() && ((c as u8 - b'a') as usize) < n => {
+                        self.overlay = Overlay::None;
+                        pick(g, (c as u8 - b'a') as usize);
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            Overlay::Log => {
+                match k.code {
+                    Up | Char('w') | Char('k') => self.log_scroll += 1,
+                    Down | Char('s') | Char('j') => {
+                        self.log_scroll = self.log_scroll.saturating_sub(1)
+                    }
+                    PageUp => self.log_scroll += 10,
+                    PageDown => self.log_scroll = self.log_scroll.saturating_sub(10),
+                    Home => self.log_scroll = usize::MAX / 2,
+                    End => self.log_scroll = 0,
+                    Esc | Char('l') | Char('L') | Enter | Char(' ') | Char('q') => {
+                        self.overlay = Overlay::None
+                    }
+                    _ => {}
                 }
                 return;
             }
@@ -361,12 +591,18 @@ impl App {
         }
 
         match k.code {
-            Tab => {
-                g.overhead = !g.overhead;
+            // Shift+M: swoop between first-person and overhead play.
+            Char('M') => {
+                g.toggle_view();
                 return;
             }
-            Char('m') | Char('M') => {
+            Tab | Char('m') => {
                 self.overlay = Overlay::Map;
+                return;
+            }
+            Char('l') | Char('L') => {
+                self.overlay = Overlay::Log;
+                self.log_scroll = 0;
                 return;
             }
             Char('g') | Char(',') if g.items_here().len() > 1 => {
@@ -392,7 +628,11 @@ impl App {
                 return;
             }
             Char('-') | Char('_') | Char('=') | Char('+') => {
-                let d = if matches!(k.code, Char('-') | Char('_')) { -0.1 } else { 0.1 };
+                let d = if matches!(k.code, Char('-') | Char('_')) {
+                    -0.1
+                } else {
+                    0.1
+                };
                 let v = self.audio.adjust_volume(d);
                 self.profile.volume = Some(v);
                 if self.audio.enabled() {
@@ -409,7 +649,7 @@ impl App {
         let action = if g.overhead {
             match k.code {
                 Up | Char('w') | Char('k') => Some(Action::Move(0, true)),
-                Right | Char('d') | Char('l') => Some(Action::Move(2, true)),
+                Right | Char('d') => Some(Action::Move(2, true)),
                 Down | Char('s') | Char('j') => Some(Action::Move(4, true)),
                 Left | Char('a') | Char('h') => Some(Action::Move(6, true)),
                 Home | Char('y') => Some(Action::Move(7, true)),
@@ -440,6 +680,7 @@ impl App {
             Char('>') | Char('<') | Enter => Some(Action::Stairs),
             Char(c @ '1'..='6') => Some(Action::Skill(c as usize - '1' as usize)),
             Char('p') | Char('P') => Some(Action::QuickHeal),
+            Char('t') | Char('T') => Some(Action::Relight),
             _ => None,
         });
         if let Some(a) = action {
@@ -488,7 +729,12 @@ impl App {
         self.game = Some(g);
         self.last_depth = 1;
         self.screen = Screen::Game;
-        self.overlay = Overlay::None;
+        // The first descent of all begins with the legend.
+        self.overlay = if self.profile.history.is_empty() && self.profile.runs == 0 {
+            Overlay::Story
+        } else {
+            Overlay::None
+        };
         self.melt = None;
         self.over_timer = 0.0;
         self.ambient_timer = 3.0;
@@ -527,6 +773,11 @@ impl App {
         {
             let Some(g) = self.game.as_mut() else { return };
             g.update(dt, paused);
+            // Raise Dead found more than one body: ask which.
+            if !g.raise_menu.is_empty() && self.overlay == Overlay::None {
+                self.overlay = Overlay::Raise;
+                self.raise_sel = 0;
+            }
 
             let evs: Vec<game::SoundEv> = g.sounds.drain(..).collect();
             for ev in evs {
@@ -548,7 +799,11 @@ impl App {
                 self.audio.set_music(MusicMode::Dungeon, g.depth);
                 let mut rng = rand::thread_rng();
                 let offs = (0..w).map(|_| -rng.gen_range(0.0..14.0)).collect();
-                self.melt = Some(Melt { snap: self.prev.clone(), offs, t: 0.0 });
+                self.melt = Some(Melt {
+                    snap: self.prev.clone(),
+                    offs,
+                    t: 0.0,
+                });
             }
 
             let mut inten = g.combat_heat * 0.85;
@@ -596,7 +851,11 @@ impl App {
         let mult = dd.souls * (1.0 + 0.1 * g.bonus.harvest as f32);
         let pts = (base as f32 * mult).round() as u32;
         let mastered = self.profile.record_kills(&g.slain);
-        let unlocked = if won { self.profile.record_win(g.difficulty as usize) } else { None };
+        let unlocked = if won {
+            self.profile.record_win(g.difficulty as usize)
+        } else {
+            None
+        };
         let cd = g.cdef();
         let cause_txt = match &g.over {
             Some(Outcome::Died(c)) => c.describe(),
@@ -627,19 +886,31 @@ impl App {
 
         let mut info = vec![
             format!("{}, level {}  ({})", cd.name, g.p.level, dd.name),
-            format!("Reached depth {} of 10. Slew {} foes in {} turns.", g.max_depth, g.kills, g.turns),
+            format!(
+                "Reached depth {} of 10. Slew {} foes in {} turns.",
+                g.max_depth, g.kills, g.turns
+            ),
             cap(&cause_txt),
             if mult != 1.0 {
-                format!("+{} Soul Points (x{:.1})  (you now have {})", pts, mult, self.profile.points)
+                format!(
+                    "+{} Soul Points (x{:.1})  (you now have {})",
+                    pts, mult, self.profile.points
+                )
             } else {
-                format!("+{} Soul Points  (you now have {})", pts, self.profile.points)
+                format!(
+                    "+{} Soul Points  (you now have {})",
+                    pts, self.profile.points
+                )
             },
         ];
         if let Some(n) = unlocked {
             info.push(format!("{} difficulty is now unlocked!", n.to_uppercase()));
         }
         for m in mastered.iter().take(3) {
-            info.push(format!("Bestiary: you have mastered the {}! (+crit against it)", m));
+            info.push(format!(
+                "Bestiary: you have mastered the {}! (+crit against it)",
+                m
+            ));
         }
         self.end_t = 0.0;
         self.overlay = Overlay::None;
@@ -666,12 +937,45 @@ impl App {
     fn draw(&self, c: &mut Canvas) {
         c.clear();
         match self.screen {
-            Screen::Title => screens::draw_title(c, &self.fire, self.t, self.sel, &self.profile, self.has_save),
-            Screen::ClassSel => screens::draw_class_select(c, self.class_sel, &self.profile, self.t),
-            Screen::DiffSel => screens::draw_difficulty(c, self.diff_sel, self.class_sel, &self.profile, self.t),
+            Screen::Title => screens::draw_title(
+                c,
+                &self.fire,
+                self.t,
+                self.sel,
+                &self.profile,
+                self.has_save,
+            ),
+            Screen::ClassSel => {
+                screens::draw_class_select(c, self.class_sel, &self.profile, self.t)
+            }
+            Screen::DiffSel => {
+                screens::draw_difficulty(c, self.diff_sel, self.class_sel, &self.profile, self.t)
+            }
             Screen::Bestiary => screens::draw_bestiary(c, self.best_sel, &self.profile, self.t),
-            Screen::Altar => screens::draw_altar(c, self.altar_sel, &self.profile, self.t, &self.note, &self.fire),
+            Screen::Altar => screens::draw_altar(
+                c,
+                self.altar_sel,
+                &self.profile,
+                self.t,
+                &self.note,
+                &self.fire,
+            ),
             Screen::Hall => screens::draw_hall(c, &self.profile),
+            Screen::Story => screens::draw_story(c, self.t),
+            Screen::Profiles => screens::draw_profiles(
+                c,
+                &self.profiles,
+                self.prof_sel,
+                self.loaded.then_some(self.profile.name.as_str()),
+                self.t,
+            ),
+            Screen::NewProfile => screens::draw_new_profile(
+                c,
+                &self.name_buf,
+                &self.name_err,
+                self.profiles.is_empty() && !self.loaded,
+                self.t,
+            ),
             Screen::Help => {
                 c.fill(0, 0, c.w as i32, c.h as i32, ' ', Rgb::WHITE, Rgb(6, 6, 10));
                 render::draw_help(c);
@@ -701,6 +1005,9 @@ impl App {
                         }
                         Overlay::Help => render::draw_help(c),
                         Overlay::Map => render::draw_map(c, g),
+                        Overlay::Log => render::draw_log(c, g, self.log_scroll),
+                        Overlay::Raise => render::draw_raise(c, g, self.raise_sel, &self.profile),
+                        Overlay::Story => screens::draw_story(c, self.t),
                         Overlay::Pickup => render::draw_pickup(c, g),
                         Overlay::None => {}
                     }
@@ -733,7 +1040,10 @@ fn print_usage() {
     println!("  --256         use 256-colour mode (for terminals without true colour)");
     println!("  --truecolor   force 24-bit colour");
     println!();
-    println!("Profile (soul points, upgrades, history): {}", Profile::path().display());
+    println!(
+        "Profiles (soul points, upgrades, history): {}",
+        profile::base_dir().join("profiles").display()
+    );
 }
 
 fn main() {
@@ -742,6 +1052,11 @@ fn main() {
         print_usage();
         return;
     }
+    // Double-clicked on a Linux desktop: reopen inside a terminal window.
+    if launch::ensure_terminal(&args) {
+        return;
+    }
+    launch::grow_console();
     let no_audio = args.iter().any(|a| a == "--no-audio" || a == "--mute");
     let term_env = std::env::var("TERM").unwrap_or_default();
     let truecolor = if args.iter().any(|a| a == "--truecolor") {
@@ -749,10 +1064,12 @@ fn main() {
     } else if args.iter().any(|a| a == "--256") {
         false
     } else {
-        term_env != "linux" && !term_env.is_empty()
+        // Windows 10+ consoles and Windows Terminal speak 24-bit colour.
+        cfg!(windows) || (term_env != "linux" && !term_env.is_empty())
     };
 
-    let profile = Profile::load();
+    profile::migrate_legacy_in(&profile::base_dir());
+    let profile = Profile::default();
     silence_stderr();
     let audio = Audio::new(!no_audio);
     if let Some(v) = profile.volume {
@@ -765,6 +1082,7 @@ fn main() {
         Term::restore();
         restore_stderr();
         default_hook(info);
+        launch::pause_before_exit();
     }));
 
     let mut term = match Term::new(truecolor) {
@@ -772,11 +1090,13 @@ fn main() {
         Err(e) => {
             restore_stderr();
             eprintln!("Could not initialise the terminal: {}", e);
+            launch::pause_before_exit();
             return;
         }
     };
     let (w, h) = Term::size();
     let mut app = App::new(profile, audio, w, h);
+    app.choose_profile_at_start();
     let mut canvas = Canvas::new(w, h);
     let frame = Duration::from_millis(33);
     let mut last = Instant::now();
@@ -804,8 +1124,16 @@ fn main() {
         canvas.resize(w, h);
         if w < 80 || h < 24 {
             canvas.clear();
-            canvas.center(h as i32 / 2, "Please enlarge your terminal to at least 80x24.", Rgb(255, 200, 120));
-            canvas.center(h as i32 / 2 + 1, &format!("(currently {}x{})", w, h), Rgb(160, 160, 160));
+            canvas.center(
+                h as i32 / 2,
+                "Please enlarge your terminal to at least 80x24.",
+                Rgb(255, 200, 120),
+            );
+            canvas.center(
+                h as i32 / 2 + 1,
+                &format!("(currently {}x{})", w, h),
+                Rgb(160, 160, 160),
+            );
         } else {
             app.update(dt, w, h);
             app.draw(&mut canvas);
@@ -823,7 +1151,10 @@ fn main() {
     drop(app);
     Term::restore();
     restore_stderr();
-    println!("Farewell, adventurer. Your soul is bound to {}", Profile::path().display());
+    println!(
+        "Farewell, adventurer. Your soul is bound to {}",
+        Profile::path().display()
+    );
 }
 
 #[cfg(test)]
@@ -841,7 +1172,10 @@ mod tests {
         let mut rng = rand::thread_rng();
         for class in 0..CLASSES.len() {
             for _run in 0..3 {
-                let mut bonus = Bonuses { xp_mult: 1.0, ..Default::default() };
+                let mut bonus = Bonuses {
+                    xp_mult: 1.0,
+                    ..Default::default()
+                };
                 bonus.skills = UPGRADES.iter().filter_map(|u| u.skill).collect();
                 // Exercise every boon as well.
                 bonus.bloodlust = 3;
@@ -903,7 +1237,12 @@ mod tests {
                         if g.depth == 10 {
                             went_down = false;
                             // grab the amulet for the trip back
-                            if let Some(i) = g.level.items.iter().position(|i| i.item == data::Item::Amulet) {
+                            if let Some(i) = g
+                                .level
+                                .items
+                                .iter()
+                                .position(|i| i.item == data::Item::Amulet)
+                            {
                                 let (ax, ay) = (g.level.items[i].x, g.level.items[i].y);
                                 g.p.x = ax;
                                 g.p.y = ay;
@@ -964,13 +1303,29 @@ mod tests {
                         render::draw_map(&mut canvas, &g);
                         render::draw_inventory(&mut canvas, &g);
                         render::draw_pickup(&mut canvas, &g);
+                        render::draw_log(&mut canvas, &g, step / 50);
+                    }
+                    if !g.raise_menu.is_empty() {
+                        render::draw_raise(&mut canvas, &g, 0, &Profile::default());
+                        let o = g.raise_menu[g.raise_menu.len() - 1];
+                        g.do_action(Action::RaiseAt(o.x, o.y));
+                    }
+                    if g.p.torch_out && step % 7 == 0 {
+                        g.do_action(Action::Relight);
                     }
                     for m in g.level.monsters.iter() {
                         if m.alive && !m.def().ghost {
-                            assert!(g.level.tile(m.x, m.y) != Tile::Wall, "{} inside a wall", m.def().name);
+                            assert!(
+                                g.level.tile(m.x, m.y) != Tile::Wall,
+                                "{} inside a wall",
+                                m.def().name
+                            );
                         }
                     }
-                    assert!(g.level.tile(g.p.x, g.p.y) != Tile::Wall, "player inside a wall");
+                    assert!(
+                        g.level.tile(g.p.x, g.p.y) != Tile::Wall,
+                        "player inside a wall"
+                    );
                 }
                 eprintln!("class {} max_depth {} depth {} lvl {} kills {} amulet {} uniques {:?} outcome {}", class, g.max_depth, g.depth, g.p.level, g.kills, g.p.has_amulet, g.found_uniques,
                     match &g.over { Some(Outcome::Won) => "WON".to_string(), Some(Outcome::Died(c)) => c.describe(), None => "alive".into() });
@@ -984,10 +1339,35 @@ mod tests {
         prof.points = 1234;
         prof.unlocked_diff = 1;
         for (i, m) in data::MONSTERS.iter().enumerate() {
-            prof.bestiary.insert(m.name.to_string(), [0, 1, 10, 100, 250][i % 5]);
+            prof.bestiary
+                .insert(m.name.to_string(), [0, 1, 10, 100, 250][i % 5]);
         }
         let fire = screens::Fire::new();
         for &(w, h) in &[(80usize, 24usize), (120, 40), (200, 60)] {
+            let mut c = Canvas::new(w, h);
+            screens::draw_story(&mut c, 1.0);
+            let entries: Vec<profile::ProfileEntry> = (0..30)
+                .map(|i| profile::ProfileEntry {
+                    name: format!("Hero {}", i),
+                    dir: std::path::PathBuf::new(),
+                    runs: i,
+                    wins: i / 3,
+                    points: i * 100,
+                    has_save: i % 4 == 0,
+                })
+                .collect();
+            for sel in [0, 5, 29] {
+                screens::draw_profiles(&mut c, &entries, sel, Some("Hero 5"), 1.0);
+                screens::draw_profiles(&mut c, &entries, sel, None, 1.0);
+            }
+            screens::draw_new_profile(
+                &mut c,
+                "Grimwald",
+                "There is already a profile called Grimwald.",
+                true,
+                1.0,
+            );
+            screens::draw_new_profile(&mut c, "", "", false, 1.0);
             let mut c = Canvas::new(w, h);
             for sel in 0..UPGRADES.len() {
                 screens::draw_altar(&mut c, sel, &prof, 1.0, "note", &fire);
@@ -1045,14 +1425,49 @@ mod tests {
     fn all_sounds_synthesise() {
         use crate::audio::{spatialize, Mood};
         use crate::data::VoiceKind::*;
-        let sp = Spatial { gain: 0.5, pan: 0.3, cutoff: 900.0, echoes: vec![(0.05, 0.3, -0.5)], reverb: 0.6, room: 0.8 };
-        let voices = [Squeak, Screech, Yap, Rattle, Moan, Hiss, Growl, Snarl, Roar, Wail, Chant, Cackle, Demon, Human];
+        let sp = Spatial {
+            gain: 0.5,
+            pan: 0.3,
+            cutoff: 900.0,
+            echoes: vec![(0.05, 0.3, -0.5)],
+            reverb: 0.6,
+            room: 0.8,
+        };
+        let voices = [
+            Squeak, Screech, Yap, Rattle, Moan, Hiss, Growl, Snarl, Roar, Wail, Chant, Cackle,
+            Demon, Human,
+        ];
         let moods = [Mood::Alert, Mood::Attack, Mood::Hurt, Mood::Die, Mood::Idle];
         let mut all = vec![
-            Sfx::Step, Sfx::Swing, Sfx::Hit, Sfx::Clang, Sfx::Miss, Sfx::PlayerHurt, Sfx::PlayerDie, Sfx::Drip,
-            Sfx::Rumble, Sfx::Chains, Sfx::Whisper, Sfx::Creak, Sfx::Wind, Sfx::Bones, Sfx::Fireball, Sfx::Explosion,
-            Sfx::Frost, Sfx::Arrow, Sfx::Bolt, Sfx::Heal, Sfx::LevelUp, Sfx::Pickup, Sfx::Stairs, Sfx::Revive,
-            Sfx::Trap, Sfx::Amulet, Sfx::Blink, Sfx::Stomp, Sfx::Menu,
+            Sfx::Step,
+            Sfx::Swing,
+            Sfx::Hit,
+            Sfx::Clang,
+            Sfx::Miss,
+            Sfx::PlayerHurt,
+            Sfx::PlayerDie,
+            Sfx::Drip,
+            Sfx::Rumble,
+            Sfx::Chains,
+            Sfx::Whisper,
+            Sfx::Creak,
+            Sfx::Wind,
+            Sfx::Bones,
+            Sfx::Fireball,
+            Sfx::Explosion,
+            Sfx::Frost,
+            Sfx::Arrow,
+            Sfx::Bolt,
+            Sfx::Heal,
+            Sfx::LevelUp,
+            Sfx::Pickup,
+            Sfx::Stairs,
+            Sfx::Revive,
+            Sfx::Trap,
+            Sfx::Amulet,
+            Sfx::Blink,
+            Sfx::Stomp,
+            Sfx::Menu,
         ];
         for v in voices {
             for m in moods {
@@ -1065,7 +1480,11 @@ mod tests {
             assert!(!mono.is_empty());
             assert!(mono.iter().all(|x| x.is_finite()), "{:?} produced NaN", s);
             let st = spatialize(&mono, &sp, 44100.0);
-            assert!(st.iter().all(|x| x.is_finite() && x.abs() < 50.0), "{:?} blew up", s);
+            assert!(
+                st.iter().all(|x| x.is_finite() && x.abs() < 50.0),
+                "{:?} blew up",
+                s
+            );
         }
     }
 }

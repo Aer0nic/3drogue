@@ -49,7 +49,10 @@ pub struct Bolt {
 impl Bolt {
     pub fn pos_at(&self, t: f32) -> (f32, f32) {
         let k = (t / self.dur).clamp(0.0, 1.0);
-        (self.x0 + (self.x1 - self.x0) * k, self.y0 + (self.y1 - self.y0) * k)
+        (
+            self.x0 + (self.x1 - self.x0) * k,
+            self.y0 + (self.y1 - self.y0) * k,
+        )
     }
 }
 
@@ -71,7 +74,34 @@ pub struct DynLight {
     pub max: f32,
 }
 
+/// How a door gets out of the way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DoorOpening {
+    /// A plank door creaks open on its hinges.
+    Swing,
+    /// A gate of bars rises up into the lintel.
+    Rise,
+    /// Heavy stone, bone or root doors part down the middle.
+    Split,
+    /// Portals and crystal doors dissipate into the air.
+    Dissolve,
+}
+
+/// A door partway through opening.
+#[derive(Clone, Copy, Debug)]
+pub struct DoorAnim {
+    pub x: i32,
+    pub y: i32,
+    pub kind: DoorOpening,
+    /// Seconds since it began to open.
+    pub age: f32,
+}
+
+/// How long a door takes to open.
+pub const DOOR_TIME: f32 = 0.6;
+
 pub struct Fx {
+    pub doors: Vec<DoorAnim>,
     pub parts: Vec<Particle>,
     pub bolts: Vec<Bolt>,
     pub texts: Vec<FloatText>,
@@ -84,6 +114,7 @@ pub struct Fx {
 impl Fx {
     pub fn new() -> Fx {
         Fx {
+            doors: Vec::new(),
             parts: Vec::new(),
             bolts: Vec::new(),
             texts: Vec::new(),
@@ -95,13 +126,26 @@ impl Fx {
     }
 
     pub fn clear(&mut self) {
+        self.doors.clear();
         self.parts.clear();
         self.bolts.clear();
         self.texts.clear();
         self.lights.clear();
     }
 
+    /// How far the door at (x,y) has opened (0..1), if it is still opening.
+    pub fn door_at(&self, x: i32, y: i32) -> Option<(DoorOpening, f32)> {
+        self.doors
+            .iter()
+            .find(|d| d.x == x && d.y == y)
+            .map(|d| (d.kind, (d.age / DOOR_TIME).clamp(0.0, 1.0)))
+    }
+
     pub fn update(&mut self, dt: f32) {
+        for d in self.doors.iter_mut() {
+            d.age += dt;
+        }
+        self.doors.retain(|d| d.age < DOOR_TIME);
         for p in self.parts.iter_mut() {
             p.vz -= p.grav * dt;
             let drag = (1.0 - p.drag * dt).max(0.0);
@@ -160,7 +204,13 @@ impl Fx {
                 BoltEnd::Blood => self.blood(x, y, 0.5, 8),
                 BoltEnd::Magic(c) => {
                     self.burst(x, y, 0.5, 16, c, &['*', '+', '.'], 2.0, 0.6, 0.0, true);
-                    self.light(x, y, [c.0 as f32 / 120.0, c.1 as f32 / 120.0, c.2 as f32 / 120.0], 2.0, 0.4);
+                    self.light(
+                        x,
+                        y,
+                        [c.0 as f32 / 120.0, c.1 as f32 / 120.0, c.2 as f32 / 120.0],
+                        2.0,
+                        0.4,
+                    );
                 }
             }
         }
@@ -221,11 +271,33 @@ impl Fx {
     }
 
     pub fn blood(&mut self, x: f32, y: f32, z: f32, n: usize) {
-        self.burst(x, y, z, n, Rgb(175, 12, 12), &[',', '.', '\'', '`', ';'], 1.6, 0.9, 3.0, false);
+        self.burst(
+            x,
+            y,
+            z,
+            n,
+            Rgb(175, 12, 12),
+            &[',', '.', '\'', '`', ';'],
+            1.6,
+            0.9,
+            3.0,
+            false,
+        );
     }
 
     pub fn ichor(&mut self, x: f32, y: f32, z: f32, n: usize, c: Rgb) {
-        self.burst(x, y, z, n, c, &[',', '.', '\'', ';', '~'], 1.6, 0.9, 3.0, false);
+        self.burst(
+            x,
+            y,
+            z,
+            n,
+            c,
+            &[',', '.', '\'', ';', '~'],
+            1.6,
+            0.9,
+            3.0,
+            false,
+        );
     }
 
     pub fn sparks(&mut self, x: f32, y: f32, z: f32, c: Rgb) {
@@ -233,19 +305,72 @@ impl Fx {
     }
 
     pub fn explosion(&mut self, x: f32, y: f32, c: Rgb) {
-        self.burst(x, y, 0.5, 60, c, &['*', '#', '%', '@', '+'], 3.0, 0.7, 0.5, true);
-        self.burst(x, y, 0.5, 30, Rgb(255, 235, 130), &['*', '.', '\''], 4.0, 0.4, 0.0, true);
-        self.burst(x, y, 0.4, 25, Rgb(90, 80, 80), &['o', 'O', '.', '~'], 0.8, 1.6, -0.4, false);
+        self.burst(
+            x,
+            y,
+            0.5,
+            60,
+            c,
+            &['*', '#', '%', '@', '+'],
+            3.0,
+            0.7,
+            0.5,
+            true,
+        );
+        self.burst(
+            x,
+            y,
+            0.5,
+            30,
+            Rgb(255, 235, 130),
+            &['*', '.', '\''],
+            4.0,
+            0.4,
+            0.0,
+            true,
+        );
+        self.burst(
+            x,
+            y,
+            0.4,
+            25,
+            Rgb(90, 80, 80),
+            &['o', 'O', '.', '~'],
+            0.8,
+            1.6,
+            -0.4,
+            false,
+        );
         self.light(x, y, [2.6, 1.3, 0.4], 3.0, 0.6);
         self.shake = self.shake.max(0.9);
     }
 
     pub fn ice(&mut self, x: f32, y: f32) {
-        self.burst(x, y, 0.5, 30, Rgb(150, 220, 255), &['*', '+', 'x', '.'], 2.5, 0.8, 0.5, true);
+        self.burst(
+            x,
+            y,
+            0.5,
+            30,
+            Rgb(150, 220, 255),
+            &['*', '+', 'x', '.'],
+            2.5,
+            0.8,
+            0.5,
+            true,
+        );
         self.light(x, y, [0.4, 0.9, 1.8], 2.5, 0.5);
     }
 
-    pub fn ring(&mut self, x: f32, y: f32, n: usize, speed: f32, c: Rgb, chars: &[char], life: f32) {
+    pub fn ring(
+        &mut self,
+        x: f32,
+        y: f32,
+        n: usize,
+        speed: f32,
+        c: Rgb,
+        chars: &[char],
+        life: f32,
+    ) {
         let mut rng = rand::thread_rng();
         for i in 0..n {
             let a = i as f32 / n as f32 * TAU;
@@ -307,11 +432,29 @@ impl Fx {
     }
 
     pub fn bones(&mut self, x: f32, y: f32) {
-        self.burst(x, y, 0.5, 16, Rgb(230, 225, 200), &['%', '\'', '=', '-', 'o'], 1.6, 1.0, 3.0, false);
+        self.burst(
+            x,
+            y,
+            0.5,
+            16,
+            Rgb(230, 225, 200),
+            &['%', '\'', '=', '-', 'o'],
+            1.6,
+            1.0,
+            3.0,
+            false,
+        );
     }
 
     pub fn text(&mut self, x: f32, y: f32, z: f32, s: String, c: Rgb) {
-        self.texts.push(FloatText { x, y, z, text: s, color: c, life: 1.0 });
+        self.texts.push(FloatText {
+            x,
+            y,
+            z,
+            text: s,
+            color: c,
+            life: 1.0,
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -329,11 +472,30 @@ impl Fx {
     ) {
         let d = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
         let dur = (d / speed).max(0.05);
-        self.bolts.push(Bolt { x0, y0, x1, y1, t: 0.0, dur, ch, color, light, end, z: 0.5 });
+        self.bolts.push(Bolt {
+            x0,
+            y0,
+            x1,
+            y1,
+            t: 0.0,
+            dur,
+            ch,
+            color,
+            light,
+            end,
+            z: 0.5,
+        });
     }
 
     pub fn light(&mut self, x: f32, y: f32, color: [f32; 3], radius: f32, life: f32) {
-        self.lights.push(DynLight { x, y, color, radius, life, max: life });
+        self.lights.push(DynLight {
+            x,
+            y,
+            color,
+            radius,
+            life,
+            max: life,
+        });
     }
 
     pub fn flash(&mut self, c: Rgb, amt: f32) {

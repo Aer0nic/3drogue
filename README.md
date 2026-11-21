@@ -19,7 +19,7 @@ Options: `--no-audio`, `--256` (for terminals without 24-bit colour),
 
 ## Controls
 
-| First-person | | Overhead map (Tab) | |
+| First-person | | Overhead view (Shift+M) | |
 |---|---|---|---|
 | W / Up | step forward | WASD / arrows | move N/W/S/E |
 | S / Down | step back | Y U B N, Home PgUp End PgDn | diagonals |
@@ -29,7 +29,7 @@ Options: `--no-audio`, `--256` (for terminals without 24-bit colour),
 
 Space/F attack (or shoot) · 1-2 class skills · 3-4 class skills bought at the Soul Altar ·
 G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs ·
-`.` wait/search · **Shift+R toggles turn-based / real-time** · Tab toggles view · M full map ·
+`.` wait/search · **Shift+R toggles turn-based / real-time** · Shift+M switches first-person / overhead view · Tab (or M) full map · L message log (last 100 turns) · T relight your torch ·
 `-`/`+` volume · `?` help · Esc menu
 
 ## Features
@@ -45,7 +45,7 @@ G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs
 - **Save and continue**: quitting mid-run saves it; choose Continue Descent on the title screen to resume.
 - **6 classes**: Warrior, Rogue, Mage and Cleric are available from the start.
   Ranger (wolf companion) and Necromancer (raise the dead) are unlocked with soul points.
-- **19 monsters in 8 factions that fight each other.** Undead attack the
+- **32 kinds of monster in 8 factions that fight each other.** Undead attack the
   living, demons attack everything, greenskins and beasts are at war, and a
   stray bolt that hits an ally starts a brawl.
 - **The dead rise again**: corpses come back to life when you are not looking,
@@ -64,8 +64,12 @@ G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs
   (cracking screen), restless dead (ghost mist), claimed by the abyss (hellfire),
   poisoned (toxic bubbles), impaled (spikes), arcane (rune storm), or burned by
   your own fireball (fire burning down to ash).
-- **Persistent profile** (`~/.local/share/grazzark/profile.json`): every run
-  earns soul points. Spend them at the Soul Altar on stat upgrades, boons that
+- **Profiles**: several players (or several attempts) can each keep their own
+  profile, with its own soul points, upgrades, bestiary, history and saved run.
+  The first time you play you name one; with more than one, the game asks
+  which to load when it starts. "Change Profile" and "New Profile" are on the
+  title menu.
+- **Persistent progress**: every run earns soul points. Spend them at the Soul Altar on stat upgrades, boons that
   change how a run plays (Bloodlust, Soul Anchor, Blood Magic, Cartographer,
   Deep Pockets and more), class unlocks, and two extra skills for each class.
   The Hall of the Dead records your past runs.
@@ -79,20 +83,89 @@ G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs
   7 full stats, 10 mastered.
 - **Monster closets**: some floors hide a big room packed with sleeping
   monsters, sometimes with champions or even an overlord among them.
-- **Necromancer thralls grow**: each kill gives a thrall a 5% chance to become
-  a champion (+2% per 5 levels). A champion thrall that slays an enemy champion
-  may become an overlord thrall (1.5%, +0.5% per 5 levels), which roars foes into
-  flight and raises short-lived skeleton minions, each on a 25-50 turn cooldown.
-  Every thrall binds 3 of your max HP (2 from level 10, 1 from level 20) until it
-  dies, and they heal a little slower than you.
-- **Shuffled floor themes**: each run deals three of five wall styles (brick
-  cellars, mossy halls, obsidian vaults, frozen catacombs, crystal caverns) in
-  random order, in bands of 2-4 floors, before the bone-walled Sanctum.
-- **The living dungeon**: faces surface in the Sanctum's walls in silent
-  screams. Take the Amulet and they stare in terror, or hang dead. On the
+- **Necromancer thralls**: when several corpses are in reach, Raise Dead opens
+  a list showing each body's max HP upkeep and whatever the bestiary has taught
+  you about it. Stronger monsters hold more of your max HP while they live (less
+  every 10 levels). A thrall that falls can never be raised again, unless you
+  learn Undying Bond at the Soul Altar, which allows one more raising at about
+  50% more upkeep. Each kill gives a thrall a 5% chance to become a champion
+  (+2% per 5 levels), and a champion thrall that slays an enemy champion may
+  become an overlord thrall (1.5%, +0.5% per 5 levels). Overlord thralls roar
+  foes into flight and raise short-lived skeleton minions, each on a 25-50 turn
+  cooldown. Thralls heal a little slower than you.
+- **Every monster has a special power on a timer**: minotaurs and cave bears
+  charge and hurl you back, wraiths sap your life, myconids burst into
+  paralysing spore clouds, spiders web you in place, zombies and wights grab
+  you, slimes split, shamans heal their kin, ogres and the Warden shake the
+  ground, trolls throw boulders, basilisks petrify with a gaze, banshees shriek,
+  goblins throw grit in your eyes, rats and wolves call their pack, and more.
+  Monsters use these powers on each other when they fight, too. Paralysis
+  always leaves a short grace period, so it can never chain.
+- **15 floor themes** dealt out per run. Near the surface (depths 1-3): cellars,
+  crypts, dank gaols and sewers. The middle depths (4-6): mossy halls, frozen
+  catacombs, fungal grottos, a drowned temple and old mines. The deep (7-9):
+  obsidian vaults, crystal caverns, an ossuary, the starless abyss, a blood
+  temple and an infernal foundry. Then the bone-walled Sanctum.
+- **The Warden and its wards**: Vorth guards the Amulet and nothing else. It
+  hunts only you, and no monster but a necromancer's thralls can harm it. Four
+  ward prisms feed its power, one somewhere on floors 1-3, 4-5, 6-8 and 9-10:
+  floating prisms pouring shrieking souls up into the ceiling. Strike one and
+  a Prism Guardian (a crystal golem that throws shards) tears itself out of it
+  and seals the room behind walls of crystal. The ward is shielded until the
+  Guardian falls; then it crumbles, and something far below screams. Each
+  broken ward weakens the Warden, and with all four gone it is a hollow shell.
+  Taking the Amulet shatters any wards still standing.
+- **Themed doors**: every theme has its own doors: moss-eaten planks, slabs of
+  obsidian split by fire, bone doors, frozen doors, crystal, woven roots,
+  bronze doors with a porthole, braced timber, lashed bones, swirling void,
+  gilded crimson. Sewers, gaols, crypts and foundries have gates of bars you
+  can see (and spot monsters) through.
+- **Special rooms**: pillared halls, rubble-strewn halls, walled inner chambers
+  with treasure behind the door, ossuaries whose bones rise, armories,
+  libraries, candlelit shrines, trapped galleries with a prize, beasts' dens and
+  spore gardens.
+- **The legend** (title menu, and before your first descent): why the Amulet,
+  the heart of GRAZZARK, must be carried into the sunlight.
+- **The living dungeon**: now and then a few of the bone faces carved into the
+  Sanctum's bricks come alive in silent screams. Take the Amulet and they shriek
+  in torment, more often, and some die for good, weeping blood from closed eyes and lips. On the
   climb back up, flesh, veins and watching eyes spread over the dungeon, thicker
   on every floor nearer the surface. It also torments you with curses that
   last a few turns: Forgetting (your map is wiped until it passes), Paranoia
   (phantom monsters that can't hurt you and vanish when touched), Darkness,
-  Vertigo (steps lurch the wrong way), Leaden limbs (40% slower) and Hush (no
-  skills or scrolls).
+  Vertigo (steps lurch the wrong way), Leaden limbs (40% slower), Hush (no
+  skills or scrolls) and Gale (an unnatural wind snuffs your torch: total
+  darkness and no map until the wind dies and you relight it with T).
+- **Torch smoke**: the torch in your left hand trails smoke that curls, drifts
+  as you turn, streams back as you walk, and is ripped sideways by a gale.
+- **New monsters**, including centipedes, slimes, myconids, goblin shamans,
+  scorpions, hobgoblins, cave bears, gargoyles, wights, banshees, fire
+  elementals, basilisks and pit fiends. Each floor favours the creatures at
+  home there, so weak ones crowd the upper floors and strong ones the depths.
+
+## Standalone builds
+
+`scripts/build-release.sh` builds ready-to-share packages into `dist/`:
+
+- `grazzark-linux-x86_64.tar.gz`: the game, a menu entry (`install-linux.sh`)
+  and instructions. Needs glibc 2.34 or newer (Ubuntu 22.04, Debian 12,
+  Fedora 35 and later) and ALSA (`libasound2`), which every desktop has.
+- `grazzark-windows-x86_64.zip`: `grazzark.exe` and instructions. Windows 10
+  or newer. Built from Linux with `rustup target add x86_64-pc-windows-gnu`
+  and MinGW-w64 (`apt install mingw-w64`); on Windows itself just run
+  `cargo build --release`.
+
+How it starts:
+
+- **Run from a terminal / Command Prompt**: it plays right there.
+- **Double-clicked on Windows**: it is a console program, so Windows opens a
+  console window for it. If it ever crashes, the window waits for Enter so
+  you can read the message.
+- **Double-clicked on Linux**: with no terminal attached, it reopens itself
+  in the first terminal emulator it finds (x-terminal-emulator,
+  gnome-terminal, konsole, xfce4-terminal, mate-terminal, tilix, kitty,
+  alacritty, wezterm, foot or xterm).
+
+Profiles live in `%APPDATA%\grazzark\profiles` on Windows and
+`~/.local/share/grazzark/profiles` on Linux, one folder each. A profile from
+an older version is moved there automatically as "Default".

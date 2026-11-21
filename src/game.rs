@@ -6,7 +6,7 @@ use crate::audio::{Mood, Sfx, Spatial};
 use crate::color::Rgb;
 use crate::data::*;
 use crate::entity::*;
-use crate::fx::{BoltEnd, Fx};
+use crate::fx::{BoltEnd, DoorAnim, DoorOpening, Fx};
 use crate::map::*;
 use crate::profile::Bonuses;
 use rand::rngs::StdRng;
@@ -60,6 +60,22 @@ pub enum Action {
     Use(usize),
     Drop(usize),
     QuickHeal,
+    /// Relight a torch the wind blew out.
+    Relight,
+    /// Raise the corpse at this spot (chosen from the raise menu).
+    RaiseAt(i32, i32),
+}
+
+/// A corpse the necromancer could raise, as offered in the raise menu.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RaiseOption {
+    pub x: i32,
+    pub y: i32,
+    pub kind: usize,
+    /// Max HP it will hold while it lives.
+    pub cost: i32,
+    /// A fallen thrall raised once more (Undying Bond).
+    pub again: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +100,7 @@ impl DeathCause {
                 TrapKind::Gas => "choked by poison gas",
                 TrapKind::Fire => "immolated by a fire trap",
                 TrapKind::Alarm => "undone by an alarm trap",
+                TrapKind::Maw => "devoured by the living floor",
             }
             .to_string(),
             DeathCause::Abandoned => "lost their nerve and fled into madness".to_string(),
@@ -101,7 +118,13 @@ pub struct Msg {
     pub text: String,
     pub color: Rgb,
     pub age: f32,
+    /// The turn it was written on, for the message log.
+    #[serde(default)]
+    pub turn: u64,
 }
+
+/// How many turns of messages the log (L) keeps.
+pub const LOG_TURNS: u64 = 100;
 
 pub struct SoundEv {
     pub sfx: Sfx,
@@ -120,6 +143,18 @@ pub struct Cam {
     pub swing: f32,
 }
 
+/// A wisp of smoke from the torch in your hand, in screen cells relative to
+/// the tip of the flame.
+#[derive(Clone, Copy, Debug)]
+pub struct Smoke {
+    pub x: f32,
+    pub y: f32,
+    pub vx: f32,
+    pub vy: f32,
+    pub life: f32,
+    pub max: f32,
+}
+
 /// Torments the living dungeon inflicts on whoever carries the Amulet out.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Curse {
@@ -135,10 +170,20 @@ pub enum Curse {
     Leaden,
     /// No skills, no scrolls.
     Hush,
+    /// An unnatural wind snuffs your torch: total darkness, no map.
+    Gale,
 }
 
 impl Curse {
-    pub const ALL: [Curse; 6] = [Curse::Forgetting, Curse::Figments, Curse::Darkness, Curse::Vertigo, Curse::Leaden, Curse::Hush];
+    pub const ALL: [Curse; 7] = [
+        Curse::Forgetting,
+        Curse::Figments,
+        Curse::Darkness,
+        Curse::Vertigo,
+        Curse::Leaden,
+        Curse::Hush,
+        Curse::Gale,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -148,16 +193,24 @@ impl Curse {
             Curse::Vertigo => "VERTIGO",
             Curse::Leaden => "LEADEN",
             Curse::Hush => "HUSH",
+            Curse::Gale => "GALE",
         }
     }
     pub fn onset(self) -> &'static str {
         match self {
-            Curse::Forgetting => "The dungeon reaches into your mind... you can no longer remember the way you came!",
+            Curse::Forgetting => {
+                "The dungeon reaches into your mind... you can no longer remember the way you came!"
+            }
             Curse::Figments => "Shapes peel themselves out of the walls. Are they real?",
             Curse::Darkness => "A cold breath from the stones smothers your torch to a dim ember!",
-            Curse::Vertigo => "The floor heaves like the belly of a beast. You can barely keep your feet!",
+            Curse::Vertigo => {
+                "The floor heaves like the belly of a beast. You can barely keep your feet!"
+            }
             Curse::Leaden => "The air thickens like tar. Your limbs turn to lead!",
             Curse::Hush => "The walls drink your voice. You cannot speak a word of power!",
+            Curse::Gale => {
+                "A howling, unnatural wind tears through the halls and SNUFFS OUT YOUR TORCH!"
+            }
         }
     }
     pub fn end(self) -> &'static str {
@@ -168,6 +221,7 @@ impl Curse {
             Curse::Vertigo => "The floor stills beneath you.",
             Curse::Leaden => "The weight lifts from your limbs.",
             Curse::Hush => "Your voice returns to you.",
+            Curse::Gale => "The unnatural wind dies away. Press T to relight your torch.",
         }
     }
     pub fn color(self) -> Rgb {
@@ -178,6 +232,7 @@ impl Curse {
             Curse::Vertigo => Rgb(255, 170, 90),
             Curse::Leaden => Rgb(170, 170, 140),
             Curse::Hush => Rgb(120, 200, 255),
+            Curse::Gale => Rgb(190, 210, 230),
         }
     }
 }
@@ -245,6 +300,18 @@ pub struct Player {
     /// Maximum health currently bound up in keeping thralls alive.
     #[serde(default)]
     pub thrall_upkeep: i32,
+    /// The wind blew your torch out: you see nothing until you relight it.
+    #[serde(default)]
+    pub torch_out: bool,
+    /// Turns held fast by a web or a grip: you can fight but not move.
+    #[serde(default)]
+    pub rooted: i32,
+    /// Turns half-blinded by grit or darkness.
+    #[serde(default)]
+    pub blind: i32,
+    /// Paralysis cannot strike again before this world time.
+    #[serde(default)]
+    pub para_guard: f64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -305,6 +372,51 @@ pub struct Game {
     /// Map memory taken away by Forgetting, given back when it ends.
     #[serde(default)]
     pub forgotten: Vec<bool>,
+    /// Corpses offered by the last Raise Dead, waiting for the player to pick one.
+    #[serde(skip)]
+    pub raise_menu: Vec<RaiseOption>,
+    /// The corpse picked from the raise menu.
+    #[serde(skip)]
+    raise_pick: Option<(i32, i32)>,
+    /// Smoke curling from your torch (presentation only).
+    #[serde(skip)]
+    pub smoke: Vec<Smoke>,
+    #[serde(skip)]
+    smoke_acc: f32,
+    /// Seconds since the torch was snuffed, for the dying wisp from the wick.
+    #[serde(skip)]
+    pub snuff_age: f32,
+    /// Seconds since the torch was relit: flint sparks, then the flame catches.
+    #[serde(skip, default = "long_ago")]
+    pub light_age: f32,
+    /// The dying flame has gone out in its puff of smoke.
+    #[serde(skip)]
+    puffed: bool,
+    /// The walls' eyes cannot stare again before this world time.
+    #[serde(default)]
+    pub stare_cd: f64,
+    /// The eye that is staring at you, and until when (world time).
+    #[serde(skip)]
+    pub stare: Option<(i32, i32, f64)>,
+    /// A camera swoop between views: (seconds elapsed, heading to overhead).
+    #[serde(skip)]
+    pub view_anim: Option<(f32, bool)>,
+    /// The floors that hold a ward prism this run (one in each of 1-3, 4-5, 6-8, 9-10).
+    #[serde(default)]
+    pub ward_depths: Vec<u32>,
+    /// Ward prisms broken so far (each weakens the Warden).
+    #[serde(default)]
+    pub wards_destroyed: u8,
+    /// Accumulator for the souls streaming out of a ward.
+    #[serde(skip)]
+    soul_acc: f32,
+}
+
+/// How long the camera takes to swoop between first-person and overhead.
+pub const VIEW_SWOOP: f32 = 0.7;
+
+fn long_ago() -> f32 {
+    99.0
 }
 
 fn fresh_rng() -> StdRng {
@@ -353,7 +465,9 @@ pub fn random_item(depth: u32, rng: &mut StdRng, luck: i32) -> Item {
             Scroll::Vision
         })
     } else if r < 0.82 {
-        let opts: Vec<usize> = (0..WEAPONS.len()).filter(|&i| WEAPONS[i].depth <= depth + 1).collect();
+        let opts: Vec<usize> = (0..WEAPONS.len())
+            .filter(|&i| WEAPONS[i].depth <= depth + 1)
+            .collect();
         let def = *opts.choose(rng).unwrap_or(&1);
         let mut bonus = rng.gen_range(0..=(depth as i32 / 3 + luck / 2));
         if rng.gen_bool(0.1) {
@@ -361,7 +475,9 @@ pub fn random_item(depth: u32, rng: &mut StdRng, luck: i32) -> Item {
         }
         Item::Weapon(Gear::plain(def, bonus))
     } else {
-        let opts: Vec<usize> = (0..ARMORS.len()).filter(|&i| ARMORS[i].depth <= depth + 1).collect();
+        let opts: Vec<usize> = (0..ARMORS.len())
+            .filter(|&i| ARMORS[i].depth <= depth + 1)
+            .collect();
         let def = *opts.choose(rng).unwrap_or(&2);
         let bonus = rng.gen_range(0..=(depth as i32 / 4 + luck / 2));
         Item::Armor(Gear::plain(def, bonus))
@@ -385,7 +501,28 @@ pub fn random_gear(depth: u32, rng: &mut StdRng, luck: i32) -> Item {
     }
 }
 
-fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time: f64, unique: bool, hp_mult: f32) {
+/// Choose a monster kind for `depth`, favouring creatures at home there.
+fn pick_kind(kinds: &[usize], depth: u32, rng: &mut StdRng) -> usize {
+    use rand::distributions::{Distribution, WeightedIndex};
+    let ws: Vec<f32> = kinds
+        .iter()
+        .map(|&k| spawn_weight(&MONSTERS[k], depth))
+        .collect();
+    match WeightedIndex::new(&ws) {
+        Ok(w) => kinds[w.sample(rng)],
+        Err(_) => *kinds.choose(rng).unwrap_or(&0),
+    }
+}
+
+fn populate(
+    lv: &mut Level,
+    rng: &mut StdRng,
+    next_id: &mut u32,
+    luck: i32,
+    time: f64,
+    unique: bool,
+    hp_mult: f32,
+) {
     let depth = lv.depth;
     let kinds: Vec<usize> = (0..MONSTERS.len())
         .filter(|&i| {
@@ -401,8 +538,12 @@ fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time
         guard += 1;
         let ri = rng.gen_range(1..n_rooms);
         let room = lv.rooms[ri];
-        let kind = *kinds.choose(rng).unwrap_or(&0);
-        let pack = if matches!(MONSTERS[kind].glyph, 'r' | 'k' | 'g' | 'w' | 's' | 'b') && rng.gen_bool(0.35) {
+        let kind = pick_kind(&kinds, depth, rng);
+        let pack = if matches!(
+            MONSTERS[kind].glyph,
+            'r' | 'k' | 'g' | 'w' | 's' | 'b' | 'c' | 'j'
+        ) && rng.gen_bool(0.35)
+        {
             rng.gen_range(2..4)
         } else {
             1
@@ -433,7 +574,11 @@ fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time
                 break;
             }
         }
-        lv.items.push(FloorItem { x: amulet_pos.0, y: amulet_pos.1, item: Item::Amulet });
+        lv.items.push(FloorItem {
+            x: amulet_pos.0,
+            y: amulet_pos.1,
+            item: Item::Amulet,
+        });
         let room = lv.rooms.iter().find(|r| r.contains(dx, dy)).copied();
         let pos = room
             .and_then(|r| lv.random_floor_in(&r, rng))
@@ -469,6 +614,8 @@ fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time
         lv.has_unique = placed;
     }
 
+    fill_features(lv, rng, next_id, luck, time, hp_mult, &kinds);
+
     // A monster closet: a big room packed wall to wall with sleeping monsters.
     if depth >= 2 && depth <= 10 && rng.gen::<f32>() < 0.12 + depth as f32 * 0.03 {
         place_closet(lv, rng, next_id, &kinds, time, hp_mult);
@@ -493,12 +640,278 @@ fn populate(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, luck: i32, time
             6..=7 => TrapKind::Fire,
             _ => TrapKind::Alarm,
         };
-        lv.traps.push(Trap { x, y, kind, revealed: false });
+        lv.traps.push(Trap {
+            x,
+            y,
+            kind,
+            revealed: false,
+        });
+    }
+}
+
+/// Set a ward prism in the middle of some room, clear of stairs and walls.
+pub fn place_ward(lv: &mut Level, rng: &mut StdRng) {
+    let (ux, uy) = lv.up;
+    let (dx, dy) = lv.down;
+    let mut spots = Vec::new();
+    // Ideally a roomy hall of its own; failing that, any open spot in a room.
+    for strict in [true, false] {
+        for (i, r) in lv.rooms.iter().enumerate().skip(1) {
+            if strict
+                && (r.w < 5
+                    || r.h < 5
+                    || r.contains(ux, uy)
+                    || r.contains(dx, dy)
+                    || lv.closet.map_or(false, |c| c.x == r.x && c.y == r.y))
+            {
+                continue;
+            }
+            let m = if strict { 2 } else { 1 };
+            for y in r.y + m..r.y + r.h - m {
+                for x in r.x + m..r.x + r.w - m {
+                    if (x, y) == (ux, uy) || (x, y) == (dx, dy) {
+                        continue;
+                    }
+                    let clear = DIRS
+                        .iter()
+                        .all(|&(ox, oy)| lv.tile(x + ox, y + oy) == Tile::Floor);
+                    if clear
+                        && lv.tile(x, y) == Tile::Floor
+                        && lv.monster_at(x, y).is_none()
+                        && !lv.items.iter().any(|it| it.x == x && it.y == y)
+                        && !lv.traps.iter().any(|t| t.x == x && t.y == y)
+                    {
+                        spots.push((i, x, y));
+                    }
+                }
+            }
+        }
+        if !spots.is_empty() {
+            break;
+        }
+    }
+    let Some(&(i, x, y)) = spots.choose(rng) else {
+        return;
+    };
+    let room = lv.rooms[i];
+    lv.set(x, y, Tile::Ward);
+    lv.clouds.retain(|c| (c.x, c.y) != (x, y));
+    lv.ward = Some(Ward {
+        x,
+        y,
+        room,
+        state: WardState::Intact,
+        guardian: None,
+        seen: false,
+    });
+}
+
+/// Stock the special rooms: bones that rise, racks of arms, scrolls, shrines,
+/// trapped galleries with a prize, beasts' dens and spore gardens.
+fn fill_features(
+    lv: &mut Level,
+    rng: &mut StdRng,
+    next_id: &mut u32,
+    luck: i32,
+    time: f64,
+    hp_mult: f32,
+    kinds: &[usize],
+) {
+    let depth = lv.depth;
+    let feats = lv.features.clone();
+    let (ux, uy) = lv.up;
+    let (dx, dy) = lv.down;
+    for f in feats {
+        let r = f.room;
+        let spot = |lv: &Level, rng: &mut StdRng| -> Option<(i32, i32)> {
+            for _ in 0..40 {
+                let (x, y) = (rng.gen_range(r.x..r.x + r.w), rng.gen_range(r.y..r.y + r.h));
+                if lv.tile(x, y) == Tile::Floor
+                    && (x, y) != (ux, uy)
+                    && (x, y) != (dx, dy)
+                    && lv.monster_at(x, y).is_none()
+                    && !lv.items.iter().any(|i| i.x == x && i.y == y)
+                {
+                    return Some((x, y));
+                }
+            }
+            None
+        };
+        match f.kind {
+            RoomKind::Ossuary => {
+                let dead: Vec<usize> = kinds
+                    .iter()
+                    .copied()
+                    .filter(|&k| MONSTERS[k].death == DeathKind::Undead)
+                    .collect();
+                let pool = if dead.is_empty() {
+                    kinds.to_vec()
+                } else {
+                    dead
+                };
+                for _ in 0..rng.gen_range(5..=9) {
+                    if let (Some((x, y)), Some(&kind)) = (spot(lv, rng), pool.choose(rng)) {
+                        // Some of the bones are not as still as they look.
+                        let revive_at = if rng.gen_bool(0.5) {
+                            time + rng.gen_range(30.0..200.0) * 100.0
+                        } else {
+                            -1.0
+                        };
+                        lv.corpses.push(Corpse {
+                            kind,
+                            x,
+                            y,
+                            revive_at,
+                            raises: 0,
+                        });
+                    }
+                }
+            }
+            RoomKind::Armory => {
+                for _ in 0..rng.gen_range(2..=3) {
+                    if let Some((x, y)) = spot(lv, rng) {
+                        let item = random_gear(depth + 1, rng, luck);
+                        lv.items.push(FloorItem { x, y, item });
+                    }
+                }
+            }
+            RoomKind::Library => {
+                for _ in 0..rng.gen_range(2..=3) {
+                    if let Some((x, y)) = spot(lv, rng) {
+                        let sc = *[
+                            Scroll::Teleport,
+                            Scroll::Mapping,
+                            Scroll::Fire,
+                            Scroll::Vision,
+                        ]
+                        .choose(rng)
+                        .unwrap();
+                        lv.items.push(FloorItem {
+                            x,
+                            y,
+                            item: Item::Scroll(sc),
+                        });
+                    }
+                }
+            }
+            RoomKind::Shrine => {
+                for k in 0..rng.gen_range(1..=2) {
+                    if let Some((x, y)) = spot(lv, rng) {
+                        let item = if k == 0 {
+                            Item::Potion(Potion::Healing)
+                        } else {
+                            Item::Potion(Potion::Mana)
+                        };
+                        lv.items.push(FloorItem { x, y, item });
+                    }
+                }
+            }
+            RoomKind::TrapHall => {
+                if let Some((x, y)) = spot(lv, rng) {
+                    let item = random_gear(depth + 2, rng, luck);
+                    lv.items.push(FloorItem { x, y, item });
+                }
+                for _ in 0..rng.gen_range(4..=7) {
+                    if let Some((x, y)) = spot(lv, rng) {
+                        if lv.traps.iter().any(|t| t.x == x && t.y == y) {
+                            continue;
+                        }
+                        let kind = *[TrapKind::Spikes, TrapKind::Gas, TrapKind::Fire]
+                            .choose(rng)
+                            .unwrap();
+                        lv.traps.push(Trap {
+                            x,
+                            y,
+                            kind,
+                            revealed: false,
+                        });
+                    }
+                }
+            }
+            RoomKind::Den => {
+                let beasts: Vec<usize> = kinds
+                    .iter()
+                    .copied()
+                    .filter(|&k| {
+                        MONSTERS[k].faction == Faction::Beast
+                            || MONSTERS[k].faction == Faction::Vermin
+                    })
+                    .collect();
+                if let Some(&kind) = beasts.choose(rng) {
+                    for _ in 0..rng.gen_range(2..=4) {
+                        if let Some((x, y)) = spot(lv, rng) {
+                            let mut m = Monster::new(*next_id, kind, x, y, time);
+                            *next_id += 1;
+                            m.scale_hp(hp_mult);
+                            lv.monsters.push(m);
+                        }
+                    }
+                }
+                for _ in 0..3 {
+                    if let (Some((x, y)), Some(&kind)) = (spot(lv, rng), kinds.choose(rng)) {
+                        lv.corpses.push(Corpse {
+                            kind,
+                            x,
+                            y,
+                            revive_at: -1.0,
+                            raises: 0,
+                        });
+                    }
+                }
+            }
+            RoomKind::Garden => {
+                for y in r.y..r.y + r.h {
+                    for x in r.x..r.x + r.w {
+                        if lv.tile(x, y) == Tile::Floor
+                            && (x, y) != (ux, uy)
+                            && (x, y) != (dx, dy)
+                            && rng.gen_bool(0.25)
+                        {
+                            lv.clouds.push(Cloud {
+                                x,
+                                y,
+                                until: f64::MAX / 4.0,
+                            });
+                        }
+                    }
+                }
+            }
+            RoomKind::Chamber => {
+                // The prize behind the door.
+                let inner = Rect {
+                    x: r.x + 2,
+                    y: r.y + 2,
+                    w: (r.w - 4).max(1),
+                    h: (r.h - 4).max(1),
+                };
+                for k in 0..2 {
+                    if let Some((x, y)) = lv.random_floor_in(&inner, rng) {
+                        if (x, y) == (dx, dy) || (x, y) == (ux, uy) {
+                            continue;
+                        }
+                        let item = if k == 0 {
+                            random_gear(depth + 2, rng, luck)
+                        } else {
+                            random_item(depth + 1, rng, luck)
+                        };
+                        lv.items.push(FloorItem { x, y, item });
+                    }
+                }
+            }
+            RoomKind::Pillars | RoomKind::Rubble => {}
+        }
     }
 }
 
 /// Fill the largest suitable room with monsters and shut its doors.
-fn place_closet(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, kinds: &[usize], time: f64, hp_mult: f32) {
+fn place_closet(
+    lv: &mut Level,
+    rng: &mut StdRng,
+    next_id: &mut u32,
+    kinds: &[usize],
+    time: f64,
+    hp_mult: f32,
+) {
     if kinds.is_empty() {
         return;
     }
@@ -509,14 +922,23 @@ fn place_closet(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, kinds: &[us
         .iter()
         .enumerate()
         .skip(1)
-        .filter(|(_, r)| r.w * r.h >= 30 && !r.contains(dx, dy) && !r.contains(ux, uy))
+        .filter(|(_, r)| {
+            r.w * r.h >= 30
+                && !r.contains(dx, dy)
+                && !r.contains(ux, uy)
+                && !lv
+                    .features
+                    .iter()
+                    .any(|f| f.room.x == r.x && f.room.y == r.y)
+        })
         .max_by_key(|(_, r)| r.w * r.h)
         .map(|(i, r)| (i, *r));
     let Some((_, room)) = best else { return };
     // Doorways become closed doors so the closet is a surprise.
     for x in room.x - 1..=room.x + room.w {
         for y in room.y - 1..=room.y + room.h {
-            let edge = x == room.x - 1 || x == room.x + room.w || y == room.y - 1 || y == room.y + room.h;
+            let edge =
+                x == room.x - 1 || x == room.x + room.w || y == room.y - 1 || y == room.y + room.h;
             if !edge || lv.tile(x, y) != Tile::Floor {
                 continue;
             }
@@ -533,11 +955,13 @@ fn place_closet(lv: &mut Level, rng: &mut StdRng, next_id: &mut u32, kinds: &[us
         if placed >= n {
             break;
         }
-        let Some((x, y)) = lv.random_floor_in(&room, rng) else { continue };
+        let Some((x, y)) = lv.random_floor_in(&room, rng) else {
+            continue;
+        };
         if lv.monster_at(x, y).is_some() || lv.items.iter().any(|i| i.x == x && i.y == y) {
             continue;
         }
-        let kind = *kinds.choose(rng).unwrap();
+        let kind = pick_kind(kinds, lv.depth, rng);
         let mut m = Monster::new(*next_id, kind, x, y, time);
         *next_id += 1;
         m.awake = rng.gen_bool(0.15);
@@ -600,7 +1024,26 @@ impl Game {
         let mut level = generate(1, &mut rng);
         level.style = themes[0];
         let u1 = rng.gen::<f32>() < unique_chance[0];
-        populate(&mut level, &mut rng, &mut next_id, bonus.luck, 0.0, u1, hp_mult);
+        populate(
+            &mut level,
+            &mut rng,
+            &mut next_id,
+            bonus.luck,
+            0.0,
+            u1,
+            hp_mult,
+        );
+        // One ward prism in each band of floors.
+        let ward_depths = vec![
+            rng.gen_range(1..=3),
+            rng.gen_range(4..=5),
+            rng.gen_range(6..=8),
+            rng.gen_range(9..=10),
+        ];
+        if ward_depths.contains(&1) {
+            place_ward(&mut level, &mut rng);
+        }
+        level.theme_doors();
         chart_level(&mut level, bonus.carto);
         let cd = &CLASSES[class];
         let mut inv = Vec::new();
@@ -611,7 +1054,14 @@ impl Game {
             inv.push(Item::Potion(Potion::Mana));
         }
         for _ in 0..bonus.scavenger {
-            let sc = *[Scroll::Teleport, Scroll::Mapping, Scroll::Fire, Scroll::Vision].choose(&mut rng).unwrap();
+            let sc = *[
+                Scroll::Teleport,
+                Scroll::Mapping,
+                Scroll::Fire,
+                Scroll::Vision,
+            ]
+            .choose(&mut rng)
+            .unwrap();
             inv.push(Item::Scroll(sc));
         }
         let p = Player {
@@ -648,6 +1098,10 @@ impl Game {
             fury: 0,
             anchor_used: false,
             thrall_upkeep: 0,
+            torch_out: false,
+            rooted: 0,
+            blind: 0,
+            para_guard: 0.0,
         };
         let mut g = Game {
             rng,
@@ -669,7 +1123,13 @@ impl Game {
             over: None,
             kills: 0,
             max_depth: 1,
-            cam: Cam { x: 0.0, y: 0.0, ang: 0.0, walk: 0.0, swing: 0.0 },
+            cam: Cam {
+                x: 0.0,
+                y: 0.0,
+                ang: 0.0,
+                walk: 0.0,
+                swing: 0.0,
+            },
             queued: None,
             combat_heat: 0.0,
             room_size: 0.4,
@@ -683,6 +1143,19 @@ impl Game {
             curses: Vec::new(),
             figments: Vec::new(),
             forgotten: Vec::new(),
+            raise_menu: Vec::new(),
+            raise_pick: None,
+            smoke: Vec::new(),
+            smoke_acc: 0.0,
+            snuff_age: 0.0,
+            light_age: 99.0,
+            puffed: false,
+            stare_cd: 0.0,
+            stare: None,
+            view_anim: None,
+            ward_depths,
+            wards_destroyed: 0,
+            soul_acc: 0.0,
         };
         g.enter_level();
         g.announce_unique();
@@ -729,7 +1202,10 @@ impl Game {
         g.queued = None;
         g.p.next_act = g.p.next_act.min(g.time);
         g.enter_level_keep_facing();
-        g.msg("You return to the dungeon of GRAZZARK. Your journey continues...", Rgb(220, 200, 150));
+        g.msg(
+            "You return to the dungeon of GRAZZARK. Your journey continues...",
+            Rgb(220, 200, 150),
+        );
         Some(g)
     }
 
@@ -765,7 +1241,13 @@ impl Game {
         &WEAPONS[self.p.wpn.def]
     }
     pub fn sight(&self) -> i32 {
+        if self.p.torch_out {
+            return 0;
+        }
         let s = BASE_SIGHT + self.bonus.sight;
+        if self.p.blind > 0 {
+            return s.min(1);
+        }
         if self.cursed(Curse::Darkness) {
             s.min(2)
         } else {
@@ -790,7 +1272,10 @@ impl Game {
         if depth >= 10 {
             SANCTUM_STYLE
         } else {
-            self.themes.get(depth.max(1) as usize - 1).copied().unwrap_or(0)
+            self.themes
+                .get(depth.max(1) as usize - 1)
+                .copied()
+                .unwrap_or(0)
         }
     }
     pub fn floor_name(&self) -> &'static str {
@@ -804,16 +1289,28 @@ impl Game {
             + self.p.arm.bonus
             + self.bonus.ac
             + self.p.extra_ac
-            + if self.last_stand() { self.bonus.laststand } else { 0 }
+            + if self.last_stand() {
+                self.bonus.laststand
+            } else {
+                0
+            }
     }
     pub fn dmg_bonus(&self) -> i32 {
-        self.p.wpn.bonus + self.p.extra_dmg + self.bonus.dmg + self.p.level / 3 + if self.has(UPower::Wrath) { 3 } else { 0 }
+        self.p.wpn.bonus
+            + self.p.extra_dmg
+            + self.bonus.dmg
+            + self.p.level / 3
+            + if self.has(UPower::Wrath) { 3 } else { 0 }
     }
     pub fn crit_chance(&self) -> f32 {
         self.wdef().crit
             + self.bonus.crit
             + if self.p.class == C_ROGUE { 0.08 } else { 0.0 }
-            + if self.has(UPower::Executioner) { 0.12 } else { 0.0 }
+            + if self.has(UPower::Executioner) {
+                0.12
+            } else {
+                0.0
+            }
             + self.p.extra_crit
     }
     /// How fast the dead rise while you carry the Amulet: the normal rate on
@@ -834,11 +1331,21 @@ impl Game {
     /// Indices into level.items of the items lying at your feet.
     pub fn items_here(&self) -> Vec<usize> {
         let (px, py) = (self.p.x, self.p.y);
-        self.level.items.iter().enumerate().filter(|(_, i)| i.x == px && i.y == py).map(|(i, _)| i).collect()
+        self.level
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.x == px && i.y == py)
+            .map(|(i, _)| i)
+            .collect()
     }
     /// Unique items currently equipped.
     pub fn equipped_uniques(&self) -> Vec<usize> {
-        [self.p.wpn.uniq, self.p.arm.uniq, self.p.ring, self.p.neck].iter().flatten().map(|&u| u as usize).collect()
+        [self.p.wpn.uniq, self.p.arm.uniq, self.p.ring, self.p.neck]
+            .iter()
+            .flatten()
+            .map(|&u| u as usize)
+            .collect()
     }
     /// Does an equipped unique grant this power?
     pub fn has(&self, pw: UPower) -> bool {
@@ -883,14 +1390,34 @@ impl Game {
     // ------------------------------------------------------------ helpers
 
     pub fn msg(&mut self, t: impl Into<String>, c: Rgb) {
-        self.msgs.push(Msg { text: t.into(), color: c, age: 0.0 });
-        if self.msgs.len() > 80 {
-            self.msgs.remove(0);
+        let turn = self.turns;
+        self.msgs.push(Msg {
+            text: t.into(),
+            color: c,
+            age: 0.0,
+            turn,
+        });
+        // Keep the last 100 turns for the log (always the last few for the HUD).
+        let cutoff = turn.saturating_sub(LOG_TURNS);
+        let old = self.msgs.iter().take_while(|m| m.turn < cutoff).count();
+        let keep_min = 8;
+        let drop = old.min(self.msgs.len().saturating_sub(keep_min));
+        if drop > 0 {
+            self.msgs.drain(..drop);
+        }
+        if self.msgs.len() > 2000 {
+            let n = self.msgs.len() - 2000;
+            self.msgs.drain(..n);
         }
     }
 
     pub fn emit(&mut self, sfx: Sfx, x: i32, y: i32, vol: f32) {
-        self.sounds.push(SoundEv { sfx, x: x as f32 + 0.5, y: y as f32 + 0.5, vol });
+        self.sounds.push(SoundEv {
+            sfx,
+            x: x as f32 + 0.5,
+            y: y as f32 + 0.5,
+            vol,
+        });
     }
 
     fn new_id(&mut self) -> u32 {
@@ -900,7 +1427,10 @@ impl Game {
     }
 
     pub fn mon_index(&self, id: u32) -> Option<usize> {
-        self.level.monsters.iter().position(|m| m.alive && m.id == id)
+        self.level
+            .monsters
+            .iter()
+            .position(|m| m.alive && m.id == id)
     }
 
     fn target_pos(&self, t: Target) -> (i32, i32) {
@@ -930,6 +1460,25 @@ impl Game {
         }
         self.room_size = open as f32 / tot as f32;
         self.check_closet();
+        self.check_features();
+        self.check_ward();
+    }
+
+    /// Walking into a special room for the first time.
+    fn check_features(&mut self) {
+        let (px, py) = (self.p.x, self.p.y);
+        let Some(fi) = self
+            .level
+            .features
+            .iter()
+            .position(|f| !f.seen && f.room.contains(px, py))
+        else {
+            return;
+        };
+        self.level.features[fi].seen = true;
+        if let Some(t) = self.level.features[fi].kind.enter_text() {
+            self.msg(t, Rgb(210, 200, 160));
+        }
     }
 
     /// The first glimpse inside a monster closet.
@@ -953,7 +1502,13 @@ impl Game {
         if n < 4 {
             return;
         }
-        self.msg(format!("A MONSTER CLOSET! The room is packed with {} creatures...", n), Rgb(255, 110, 60));
+        self.msg(
+            format!(
+                "A MONSTER CLOSET! The room is packed with {} creatures...",
+                n
+            ),
+            Rgb(255, 110, 60),
+        );
         self.fx.shake = self.fx.shake.max(0.6);
         self.emit(Sfx::Rumble, px, py, 0.8);
         self.combat_heat = self.combat_heat.max(0.8);
@@ -961,15 +1516,61 @@ impl Game {
 
     // ------------------------------------------------------------ thralls
 
-    /// Max health each thrall costs to keep alive: 3, less every 10 levels.
-    pub fn thrall_cost(&self) -> i32 {
-        (3 - self.p.level / 10).max(1)
+    /// Max health a thrall of this kind holds while it lives: more for
+    /// stronger monsters, a fifth less for every 10 levels you have, and
+    /// about half again for a body raised a second time.
+    pub fn thrall_cost(&self, kind: usize, again: bool) -> i32 {
+        let base = 1.0 + MONSTERS[kind].xp as f32 / 12.0;
+        let lvl = (1.0 - 0.2 * (self.p.level / 10) as f32).max(0.4);
+        let c = (base * lvl).round().max(1.0) as i32;
+        if again {
+            c + (c / 2).max(1)
+        } else {
+            c
+        }
+    }
+
+    /// Corpses within reach that will answer your call, nearest first.
+    pub fn raise_options(&self) -> Vec<RaiseOption> {
+        let (px, py) = (self.p.x, self.p.y);
+        let limit = if self.bonus.rebind { 2 } else { 1 };
+        let mut v: Vec<(f32, RaiseOption)> = self
+            .level
+            .corpses
+            .iter()
+            .filter(|c| {
+                dist(c.x, c.y, px, py) <= 5.5
+                    && self.level.monster_at(c.x, c.y).is_none()
+                    && !(c.x == px && c.y == py)
+                    && c.raises < limit
+            })
+            .map(|c| {
+                let again = c.raises > 0;
+                (
+                    dist(c.x, c.y, px, py),
+                    RaiseOption {
+                        x: c.x,
+                        y: c.y,
+                        kind: c.kind,
+                        cost: self.thrall_cost(c.kind, again),
+                        again,
+                    },
+                )
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        v.into_iter().map(|(_, o)| o).collect()
     }
 
     /// Bind (or release) max health to match the thralls on this floor.
     pub fn sync_upkeep(&mut self) {
-        let n = self.level.monsters.iter().filter(|m| m.alive && m.thrall).count() as i32;
-        let want = n * self.thrall_cost();
+        let want: i32 = self
+            .level
+            .monsters
+            .iter()
+            .filter(|m| m.alive && m.thrall)
+            .map(|m| self.thrall_cost(m.kind, m.raises >= 2))
+            .sum();
         let diff = want - self.p.thrall_upkeep;
         if diff != 0 {
             self.p.max_hp -= diff;
@@ -1021,7 +1622,9 @@ impl Game {
         };
         let foes = self.level.monsters.iter().filter(|o| near(self, o)).count();
         if roar_cd <= now && foes >= 2 {
-            let idx: Vec<usize> = (0..self.level.monsters.len()).filter(|&i| near(self, &self.level.monsters[i])).collect();
+            let idx: Vec<usize> = (0..self.level.monsters.len())
+                .filter(|&i| near(self, &self.level.monsters[i]))
+                .collect();
             for i in idx {
                 let turns = self.rng.gen_range(5..=20);
                 let o = &mut self.level.monsters[i];
@@ -1032,25 +1635,43 @@ impl Game {
             let cd = self.rng.gen_range(25..=50) as f64 * 100.0;
             self.level.monsters[mi].roar_cd = now + cd;
             let (fx, fy) = (mx as f32 + 0.5, my as f32 + 0.5);
-            self.fx.ring(fx, fy, 40, 3.0, Rgb(190, 120, 255), &['~', '*', '\''], 0.7);
+            self.fx
+                .ring(fx, fy, 40, 3.0, Rgb(190, 120, 255), &['~', '*', '\''], 0.7);
             self.fx.shake = self.fx.shake.max(0.6);
-            self.emit(Sfx::Voice(MONSTERS[self.level.monsters[mi].kind].voice, Mood::Alert), mx, my, 1.0);
+            self.emit(
+                Sfx::Voice(MONSTERS[self.level.monsters[mi].kind].voice, Mood::Alert),
+                mx,
+                my,
+                1.0,
+            );
             self.emit(Sfx::Rumble, mx, my, 0.7);
-            self.msg(format!("Your overlord {} lets out a dreadful roar! Your foes flee in terror!", name), Rgb(200, 140, 255));
+            self.msg(
+                format!(
+                    "Your overlord {} lets out a dreadful roar! Your foes flee in terror!",
+                    name
+                ),
+                Rgb(200, 140, 255),
+            );
             return true;
         }
         if raise_cd <= now && foes >= 1 {
-            let skel = MONSTERS.iter().position(|d| d.name == "skeleton").unwrap_or(0);
+            let skel = MONSTERS
+                .iter()
+                .position(|d| d.name == "skeleton")
+                .unwrap_or(0);
             let mut raised = 0;
             for _ in 0..2 {
-                let Some((x, y)) = self.free_adjacent(mx, my) else { break };
+                let Some((x, y)) = self.free_adjacent(mx, my) else {
+                    break;
+                };
                 let id = self.new_id();
                 let mut m = Monster::new(id, skel, x, y, now + 50.0);
                 m.faction = Faction::Ally;
                 m.summoned = true;
                 m.awake = true;
                 m.expires = now + 1000.0;
-                self.fx.mist(x as f32 + 0.5, y as f32 + 0.5, Rgb(150, 220, 150));
+                self.fx
+                    .mist(x as f32 + 0.5, y as f32 + 0.5, Rgb(150, 220, 150));
                 self.level.monsters.push(m);
                 raised += 1;
             }
@@ -1061,14 +1682,457 @@ impl Game {
             self.level.monsters[mi].abil_cd = now + cd;
             self.emit(Sfx::Revive, mx, my, 0.9);
             if self.level.is_visible(mx, my) {
-                self.msg(format!("Your overlord {} tears minions from the earth to fight for you!", name), Rgb(160, 230, 160));
+                self.msg(
+                    format!(
+                        "Your overlord {} tears minions from the earth to fight for you!",
+                        name
+                    ),
+                    Rgb(160, 230, 160),
+                );
             }
             return true;
         }
         false
     }
 
+    // ------------------------------------------------------------ ward prisms
+
+    /// May this monster harm the Warden? Only the necromancer's thralls and
+    /// the minions they raise.
+    fn may_harm_boss(&self, mi: usize) -> bool {
+        let m = &self.level.monsters[mi];
+        m.faction == Faction::Ally && (m.thrall || m.expires > 0.0)
+    }
+
+    /// The first glimpse of a ward prism.
+    fn check_ward(&mut self) {
+        let Some(w) = self.level.ward else { return };
+        if w.seen || !self.level.is_visible(w.x, w.y) {
+            return;
+        }
+        if let Some(wm) = self.level.ward.as_mut() {
+            wm.seen = true;
+        }
+        if w.state == WardState::Broken {
+            self.msg("The shattered remains of a ward prism lie here.", GREY);
+        } else {
+            self.msg("A prism floats here, souls streaming out of it toward the ceiling, shrieking in torment.", Rgb(200, 170, 255));
+            self.msg(
+                "It is one of the Warden's four wards. Break it, and Vorth grows weaker.",
+                Rgb(170, 150, 220),
+            );
+        }
+    }
+
+    /// You strike the ward prism: the first blow wakes its Guardian and seals
+    /// the room; while the Guardian lives, a shield turns every blow aside.
+    fn strike_ward(&mut self) -> Option<f64> {
+        let Some(w) = self.level.ward else {
+            return None;
+        };
+        self.cam.swing = 1.0;
+        let (wx, wy) = (w.x as f32 + 0.5, w.y as f32 + 0.5);
+        match w.state {
+            WardState::Broken => None,
+            WardState::Shielded => {
+                self.msg(
+                    "A shimmering shield turns your blow aside. The Guardian must fall first!",
+                    Rgb(150, 220, 255),
+                );
+                self.fx
+                    .ring(wx, wy, 20, 1.2, Rgb(150, 230, 255), &['+', '*', '.'], 0.4);
+                self.emit(Sfx::Clang, w.x, w.y, 0.8);
+                Some(self.wdef().speed)
+            }
+            WardState::Intact => {
+                let Some((gx, gy)) = self.free_adjacent(w.x, w.y) else {
+                    return Some(100.0);
+                };
+                let depth = self.depth as i32;
+                let id = self.new_id();
+                let mut m = Monster::new(id, M_GUARDIAN, gx, gy, self.time + 100.0);
+                m.max_hp = 35 + depth * 10;
+                m.hp = m.max_hp;
+                m.bonus_dmg = depth / 2;
+                m.awake = true;
+                m.target = Some(Target::Player);
+                m.scale_hp(self.diff().hp);
+                self.level.monsters.push(m);
+                if let Some(wm) = self.level.ward.as_mut() {
+                    wm.state = WardState::Shielded;
+                    wm.guardian = Some(id);
+                }
+                self.seal_ward_room();
+                self.fx.flash(Rgb(160, 230, 255), 0.6);
+                self.fx.ring(
+                    wx,
+                    wy,
+                    60,
+                    3.0,
+                    Rgb(170, 240, 255),
+                    &['*', '+', '/', '\\'],
+                    0.9,
+                );
+                self.fx.light(wx, wy, [1.0, 1.8, 2.4], 5.0, 1.2);
+                self.fx.shake = self.fx.shake.max(1.0);
+                self.emit(Sfx::Explosion, w.x, w.y, 0.8);
+                self.emit(Sfx::Voice(VoiceKind::Chant, Mood::Alert), gx, gy, 1.0);
+                self.msg("The prism flares blinding white, and a PRISM GUARDIAN tears itself out of the light!", Rgb(170, 240, 255));
+                self.msg(
+                    "Walls of crystal slam down across every way out of the room!",
+                    Rgb(150, 220, 255),
+                );
+                self.combat_heat = 1.0;
+                Some(self.wdef().speed)
+            }
+        }
+    }
+
+    /// Crystal walls across every opening around the ward's room.
+    fn seal_ward_room(&mut self) {
+        let Some(w) = self.level.ward else { return };
+        let r = w.room;
+        for y in r.y - 1..=r.y + r.h {
+            for x in r.x - 1..=r.x + r.w {
+                let edge = x == r.x - 1 || x == r.x + r.w || y == r.y - 1 || y == r.y + r.h;
+                if !edge {
+                    continue;
+                }
+                let t = self.level.tile(x, y);
+                let open = t.walkable() || t.is_closed_door();
+                if open && self.level.monster_at(x, y).is_none() && (x, y) != (self.p.x, self.p.y) {
+                    self.level.crystal.push((x, y, t));
+                    self.level.set(x, y, Tile::Crystal);
+                    self.fx.burst(
+                        x as f32 + 0.5,
+                        y as f32 + 0.5,
+                        0.5,
+                        10,
+                        Rgb(150, 230, 255),
+                        &['*', '/', '\\'],
+                        0.6,
+                        0.6,
+                        0.5,
+                        true,
+                    );
+                }
+            }
+        }
+        self.refresh_view();
+    }
+
+    fn unseal_ward_room(&mut self) {
+        let walls = std::mem::take(&mut self.level.crystal);
+        for (x, y, t) in walls {
+            if self.level.tile(x, y) == Tile::Crystal {
+                self.level.set(x, y, t);
+                self.fx.burst(
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    0.5,
+                    12,
+                    Rgb(170, 240, 255),
+                    &['*', '.', '\''],
+                    1.0,
+                    0.8,
+                    1.0,
+                    true,
+                );
+            }
+        }
+    }
+
+    /// The Guardian is dead: the ward crumbles, its souls fly free, and far
+    /// below the Warden screams.
+    fn break_ward(&mut self) {
+        let Some(w) = self.level.ward else { return };
+        if w.state == WardState::Broken {
+            return;
+        }
+        self.unseal_ward_room();
+        if let Some(wm) = self.level.ward.as_mut() {
+            wm.state = WardState::Broken;
+            wm.guardian = None;
+        }
+        self.level.set(w.x, w.y, Tile::Floor);
+        self.wards_destroyed = (self.wards_destroyed + 1).min(4);
+        let (wx, wy) = (w.x as f32 + 0.5, w.y as f32 + 0.5);
+        self.fx.shake = self.fx.shake.max(1.8);
+        self.fx.rise(
+            wx,
+            wy,
+            60,
+            Rgb(200, 230, 255),
+            &['o', '~', '@', '0', '*'],
+            1.2,
+        );
+        self.fx.burst(
+            wx,
+            wy,
+            0.6,
+            30,
+            Rgb(160, 200, 230),
+            &['/', '\\', '*', '.'],
+            1.5,
+            1.2,
+            1.5,
+            true,
+        );
+        let (px, py) = (self.p.x, self.p.y);
+        self.emit(Sfx::Rumble, px, py, 1.0);
+        self.emit(Sfx::Bones, w.x, w.y, 0.9);
+        // A scream from very far below: quiet, and muffled by all that stone.
+        self.emit(Sfx::Voice(VoiceKind::Demon, Mood::Die), px, py, 0.25);
+        self.refresh_view();
+        self.msg(
+            "The floor shakes. The crystal walls shatter, and the ward crumbles to the ground!",
+            Rgb(200, 230, 255),
+        );
+        self.msg(
+            "Its souls stream free into the ceiling, weeping with relief.",
+            Rgb(190, 210, 240),
+        );
+        self.msg(
+            "From deep, deep below, an enraged scream of pain echoes up through the stone...",
+            Rgb(255, 110, 90),
+        );
+        let n = self.wards_destroyed;
+        self.msg(
+            format!("Ward {} of 4 destroyed. The Warden grows weaker.", n),
+            Rgb(220, 170, 255),
+        );
+        self.weaken_wardens();
+    }
+
+    /// Bring the Warden down to its strength for the wards broken so far,
+    /// wherever it waits: here, or on the stashed tenth floor.
+    fn weaken_wardens(&mut self) {
+        let n = self.wards_destroyed.min(4);
+        let apply = |m: &mut Monster| {
+            if m.def().boss && m.alive && m.ward_weaken < n {
+                let old = WARD_HP[m.ward_weaken as usize];
+                let new = WARD_HP[n as usize];
+                let base = m.max_hp as f32 / old;
+                let new_max = (base * new).round().max(1.0) as i32;
+                m.hp =
+                    ((m.hp as f32 * new_max as f32 / m.max_hp.max(1) as f32).round() as i32).max(1);
+                m.max_hp = new_max;
+                m.ward_weaken = n;
+            }
+        };
+        self.level.monsters.iter_mut().for_each(apply);
+        if let Some(lv) = self.stash.get_mut(&10) {
+            lv.monsters.iter_mut().for_each(apply);
+        }
+    }
+
+    /// The heart leaves its hall: every ward still standing crumbles to shards.
+    fn crumble_all_wards(&mut self) {
+        let mut any = false;
+        let crumble = |lv: &mut Level| -> bool {
+            let Some(w) = lv.ward else { return false };
+            if w.state == WardState::Broken {
+                return false;
+            }
+            for (x, y, t) in std::mem::take(&mut lv.crystal) {
+                if lv.tile(x, y) == Tile::Crystal {
+                    lv.set(x, y, t);
+                }
+            }
+            lv.set(w.x, w.y, Tile::Floor);
+            if let Some(wm) = lv.ward.as_mut() {
+                wm.state = WardState::Broken;
+                wm.guardian = None;
+            }
+            true
+        };
+        any |= crumble(&mut self.level);
+        for lv in self.stash.values_mut() {
+            any |= crumble(lv);
+        }
+        if any {
+            self.msg(
+                "Somewhere in the dungeon, the wards still standing shatter into shards.",
+                Rgb(200, 180, 240),
+            );
+            self.refresh_view();
+        }
+    }
+
     // ------------------------------------------------------------ the living dungeon
+
+    /// Corridor chokepoints near (cx,cy) where sinew could grow across the way.
+    fn sinew_spots(&self, cx: i32, cy: i32, near: i32, far: i32) -> Vec<(i32, i32)> {
+        let lv = &self.level;
+        let mut v = Vec::new();
+        for y in cy - far..=cy + far {
+            for x in cx - far..=cx + far {
+                let d = cheb(x, y, cx, cy);
+                if d < near || d > far || lv.tile(x, y) != Tile::Floor {
+                    continue;
+                }
+                let ns = lv.tile(x, y - 1).walkable()
+                    && lv.tile(x, y + 1).walkable()
+                    && lv.tile(x - 1, y).opaque()
+                    && lv.tile(x + 1, y).opaque();
+                let ew = lv.tile(x - 1, y).walkable()
+                    && lv.tile(x + 1, y).walkable()
+                    && lv.tile(x, y - 1).opaque()
+                    && lv.tile(x, y + 1).opaque();
+                if !(ns || ew)
+                    || (x, y) == (self.p.x, self.p.y)
+                    || lv.monster_at(x, y).is_some()
+                    || lv.items.iter().any(|i| i.x == x && i.y == y)
+                    || lv.traps.iter().any(|t| t.x == x && t.y == y)
+                    || self.figment_at(x, y).is_some()
+                {
+                    continue;
+                }
+                v.push((x, y));
+            }
+        }
+        v
+    }
+
+    fn grow_sinew(&mut self, x: i32, y: i32) {
+        let hp = 8 + (self.corruption() * 12.0) as i32;
+        self.level.set(x, y, Tile::Sinew);
+        self.level.sinews.retain(|s| (s.x, s.y) != (x, y));
+        self.level.sinews.push(Sinew { x, y, hp });
+    }
+
+    /// The first time you climb onto a floor with the Amulet, the living
+    /// dungeon readies itself: biting maws in the floor, sinew across the halls.
+    fn infest_level(&mut self) {
+        let c = self.corruption();
+        if c <= 0.0 {
+            return;
+        }
+        let (px, py) = (self.p.x, self.p.y);
+        let maws = 1 + (c * 7.0).round() as usize;
+        for _ in 0..maws {
+            for _ in 0..30 {
+                let (x, y) = self.level.random_floor(&mut self.rng);
+                if cheb(x, y, px, py) >= 3
+                    && (x, y) != self.level.up
+                    && (x, y) != self.level.down
+                    && !self.level.traps.iter().any(|t| t.x == x && t.y == y)
+                    && !self.level.items.iter().any(|i| i.x == x && i.y == y)
+                {
+                    self.level.traps.push(Trap {
+                        x,
+                        y,
+                        kind: TrapKind::Maw,
+                        revealed: false,
+                    });
+                    break;
+                }
+            }
+        }
+        let mut spots = self.sinew_spots(px, py, 4, 60);
+        spots.shuffle(&mut self.rng);
+        for (x, y) in spots.into_iter().take((c * 5.0).round() as usize) {
+            self.grow_sinew(x, y);
+        }
+        self.refresh_view();
+    }
+
+    /// Hack at a wall of sinew. It takes a few blows to cut through.
+    fn cut_sinew(&mut self, x: i32, y: i32) -> Option<f64> {
+        let w = self.wdef();
+        let dmg = self.rng.gen_range(w.dmg.0..=w.dmg.1) + self.dmg_bonus().max(0);
+        let i = match self.level.sinews.iter().position(|s| (s.x, s.y) == (x, y)) {
+            Some(i) => i,
+            None => {
+                self.level.sinews.push(Sinew { x, y, hp: 10 });
+                self.level.sinews.len() - 1
+            }
+        };
+        self.level.sinews[i].hp -= dmg.max(1);
+        self.cam.swing = 1.0;
+        let (px, py) = (self.p.x, self.p.y);
+        self.emit(Sfx::Hit, x, y, 0.8);
+        self.fx.blood(x as f32 + 0.5, y as f32 + 0.5, 0.5, 12);
+        if self.level.sinews[i].hp <= 0 {
+            self.level.sinews.remove(i);
+            self.level.set(x, y, Tile::Floor);
+            let k = self.level.idx(x, y);
+            self.level.blood[k] = (self.level.blood[k] + 2.0).min(3.0);
+            self.msg(
+                "You hack through the sinew! It parts with a wet, shuddering tear.",
+                Rgb(230, 110, 110),
+            );
+            self.fx.blood(x as f32 + 0.5, y as f32 + 0.5, 0.6, 30);
+            self.refresh_view();
+        } else {
+            let left = self.level.sinews[i].hp;
+            let how = if left > 10 {
+                "barely gives"
+            } else if left > 4 {
+                "tears"
+            } else {
+                "is nearly through"
+            };
+            self.msg(
+                format!("You hack at the wall of sinew. It {}.", how),
+                Rgb(220, 140, 130),
+            );
+        }
+        self.noise(px, py, 5);
+        Some(w.speed)
+    }
+
+    /// Once a turn while you carry the Amulet: the dungeon grows sinew across
+    /// your path and its eyes try to hold you with their stare.
+    fn living_dungeon_tick(&mut self) {
+        let c = self.corruption();
+        if !self.p.has_amulet || c <= 0.0 {
+            return;
+        }
+        let (px, py) = (self.p.x, self.p.y);
+        if self.level.sinews.len() < 12 && self.rng.gen_bool((0.012 + 0.03 * c) as f64) {
+            let spots: Vec<(i32, i32)> = self
+                .sinew_spots(px, py, 2, 7)
+                .into_iter()
+                .filter(|&(x, y)| self.level.is_visible(x, y))
+                .collect();
+            if let Some(&(x, y)) = spots.choose(&mut self.rng) {
+                self.grow_sinew(x, y);
+                self.msg(
+                    "Sinew bursts from the walls and knits itself across the passage!",
+                    Rgb(230, 90, 90),
+                );
+                self.fx.blood(x as f32 + 0.5, y as f32 + 0.5, 0.5, 16);
+                self.emit(Sfx::Voice(VoiceKind::Moan, Mood::Alert), x, y, 0.6);
+                self.refresh_view();
+            }
+        }
+        if self.time >= self.stare_cd && self.rng.gen_bool((0.04 + 0.08 * c) as f64) {
+            let mut eyes = Vec::new();
+            for y in py - 6..=py + 6 {
+                for x in px - 6..=px + 6 {
+                    if self.level.tile(x, y) == Tile::Wall
+                        && self.level.is_visible(x, y)
+                        && crate::render::wall_eye(x, y, c)
+                    {
+                        eyes.push((x, y));
+                    }
+                }
+            }
+            if let Some(&(x, y)) = eyes.choose(&mut self.rng) {
+                self.stare_cd = self.time + self.rng.gen_range(800.0..1600.0);
+                if self.stagger(Target::Player, 150.0) {
+                    self.stare = Some((x, y, self.time + 300.0));
+                    self.msg(
+                        "An eye in the wall fixes its gaze on you. You cannot move!",
+                        Rgb(255, 80, 80),
+                    );
+                    self.fx.flash(Rgb(140, 0, 0), 0.4);
+                    self.emit(Sfx::Whisper, x, y, 0.9);
+                }
+            }
+        }
+    }
 
     /// Once a turn: count torments down, and maybe inflict a new one.
     fn tick_curses(&mut self) {
@@ -1088,7 +2152,11 @@ impl Game {
             let climbed = 10u32.saturating_sub(self.depth) as f64;
             let p = 0.003 + 0.0008 * climbed;
             if self.rng.gen_bool(p) {
-                let free: Vec<Curse> = Curse::ALL.iter().copied().filter(|&c| !self.cursed(c)).collect();
+                let free: Vec<Curse> = Curse::ALL
+                    .iter()
+                    .copied()
+                    .filter(|&c| !self.cursed(c))
+                    .collect();
                 if let Some(&c) = free.choose(&mut self.rng) {
                     let turns = self.rng.gen_range(8..=24);
                     self.start_curse(c, turns);
@@ -1114,6 +2182,23 @@ impl Game {
             Curse::Forgetting => self.forget_floor(),
             Curse::Figments => self.spawn_figments(),
             Curse::Darkness => self.refresh_view(),
+            Curse::Gale => {
+                self.p.torch_out = true;
+                self.snuff_age = 0.0;
+                self.puffed = false;
+                // The flame is torn away in a burst of sparks and smoke.
+                for _ in 0..25 {
+                    self.smoke.push(Smoke {
+                        x: rand::random::<f32>() - 0.5,
+                        y: -rand::random::<f32>(),
+                        vx: 10.0 + rand::random::<f32>() * 14.0,
+                        vy: -1.0 - rand::random::<f32>() * 3.0,
+                        life: 0.0,
+                        max: 0.6 + rand::random::<f32>() * 0.8,
+                    });
+                }
+                self.refresh_view();
+            }
             _ => {}
         }
     }
@@ -1126,12 +2211,126 @@ impl Game {
                 let fs = std::mem::take(&mut self.figments);
                 for f in fs {
                     if self.level.is_visible(f.x, f.y) {
-                        self.fx.ring(f.x as f32 + 0.5, f.y as f32 + 0.5, 10, 1.2, Rgb(150, 90, 200), &['.', ':', '\''], 0.6);
+                        self.fx.ring(
+                            f.x as f32 + 0.5,
+                            f.y as f32 + 0.5,
+                            10,
+                            1.2,
+                            Rgb(150, 90, 200),
+                            &['.', ':', '\''],
+                            0.6,
+                        );
                     }
                 }
             }
             Curse::Darkness => self.refresh_view(),
             _ => {}
+        }
+    }
+
+    /// Strike a light, if the wind will let you.
+    fn relight(&mut self) -> Option<f64> {
+        if !self.p.torch_out {
+            self.msg("Your torch is already burning.", GREY);
+            return None;
+        }
+        if self.cursed(Curse::Gale) {
+            self.msg(
+                "The wind tears the flame away the moment it catches!",
+                Curse::Gale.color(),
+            );
+            return Some(100.0);
+        }
+        self.p.torch_out = false;
+        self.light_age = 0.0;
+        self.msg(
+            "You strike your flint. Sparks catch, and your torch flares back to life.",
+            Rgb(255, 200, 120),
+        );
+        let (lx, ly) = (self.p.x, self.p.y);
+        self.emit(Sfx::Clang, lx, ly, 0.3);
+        let (px, py) = (self.p.x, self.p.y);
+        self.fx
+            .light(px as f32 + 0.5, py as f32 + 0.5, [1.5, 1.0, 0.5], 4.0, 0.5);
+        self.refresh_view();
+        Some(100.0)
+    }
+
+    /// Smoke from the torch: it rises, curls, trails behind you as you walk,
+    /// sweeps across the view as you turn, and is ripped sideways by a gale.
+    fn update_smoke(&mut self, dt: f32, turn: f32, speed: f32) {
+        let gale = self.cursed(Curse::Gale);
+        self.light_age += dt;
+        if self.p.torch_out {
+            self.snuff_age += dt;
+            // The guttering flame dies in a round puff of smoke.
+            if self.snuff_age >= 0.3 && !self.puffed {
+                self.puffed = true;
+                for k in 0..36 {
+                    let a = k as f32 / 36.0 * std::f32::consts::TAU;
+                    let sp = 2.0 + rand::random::<f32>() * 3.5;
+                    self.smoke.push(Smoke {
+                        x: a.cos() * 0.5,
+                        y: 0.5 + a.sin() * 0.4,
+                        vx: a.cos() * sp * 1.6,
+                        vy: a.sin() * sp - 1.5,
+                        life: 0.0,
+                        max: 0.9 + rand::random::<f32>() * 0.9,
+                    });
+                }
+            }
+        }
+        // Spawning: a steady stream while lit, a dying wisp from the wick when snuffed.
+        let rate = if self.p.invis > 0 {
+            0.0
+        } else if !self.p.torch_out {
+            if self.light_age < 0.3 {
+                0.0
+            } else {
+                18.0
+            }
+        } else if !self.puffed {
+            0.0
+        } else {
+            (12.0 * (1.0 - self.snuff_age / 4.0)).max(0.0)
+        };
+        self.smoke_acc += rate * dt;
+        while self.smoke_acc >= 1.0 {
+            self.smoke_acc -= 1.0;
+            let r = || rand::random::<f32>();
+            self.smoke.push(Smoke {
+                x: (r() - 0.5) * 1.2,
+                y: if self.p.torch_out { 2.5 } else { -0.3 },
+                vx: (r() - 0.5) * 0.8,
+                vy: -2.6 - r() * 1.8,
+                life: 0.0,
+                max: 1.1 + r() * 1.3,
+            });
+        }
+        let t = self.time as f32 * 0.01;
+        let gust = if gale {
+            22.0 + 10.0 * (t * 0.7).sin()
+        } else {
+            0.0
+        };
+        for s in self.smoke.iter_mut() {
+            s.life += dt;
+            // Curling turbulence.
+            let curl = ((s.life * 4.0 + s.max * 17.0).sin() * 2.2)
+                + ((s.y * 0.9 + s.max * 5.0).cos() * 0.8);
+            s.vx += (curl + gust) * dt;
+            s.vx *= 1.0 - 1.4 * dt;
+            s.vy -= 0.6 * dt; // buoyancy
+            s.vy *= 1.0 - 0.5 * dt;
+            s.x += s.vx * dt - turn * 9.0 * dt;
+            // Walking forward leaves the smoke streaming back over your shoulder.
+            s.y += s.vy * dt + speed * 0.45 * dt;
+        }
+        self.smoke
+            .retain(|s| s.life < s.max && s.y > -40.0 && s.x.abs() < 200.0);
+        if self.smoke.len() > 300 {
+            let n = self.smoke.len() - 300;
+            self.smoke.drain(..n);
         }
     }
 
@@ -1165,7 +2364,15 @@ impl Game {
     fn dispel_figment(&mut self, fi: usize) {
         let f = self.figments.remove(fi);
         self.msg("An evil figment of the mind!", Rgb(220, 120, 255));
-        self.fx.ring(f.x as f32 + 0.5, f.y as f32 + 0.5, 18, 1.6, Rgb(170, 100, 230), &['.', '\'', ':', '*'], 0.7);
+        self.fx.ring(
+            f.x as f32 + 0.5,
+            f.y as f32 + 0.5,
+            18,
+            1.6,
+            Rgb(170, 100, 230),
+            &['.', '\'', ':', '*'],
+            0.7,
+        );
         self.emit(Sfx::Revive, f.x, f.y, 0.4);
     }
 
@@ -1185,14 +2392,24 @@ impl Game {
                 let c = self.level.random_floor(&mut self.rng);
                 let i = self.level.idx(c.0, c.1);
                 let d = self.dmap.get(i).copied().unwrap_or(UNREACH);
-                if (5..=14).contains(&d) && self.level.monster_at(c.0, c.1).is_none() && self.figment_at(c.0, c.1).is_none() {
+                if (5..=14).contains(&d)
+                    && self.level.monster_at(c.0, c.1).is_none()
+                    && self.figment_at(c.0, c.1).is_none()
+                {
                     pos = Some(c);
                     break;
                 }
             }
             if let (Some((x, y)), Some(&kind)) = (pos, kinds.choose(&mut self.rng)) {
                 let id = self.new_id();
-                self.figments.push(Figment { id, kind, x, y, rx: x as f32, ry: y as f32 });
+                self.figments.push(Figment {
+                    id,
+                    kind,
+                    x,
+                    y,
+                    rx: x as f32,
+                    ry: y as f32,
+                });
             }
         }
     }
@@ -1216,7 +2433,14 @@ impl Game {
                 i += 1;
                 continue;
             }
-            let mut best = (self.dmap.get(self.level.idx(fx, fy)).copied().unwrap_or(UNREACH), fx, fy);
+            let mut best = (
+                self.dmap
+                    .get(self.level.idx(fx, fy))
+                    .copied()
+                    .unwrap_or(UNREACH),
+                fx,
+                fy,
+            );
             for &(dx, dy) in DIRS.iter() {
                 let (nx, ny) = (fx + dx, fy + dy);
                 if !self.level.can_step(fx, fy, dx, dy)
@@ -1272,7 +2496,11 @@ impl Game {
             if !alive || fac == Faction::Ally {
                 continue;
             }
-            let d = if from_player { self.dmap[self.level.idx(mx, my)] } else { cheb(x, y, mx, my) };
+            let d = if from_player {
+                self.dmap[self.level.idx(mx, my)]
+            } else {
+                cheb(x, y, mx, my)
+            };
             if d <= radius {
                 let wake = self.rng.gen_bool(0.75);
                 let m = &mut self.level.monsters[i];
@@ -1319,7 +2547,15 @@ impl Game {
 
     /// Walk a line from (x0,y0) toward (x1,y1). Returns impact tile and
     /// what was hit. `shooter` None means the player is shooting.
-    fn trace(&self, x0: i32, y0: i32, x1: i32, y1: i32, max: i32, shooter: Option<u32>) -> (i32, i32, Option<Target>) {
+    fn trace(
+        &self,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        max: i32,
+        shooter: Option<u32>,
+    ) -> (i32, i32, Option<Target>) {
         let pts = line(x0, y0, x1, y1);
         let mut last = (x0, y0);
         for (i, &(x, y)) in pts.iter().enumerate().skip(1) {
@@ -1392,7 +2628,10 @@ impl Game {
     fn action_cost(&mut self, c: f64) -> f64 {
         let slow = std::mem::take(&mut self.p.slow);
         if std::mem::take(&mut self.free_turn) {
-            self.msg("Bloodlust! You strike again before the body hits the floor.", Rgb(255, 70, 70));
+            self.msg(
+                "Bloodlust! You strike again before the body hits the floor.",
+                Rgb(255, 70, 70),
+            );
             return 0.0;
         }
         if self.cursed(Curse::Leaden) {
@@ -1401,13 +2640,103 @@ impl Game {
         c + slow
     }
 
+    /// How a door on this floor opens: gates rise, portals and crystal
+    /// dissipate, stone and bone doors part, plank doors swing.
+    pub fn door_opening(&self, t: Tile) -> DoorOpening {
+        if t == Tile::GateClosed {
+            return DoorOpening::Rise;
+        }
+        match self.level.style {
+            5 | 13 => DoorOpening::Dissolve,
+            2 | 3 | 9 | 14 => DoorOpening::Split,
+            _ => DoorOpening::Swing,
+        }
+    }
+
+    /// Open the door at (x,y) with its animation and sound. Returns what you hear.
+    fn open_door(&mut self, x: i32, y: i32) -> &'static str {
+        let kind = self.door_opening(self.level.tile(x, y));
+        self.level.set(x, y, Tile::DoorOpen);
+        self.fx.doors.retain(|d| (d.x, d.y) != (x, y));
+        self.fx.doors.push(DoorAnim {
+            x,
+            y,
+            kind,
+            age: 0.0,
+        });
+        let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+        let txt = match kind {
+            DoorOpening::Rise => {
+                self.emit(Sfx::Chains, x, y, 0.9);
+                self.fx.burst(
+                    fx,
+                    fy,
+                    0.9,
+                    10,
+                    Rgb(140, 130, 110),
+                    &['.', ','],
+                    0.6,
+                    0.8,
+                    1.0,
+                    false,
+                );
+                "The gate rises into the lintel with a rattle of chains."
+            }
+            DoorOpening::Dissolve => {
+                self.emit(Sfx::Blink, x, y, 0.8);
+                let col = if self.level.style == 13 {
+                    Rgb(180, 120, 255)
+                } else {
+                    Rgb(130, 240, 230)
+                };
+                self.fx.rise(fx, fy, 30, col, &['*', '.', '\'', '+'], 0.6);
+                if self.level.style == 13 {
+                    "The swirling void thins, and dissipates into the air."
+                } else {
+                    "The crystal door dissolves into drifting motes of light."
+                }
+            }
+            DoorOpening::Split => {
+                self.emit(Sfx::Rumble, x, y, 0.7);
+                self.fx.burst(
+                    fx,
+                    fy,
+                    0.1,
+                    14,
+                    Rgb(120, 110, 100),
+                    &['.', ',', 'o'],
+                    0.7,
+                    1.0,
+                    -0.2,
+                    false,
+                );
+                "The heavy doors grind apart."
+            }
+            DoorOpening::Swing => {
+                self.emit(Sfx::Creak, x, y, 0.8);
+                "The door creaks open."
+            }
+        };
+        self.refresh_view();
+        txt
+    }
+
+    /// Switch between first-person and overhead play, with a camera swoop.
+    pub fn toggle_view(&mut self) {
+        self.overhead = !self.overhead;
+        self.view_anim = Some((0.0, self.overhead));
+    }
+
     pub fn toggle_realtime(&mut self) {
         self.realtime = !self.realtime;
         self.queued = None;
         if self.realtime {
             self.msg("REAL-TIME combat engaged. The dungeon no longer waits for you! (Shift+R to switch back)", Rgb(255, 120, 80));
         } else {
-            self.msg("Turn-based mode. Time moves only when you act.", Rgb(120, 200, 255));
+            self.msg(
+                "Turn-based mode. Time moves only when you act.",
+                Rgb(120, 200, 255),
+            );
         }
     }
 
@@ -1482,8 +2811,16 @@ impl Game {
             }
         }
         self.p.mp_ctr += 1;
-        let base_period: i32 = if self.p.class == C_MAGE || self.p.class == C_NECRO { 2 } else { 4 };
-        let staff_bonus: i32 = if WEAPONS[self.p.wpn.def].art == WArt::Staff { 1 } else { 0 };
+        let base_period: i32 = if self.p.class == C_MAGE || self.p.class == C_NECRO {
+            2
+        } else {
+            4
+        };
+        let staff_bonus: i32 = if WEAPONS[self.p.wpn.def].art == WArt::Staff {
+            1
+        } else {
+            0
+        };
         let arcane: i32 = if self.has(UPower::Arcane) { 1 } else { 0 };
         let mperiod = base_period - staff_bonus - arcane;
         if self.p.mp_ctr >= mperiod.max(1) {
@@ -1511,6 +2848,35 @@ impl Game {
             }
         }
         self.tick_curses();
+        if self.p.rooted > 0 {
+            self.p.rooted -= 1;
+            if self.p.rooted == 0 {
+                self.msg("You tear yourself free!", Rgb(200, 220, 160));
+            }
+        }
+        if self.p.blind > 0 {
+            self.p.blind -= 1;
+            if self.p.blind == 0 {
+                self.msg("You blink your eyes clear.", Rgb(200, 220, 160));
+                self.refresh_view();
+            }
+        }
+        self.tick_clouds();
+        self.living_dungeon_tick();
+        if let Some(w) = self.level.ward {
+            if w.state != WardState::Broken
+                && cheb(w.x, w.y, px, py) <= 12
+                && self.rng.gen_bool(0.25)
+            {
+                // The souls inside it shriek and weep.
+                let mood = if self.rng.gen_bool(0.5) {
+                    Mood::Idle
+                } else {
+                    Mood::Hurt
+                };
+                self.emit(Sfx::Voice(VoiceKind::Wail, mood), w.x, w.y, 0.45);
+            }
+        }
 
         let turns = self.turns;
         // Thralls knit a little slower than their master does.
@@ -1521,6 +2887,9 @@ impl Game {
             }
             if m.alive && m.thrall && m.hp < m.max_hp && turns % thrall_period == 0 {
                 m.hp += 1;
+            }
+            if m.guard > 0 {
+                m.guard -= 1;
             }
         }
         self.expire_minions();
@@ -1560,6 +2929,10 @@ impl Game {
     /// Per-frame update: effects, camera, and the real-time clock.
     pub fn update(&mut self, dt: f32, paused: bool) {
         self.fx.update(dt);
+        if let Some((e, to)) = self.view_anim {
+            let e = e + dt;
+            self.view_anim = if e >= VIEW_SWOOP { None } else { Some((e, to)) };
+        }
 
         let tx = self.p.x as f32 + 0.5;
         let ty = self.p.y as f32 + 0.5;
@@ -1577,7 +2950,11 @@ impl Game {
         while d < -PI {
             d += 2.0 * PI;
         }
-        self.cam.ang += d * (dt * 13.0).min(1.0);
+        let dang = d * (dt * 13.0).min(1.0);
+        self.cam.ang += dang;
+        let turn_rate = if dt > 1e-4 { dang / dt } else { 0.0 };
+        let walk_rate = if dt > 1e-4 { moved / dt } else { 0.0 };
+        self.update_smoke(dt, turn_rate, walk_rate);
         self.cam.swing = (self.cam.swing - dt * 4.0).max(0.0);
 
         for m in self.level.monsters.iter_mut() {
@@ -1585,6 +2962,24 @@ impl Game {
             m.ry += (m.y as f32 - m.ry) * k;
             m.flash = (m.flash - dt * 4.0).max(0.0);
             m.lunge.2 = (m.lunge.2 - dt * 5.0).max(0.0);
+        }
+        // Tormented souls stream up out of a ward prism toward the ceiling.
+        if let Some(w) = self.level.ward {
+            if w.state != WardState::Broken && cheb(w.x, w.y, self.p.x, self.p.y) <= 16 {
+                self.soul_acc += dt * 6.0;
+                while self.soul_acc >= 1.0 {
+                    self.soul_acc -= 1.0;
+                    let col = Rgb(170, 220, 255).lerp(Rgb(230, 180, 255), rand::random::<f32>());
+                    self.fx.rise(
+                        w.x as f32 + 0.5,
+                        w.y as f32 + 0.5,
+                        1,
+                        col,
+                        &['o', '~', '@', '0'],
+                        0.35,
+                    );
+                }
+            }
         }
         for f in self.figments.iter_mut() {
             f.rx += (f.x as f32 - f.rx) * k;
@@ -1645,14 +3040,30 @@ impl Game {
                 if i < sk.len() {
                     self.use_skill(sk[i])
                 } else {
-                    self.msg("You have no skill in that slot. Buy more at the Soul Altar.", GREY);
+                    self.msg(
+                        "You have no skill in that slot. Buy more at the Soul Altar.",
+                        GREY,
+                    );
                     None
                 }
             }
             Action::Use(i) => self.use_item(i),
             Action::Drop(i) => self.drop_item(i),
+            Action::Relight => self.relight(),
+            Action::RaiseAt(x, y) => {
+                self.raise_menu.clear();
+                self.raise_pick = Some((x, y));
+                let r = self.use_skill(Skill::RaiseDead);
+                self.raise_pick = None;
+                r
+            }
             Action::QuickHeal => {
-                if let Some(i) = self.p.inv.iter().position(|it| *it == Item::Potion(Potion::Healing)) {
+                if let Some(i) = self
+                    .p
+                    .inv
+                    .iter()
+                    .position(|it| *it == Item::Potion(Potion::Healing))
+                {
                     self.use_item(i)
                 } else {
                     self.msg("You have no Potions of Healing!", Rgb(255, 90, 90));
@@ -1668,7 +3079,10 @@ impl Game {
             let nd = self.rng.gen_range(0..8);
             if nd != dir {
                 dir = nd;
-                self.msg("The floor lurches! You stagger the wrong way.", Curse::Vertigo.color());
+                self.msg(
+                    "The floor lurches! You stagger the wrong way.",
+                    Curse::Vertigo.color(),
+                );
                 self.fx.shake = self.fx.shake.max(0.3);
             }
         }
@@ -1691,19 +3105,26 @@ impl Game {
             }
             return Some(self.player_melee(mi));
         }
+        if self.p.rooted > 0 {
+            self.msg(
+                "You struggle against what holds you, but cannot move!",
+                Rgb(220, 200, 160),
+            );
+            return Some(100.0);
+        }
         if let Some(fi) = self.figment_at(nx, ny) {
             // You walk straight through it.
             self.dispel_figment(fi);
         }
         match self.level.tile(nx, ny) {
-            Tile::DoorClosed => {
-                self.level.set(nx, ny, Tile::DoorOpen);
-                self.emit(Sfx::Creak, nx, ny, 0.8);
-                self.msg("The door creaks open.", GREY);
-                self.refresh_view();
+            t if t.is_closed_door() => {
+                let txt = self.open_door(nx, ny);
+                self.msg(txt, GREY);
                 self.noise(px, py, 4);
                 Some(100.0)
             }
+            Tile::Sinew => self.cut_sinew(nx, ny),
+            Tile::Ward => self.strike_ward(),
             t if t.walkable() => {
                 self.p.x = nx;
                 self.p.y = ny;
@@ -1751,6 +3172,9 @@ impl Game {
         if self.over.is_some() {
             return;
         }
+        if self.level.cloud_at(px, py) {
+            self.spore_player();
+        }
         let chance = if self.p.class == C_ROGUE { 0.35 } else { 0.12 };
         self.search_traps(chance);
         let here: Vec<String> = self
@@ -1761,10 +3185,16 @@ impl Game {
             .map(|i| i.item.name())
             .collect();
         if !here.is_empty() {
-            self.msg(format!("You see here: {}. (g to pick up)", here.join(", ")), Rgb(220, 210, 120));
+            self.msg(
+                format!("You see here: {}. (g to pick up)", here.join(", ")),
+                Rgb(220, 210, 120),
+            );
         }
         match self.level.tile(px, py) {
-            Tile::StairsDown => self.msg("A stairway leads down into darkness. (> or Enter)", Rgb(200, 150, 255)),
+            Tile::StairsDown => self.msg(
+                "A stairway leads down into darkness. (> or Enter)",
+                Rgb(200, 150, 255),
+            ),
             Tile::StairsUp => self.msg("A stairway leads up. (< or Enter)", Rgb(150, 200, 255)),
             _ => {}
         }
@@ -1773,7 +3203,9 @@ impl Game {
     }
 
     fn check_trap(&mut self, x: i32, y: i32) {
-        let Some(ti) = self.level.traps.iter().position(|t| t.x == x && t.y == y) else { return };
+        let Some(ti) = self.level.traps.iter().position(|t| t.x == x && t.y == y) else {
+            return;
+        };
         let (kind, revealed) = (self.level.traps[ti].kind, self.level.traps[ti].revealed);
         if revealed && self.rng.gen_bool(0.75) {
             self.msg("You carefully step around the trap.", GREY);
@@ -1786,12 +3218,18 @@ impl Game {
         match kind {
             TrapKind::Spikes => {
                 let dmg = self.rng.gen_range(2..=8) + d;
-                self.msg(format!("Spikes burst from the floor! ({} damage)", dmg), Rgb(255, 90, 90));
+                self.msg(
+                    format!("Spikes burst from the floor! ({} damage)", dmg),
+                    Rgb(255, 90, 90),
+                );
                 self.fx.blood(fx, fy, 0.2, 14);
                 self.player_hit(dmg, DeathCause::Trap(TrapKind::Spikes), true);
             }
             TrapKind::Gas => {
-                self.msg("A cloud of noxious gas erupts around you!", Rgb(140, 255, 90));
+                self.msg(
+                    "A cloud of noxious gas erupts around you!",
+                    Rgb(140, 255, 90),
+                );
                 self.fx.mist(fx, fy, Rgb(120, 220, 60));
                 self.emit(Sfx::Voice(VoiceKind::Hiss, Mood::Alert), x, y, 0.9);
                 self.add_poison(6 + d, "a poison gas trap".to_string());
@@ -1799,17 +3237,38 @@ impl Game {
             }
             TrapKind::Fire => {
                 let dmg = self.rng.gen_range(3..=12) + d;
-                self.msg(format!("Flames roar up around you! ({} damage)", dmg), Rgb(255, 140, 40));
+                self.msg(
+                    format!("Flames roar up around you! ({} damage)", dmg),
+                    Rgb(255, 140, 40),
+                );
                 self.fx.explosion(fx, fy, Rgb(255, 120, 20));
                 self.emit(Sfx::Explosion, x, y, 1.0);
                 self.player_hit(dmg, DeathCause::Trap(TrapKind::Fire), false);
             }
+            TrapKind::Maw => {
+                let dmg = self.rng.gen_range(3..=8) + d;
+                self.msg(format!("The floor splits into a fanged MAW and bites down on your leg! ({} damage)", dmg), Rgb(255, 70, 80));
+                self.fx.blood(fx, fy, 0.2, 20);
+                self.fx.shake = self.fx.shake.max(0.6);
+                self.emit(Sfx::Voice(VoiceKind::Growl, Mood::Attack), x, y, 1.0);
+                self.p.rooted = self.p.rooted.max(2);
+                self.player_hit(dmg, DeathCause::Trap(TrapKind::Maw), false);
+                if self.over.is_none() {
+                    self.msg("Its teeth hold you fast!", Rgb(230, 150, 150));
+                }
+            }
             TrapKind::Alarm => {
-                self.msg("A shrill alarm shrieks through the halls!", Rgb(255, 220, 80));
+                self.msg(
+                    "A shrill alarm shrieks through the halls!",
+                    Rgb(255, 220, 80),
+                );
                 self.emit(Sfx::Clang, x, y, 1.0);
                 self.emit(Sfx::Clang, x, y, 1.0);
                 for m in self.level.monsters.iter_mut() {
-                    if m.alive && m.faction != Faction::Ally && self.dmap[(m.y * MAP_W + m.x) as usize] <= 30 {
+                    if m.alive
+                        && m.faction != Faction::Ally
+                        && self.dmap[(m.y * MAP_W + m.x) as usize] <= 30
+                    {
                         m.awake = true;
                         m.last_known = Some((x, y));
                     }
@@ -1843,7 +3302,13 @@ impl Game {
                 return Some(w.speed);
             }
         }
-        if self.level.tile(nx, ny) == Tile::DoorClosed {
+        if self.level.tile(nx, ny) == Tile::Sinew && self.level.can_step(px, py, dx, dy) {
+            return self.cut_sinew(nx, ny);
+        }
+        if self.level.tile(nx, ny) == Tile::Ward && self.level.can_step(px, py, dx, dy) {
+            return self.strike_ward();
+        }
+        if self.level.tile(nx, ny).is_closed_door() {
             return self.player_move(f);
         }
         self.cam.swing = 1.0;
@@ -1870,8 +3335,22 @@ impl Game {
         let (px, py) = (self.p.x, self.p.y);
         let (hx, hy, mi) = self.fire_line(dir, range);
         let ch = ['|', '/', '-', '\\', '|', '/', '-', '\\'][dir as usize];
-        let end = if mi.is_some() { BoltEnd::Blood } else { BoltEnd::Sparks(Rgb(200, 200, 200)) };
-        self.fx.bolt(px as f32 + 0.5, py as f32 + 0.5, hx as f32 + 0.5, hy as f32 + 0.5, 22.0, ch, Rgb(225, 205, 160), None, end);
+        let end = if mi.is_some() {
+            BoltEnd::Blood
+        } else {
+            BoltEnd::Sparks(Rgb(200, 200, 200))
+        };
+        self.fx.bolt(
+            px as f32 + 0.5,
+            py as f32 + 0.5,
+            hx as f32 + 0.5,
+            hy as f32 + 0.5,
+            22.0,
+            ch,
+            Rgb(225, 205, 160),
+            None,
+            end,
+        );
         self.emit(Sfx::Arrow, px, py, 0.7);
         if let Some(mi) = mi {
             let custom = if w.range > 0 { None } else { Some((2, 6)) };
@@ -1897,7 +3376,7 @@ impl Game {
         let def = &MONSTERS[kind];
         let roll = self.rng.gen_range(1..=20);
         let hitb = self.hit_bonus() + hit_mod + if unaware { 4 } else { 0 };
-        let tn = 10 + def.ac * 3 / 2;
+        let tn = 10 + self.level.monsters[mi].ac() * 3 / 2;
         let (fx, fy) = (mx as f32 + 0.5, my as f32 + 0.5);
         if roll == 20 || (roll != 1 && roll + hitb >= tn) {
             let (lo, hi) = custom.unwrap_or(self.wdef().dmg);
@@ -1913,7 +3392,11 @@ impl Game {
                 dmg *= 3;
                 col = Rgb(255, 80, 80);
             } else if crit {
-                let k = if self.has(UPower::Executioner) { 3.0 } else { 2.0 };
+                let k = if self.has(UPower::Executioner) {
+                    3.0
+                } else {
+                    2.0
+                };
                 let k = if mastered { k * 1.02 } else { k };
                 dmg = ((dmg as f32) * k).round() as i32;
                 col = Rgb(255, 210, 60);
@@ -1925,18 +3408,34 @@ impl Game {
             }
             dmg = dmg.max(1);
             if backstab {
-                self.msg(format!("You backstab the {} for {}!", name, dmg), Rgb(255, 120, 120));
+                self.msg(
+                    format!("You backstab the {} for {}!", name, dmg),
+                    Rgb(255, 120, 120),
+                );
             } else if crit {
-                self.msg(format!("Critical hit! The {} takes {}!", name, dmg), Rgb(255, 210, 80));
+                self.msg(
+                    format!("Critical hit! The {} takes {}!", name, dmg),
+                    Rgb(255, 210, 80),
+                );
             } else {
-                self.msg(format!("You hit the {} for {}.", name, dmg), Rgb(215, 215, 215));
+                self.msg(
+                    format!("You hit the {} for {}.", name, dmg),
+                    Rgb(215, 215, 215),
+                );
             }
             let w = self.wdef();
-            if custom.is_none() && w.stun > 0.0 && self.rng.gen::<f32>() < w.stun && self.level.monsters[mi].hp > dmg {
+            if custom.is_none()
+                && w.stun > 0.0
+                && self.rng.gen::<f32>() < w.stun
+                && self.level.monsters[mi].hp > dmg
+            {
                 self.level.monsters[mi].stun = 2;
                 self.msg(format!("The {} is stunned!", name), Rgb(200, 200, 255));
             }
-            if self.has(UPower::Frost) && self.rng.gen_bool(0.25) && self.level.monsters[mi].hp > dmg {
+            if self.has(UPower::Frost)
+                && self.rng.gen_bool(0.25)
+                && self.level.monsters[mi].hp > dmg
+            {
                 self.level.monsters[mi].stun = 2;
                 self.fx.ice(fx, fy);
                 self.msg(format!("The {} is frozen solid!", name), Rgb(150, 220, 255));
@@ -1945,7 +3444,11 @@ impl Game {
                 let heal = (dmg / 5).max(1);
                 self.p.hp = (self.p.hp + heal).min(self.p.max_hp);
             }
-            let sfx = if def.death == DeathKind::Undead || def.ac >= 5 { Sfx::Clang } else { Sfx::Hit };
+            let sfx = if def.death == DeathKind::Undead || def.ac >= 5 {
+                Sfx::Clang
+            } else {
+                Sfx::Hit
+            };
             self.emit(sfx, mx, my, 0.9);
             self.fx.text(fx, fy, 0.9, dmg.to_string(), col);
             if crit || backstab {
@@ -2001,15 +3504,42 @@ impl Game {
         }
         if let Some((oi, _)) = best {
             let (ox, oy) = (self.level.monsters[oi].x, self.level.monsters[oi].y);
-            self.fx.bolt(x as f32 + 0.5, y as f32 + 0.5, ox as f32 + 0.5, oy as f32 + 0.5, 30.0, '~', Rgb(170, 200, 255), Some([0.8, 1.0, 2.2]), BoltEnd::Sparks(Rgb(200, 220, 255)));
+            self.fx.bolt(
+                x as f32 + 0.5,
+                y as f32 + 0.5,
+                ox as f32 + 0.5,
+                oy as f32 + 0.5,
+                30.0,
+                '~',
+                Rgb(170, 200, 255),
+                Some([0.8, 1.0, 2.2]),
+                BoltEnd::Sparks(Rgb(200, 220, 255)),
+            );
             self.emit(Sfx::Bolt, ox, oy, 0.6);
-            self.fx.text(ox as f32 + 0.5, oy as f32 + 0.5, 0.9, dmg.to_string(), Rgb(170, 200, 255));
+            self.fx.text(
+                ox as f32 + 0.5,
+                oy as f32 + 0.5,
+                0.9,
+                dmg.to_string(),
+                Rgb(170, 200, 255),
+            );
             self.damage_monster(oi, dmg, Src::Player);
         }
     }
 
     /// Returns true if the monster died.
     pub fn damage_monster(&mut self, mi: usize, dmg: i32, src: Src) -> bool {
+        // Only you and your thralls can hurt the Warden.
+        if self.level.monsters[mi].def().boss {
+            let allowed = match src {
+                Src::Player => true,
+                Src::Mon(id) => self.mon_index(id).map_or(false, |k| self.may_harm_boss(k)),
+                Src::Env => false,
+            };
+            if !allowed {
+                return false;
+            }
+        }
         let (kind, x, y, hp) = {
             let m = &mut self.level.monsters[mi];
             if !m.alive {
@@ -2050,7 +3580,11 @@ impl Game {
                 self.emit(Sfx::Voice(def.voice, Mood::Alert), x, y, 1.0);
                 self.fx.ichor(fx, fy, 0.6, 16, Rgb(255, 40, 20));
                 if self.level.is_visible(x, y) || cheb(x, y, self.p.x, self.p.y) <= 10 {
-                    self.msg(format!("{} flies into a BERSERK RAGE!", cap(def.name)), Rgb(255, 70, 50));
+                    let who = cap(&self.level.monsters[mi].the());
+                    self.msg(
+                        format!("{} flies into a BERSERK RAGE!", who),
+                        Rgb(255, 70, 50),
+                    );
                 }
             }
             if self.rng.gen_bool(0.4) {
@@ -2061,17 +3595,37 @@ impl Game {
     }
 
     fn kill_monster(&mut self, mi: usize, src: Src) {
-        let (kind, x, y, faction, summoned, champion, overlord, label, thrall) = {
+        let (kind, x, y, faction, summoned, champion, overlord, label, thrall, raised) = {
             let m = &mut self.level.monsters[mi];
             m.alive = false;
-            (m.kind, m.x, m.y, m.faction, m.summoned, m.champion, m.overlord, m.label(), m.thrall)
+            (
+                m.kind,
+                m.x,
+                m.y,
+                m.faction,
+                m.summoned,
+                m.champion,
+                m.overlord,
+                m.label(),
+                m.thrall,
+                m.raises,
+            )
         };
+        if kind == M_GUARDIAN {
+            self.break_ward();
+        }
         if thrall {
             let before = self.p.thrall_upkeep;
             self.sync_upkeep();
             let back = before - self.p.thrall_upkeep;
             if back > 0 {
-                self.msg(format!("The life you bound to it returns to you (+{} max HP).", back), Rgb(170, 230, 170));
+                self.msg(
+                    format!(
+                        "The life you bound to it returns to you (+{} max HP).",
+                        back
+                    ),
+                    Rgb(170, 230, 170),
+                );
             }
         }
         let def = &MONSTERS[kind];
@@ -2086,8 +3640,16 @@ impl Game {
             } else {
                 format!("The {}", label)
             };
-            let verb = if def.death == DeathKind::Undead { "is destroyed" } else { "dies" };
-            let col = if ally { Rgb(255, 150, 100) } else { Rgb(255, 220, 140) };
+            let verb = if def.death == DeathKind::Undead {
+                "is destroyed"
+            } else {
+                "dies"
+            };
+            let col = if ally {
+                Rgb(255, 150, 100)
+            } else {
+                Rgb(255, 220, 140)
+            };
             self.msg(format!("{} {}!", label, verb), col);
         }
         self.emit(Sfx::Voice(def.voice, Mood::Die), x, y, 1.0);
@@ -2098,7 +3660,18 @@ impl Game {
             }
             DeathKind::Demon => {
                 self.fx.ichor(fx, fy, 0.5, 20, Rgb(255, 110, 20));
-                self.fx.burst(fx, fy, 0.4, 20, Rgb(80, 70, 70), &['o', '~', '.'], 0.6, 1.5, -0.3, false);
+                self.fx.burst(
+                    fx,
+                    fy,
+                    0.4,
+                    20,
+                    Rgb(80, 70, 70),
+                    &['o', '~', '.'],
+                    0.6,
+                    1.5,
+                    -0.3,
+                    false,
+                );
                 self.fx.light(fx, fy, [1.5, 0.6, 0.2], 2.0, 0.5);
             }
             _ => self.fx.blood(fx, fy, 0.5, 22),
@@ -2107,7 +3680,10 @@ impl Game {
             let i = self.level.idx(x, y);
             self.level.blood[i] = (self.level.blood[i] + 1.0).min(3.0);
             for &(dx, dy) in DIRS.iter() {
-                if self.rng.gen_bool(0.3) && self.level.inb(x + dx, y + dy) && !self.level.tile(x + dx, y + dy).opaque() {
+                if self.rng.gen_bool(0.3)
+                    && self.level.inb(x + dx, y + dy)
+                    && !self.level.tile(x + dx, y + dy).opaque()
+                {
                     let j = self.level.idx(x + dx, y + dy);
                     self.level.blood[j] = (self.level.blood[j] + 0.5).min(3.0);
                 }
@@ -2121,10 +3697,26 @@ impl Game {
             } else {
                 -1.0
             };
-            self.level.corpses.push(Corpse { kind, x, y, revive_at });
+            // A fallen thrall's body is spent: it will not rise on its own.
+            let (revive_at, raises) = if thrall {
+                (-1.0, raised.max(1))
+            } else {
+                (revive_at, 0)
+            };
+            self.level.corpses.push(Corpse {
+                kind,
+                x,
+                y,
+                revive_at,
+                raises,
+            });
         }
         let killer_idx = match src {
-            Src::Mon(id) => self.level.monsters.iter().position(|m| m.id == id && m.alive),
+            Src::Mon(id) => self
+                .level
+                .monsters
+                .iter()
+                .position(|m| m.id == id && m.alive),
             _ => None,
         };
         let by_ally = killer_idx.map_or(false, |k| self.level.monsters[k].faction == Faction::Ally);
@@ -2143,7 +3735,9 @@ impl Game {
                 if self.bonus.leech > 0 {
                     self.p.mp = (self.p.mp + self.bonus.leech).min(self.p.max_mp);
                 }
-                if self.bonus.bloodlust > 0 && self.rng.gen::<f32>() < 0.10 * self.bonus.bloodlust as f32 {
+                if self.bonus.bloodlust > 0
+                    && self.rng.gen::<f32>() < 0.10 * self.bonus.bloodlust as f32
+                {
                     self.free_turn = true;
                 }
                 if self.bonus.siphon > 0 {
@@ -2168,11 +3762,19 @@ impl Game {
                         if self.rng.gen_bool((0.05 + 0.02 * tier).min(1.0)) {
                             self.make_champion(k);
                         }
-                    } else if !km.overlord && champion && self.rng.gen_bool((0.015 + 0.005 * tier).min(1.0)) {
+                    } else if !km.overlord
+                        && champion
+                        && self.rng.gen_bool((0.015 + 0.005 * tier).min(1.0))
+                    {
                         self.make_overlord(k);
                     }
                 }
-            } else if !km.champion && !km.summoned && !km.def().boss && !km.is_unique() && self.rng.gen_bool(0.35) {
+            } else if !km.champion
+                && !km.summoned
+                && !km.def().boss
+                && !km.is_unique()
+                && self.rng.gen_bool(0.35)
+            {
                 self.make_champion(k);
             } else if km.champion && !km.overlord && champion && self.rng.gen_bool(0.5) {
                 self.make_overlord(k);
@@ -2182,10 +3784,15 @@ impl Game {
         let drop_at = self.drop_spot(x, y);
         let luck = self.luck();
         if !ally && !summoned && !unique {
-            let chance = 0.10 + luck as f32 * 0.04 + if self.has(UPower::Fortune) { 0.15 } else { 0.0 };
+            let chance =
+                0.10 + luck as f32 * 0.04 + if self.has(UPower::Fortune) { 0.15 } else { 0.0 };
             if self.rng.gen::<f32>() < chance {
                 let it = random_item(self.depth, &mut self.rng, luck);
-                self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item: it });
+                self.level.items.push(FloorItem {
+                    x: drop_at.0,
+                    y: drop_at.1,
+                    item: it,
+                });
             }
         }
         if champion && !ally && by_player {
@@ -2195,15 +3802,30 @@ impl Game {
             let sig = def.sig;
             self.found_uniques.push(sig);
             let item = unique_item(sig);
-            self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item });
-            self.msg(format!("{} is no more! {} clatters to the floor.", cap(def.name), item.name()), Rgb(220, 150, 255));
-            self.fx.ring(fx, fy, 50, 3.0, Rgb(200, 120, 255), &['*', '+', '\''], 0.8);
+            self.level.items.push(FloorItem {
+                x: drop_at.0,
+                y: drop_at.1,
+                item,
+            });
+            self.msg(
+                format!(
+                    "{} is no more! {} clatters to the floor.",
+                    cap(def.name),
+                    item.name()
+                ),
+                Rgb(220, 150, 255),
+            );
+            self.fx
+                .ring(fx, fy, 50, 3.0, Rgb(200, 120, 255), &['*', '+', '\''], 0.8);
             self.fx.light(fx, fy, [1.6, 0.8, 2.2], 4.0, 1.0);
             self.fx.shake = self.fx.shake.max(1.0);
             self.emit(Sfx::Amulet, x, y, 0.8);
         }
         if def.boss {
-            self.msg("VORTH, WARDEN OF GRAZZARK, FALLS! The Amulet lies unguarded!", Rgb(255, 80, 60));
+            self.msg(
+                "VORTH, WARDEN OF GRAZZARK, FALLS! The Amulet lies unguarded!",
+                Rgb(255, 80, 60),
+            );
             self.fx.explosion(fx, fy, Rgb(255, 60, 30));
             self.fx.shake = 2.0;
             self.emit(Sfx::Explosion, x, y, 1.0);
@@ -2238,12 +3860,23 @@ impl Game {
         };
         self.emit(Sfx::Voice(voice, Mood::Alert), x, y, 1.0);
         let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-        self.fx.ring(fx, fy, 30, 1.5, Rgb(255, 190, 60), &['*', '+', '.'], 0.6);
+        self.fx
+            .ring(fx, fy, 30, 1.5, Rgb(255, 190, 60), &['*', '+', '.'], 0.6);
         self.fx.light(fx, fy, [2.0, 1.4, 0.4], 2.5, 0.6);
         let ally = self.level.monsters[k].faction == Faction::Ally;
         if self.level.is_visible(x, y) {
-            let who = if ally { format!("Your {}", name) } else { format!("The {}", name) };
-            self.msg(format!("{} roars in triumph and swells with power: it has become a CHAMPION!", who), Rgb(255, 190, 70));
+            let who = if ally {
+                format!("Your {}", name)
+            } else {
+                format!("The {}", name)
+            };
+            self.msg(
+                format!(
+                    "{} roars in triumph and swells with power: it has become a CHAMPION!",
+                    who
+                ),
+                Rgb(255, 190, 70),
+            );
         } else if cheb(x, y, self.p.x, self.p.y) <= 16 {
             self.msg("A triumphant cry is heard!", Rgb(220, 170, 90));
         }
@@ -2262,7 +3895,8 @@ impl Game {
         self.emit(Sfx::Voice(voice, Mood::Alert), x, y, 1.0);
         self.emit(Sfx::Rumble, x, y, 0.8);
         let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-        self.fx.ring(fx, fy, 50, 2.5, Rgb(255, 40, 70), &['#', '*', '+'], 0.8);
+        self.fx
+            .ring(fx, fy, 50, 2.5, Rgb(255, 40, 70), &['#', '*', '+'], 0.8);
         self.fx.light(fx, fy, [2.4, 0.3, 0.5], 3.5, 0.9);
         let thrall = self.level.monsters[k].thrall;
         if thrall {
@@ -2272,18 +3906,30 @@ impl Game {
             m.roar_cd = t;
             self.fx.shake = self.fx.shake.max(0.8);
             self.msg(
-                format!("Your champion {} devours its rival's power and rises as an OVERLORD THRALL!", name),
+                format!(
+                    "Your champion {} devours its rival's power and rises as an OVERLORD THRALL!",
+                    name
+                ),
                 Rgb(200, 120, 255),
             );
-            self.msg("It can now raise minions of its own and roar its enemies into flight.", Rgb(170, 140, 220));
+            self.msg(
+                "It can now raise minions of its own and roar its enemies into flight.",
+                Rgb(170, 140, 220),
+            );
         } else if self.level.is_visible(x, y) {
             self.fx.shake = self.fx.shake.max(0.8);
             self.msg(
-                format!("The champion {} devours its rival's power and rises as an OVERLORD!", name),
+                format!(
+                    "The champion {} devours its rival's power and rises as an OVERLORD!",
+                    name
+                ),
                 Rgb(255, 60, 80),
             );
         } else if cheb(x, y, self.p.x, self.p.y) <= 20 {
-            self.msg("A terrible, triumphant bellow shakes the dungeon. Something has grown mightier...", Rgb(230, 80, 90));
+            self.msg(
+                "A terrible, triumphant bellow shakes the dungeon. Something has grown mightier...",
+                Rgb(230, 80, 90),
+            );
         }
     }
 
@@ -2313,7 +3959,13 @@ impl Game {
                 "+5% critical chance"
             }
         };
-        self.msg(format!("You steal the overlord's power: {} for the rest of this descent!", txt), Rgb(255, 90, 110));
+        self.msg(
+            format!(
+                "You steal the overlord's power: {} for the rest of this descent!",
+                txt
+            ),
+            Rgb(255, 90, 110),
+        );
         let (px, py) = (self.p.x, self.p.y);
         self.fx.levelup(px as f32 + 0.5, py as f32 + 0.5);
         self.emit(Sfx::LevelUp, px, py, 0.9);
@@ -2322,10 +3974,20 @@ impl Game {
     /// Rewards and terror for slaying a champion at (x,y).
     fn champion_slain(&mut self, x: i32, y: i32, label: &str, drop_at: (i32, i32), overlord: bool) {
         let (px, py) = (self.p.x, self.p.y);
-        let heal = if overlord { 12 + self.p.max_hp * 25 / 100 } else { 8 + self.p.max_hp * 15 / 100 };
+        let heal = if overlord {
+            12 + self.p.max_hp * 25 / 100
+        } else {
+            8 + self.p.max_hp * 15 / 100
+        };
         self.p.hp = (self.p.hp + heal).min(self.p.max_hp);
         self.fx.heal(px as f32 + 0.5, py as f32 + 0.5);
-        self.msg(format!("You slay the {}! Its strength flows into you (+{} HP).", label, heal), Rgb(255, 200, 90));
+        self.msg(
+            format!(
+                "You slay the {}! Its strength flows into you (+{} HP).",
+                label, heal
+            ),
+            Rgb(255, 200, 90),
+        );
         if overlord {
             self.steal_power();
         }
@@ -2337,7 +3999,12 @@ impl Game {
             let (mx, my, ok, sight) = {
                 let m = &self.level.monsters[i];
                 let d = m.def();
-                (m.x, m.y, m.alive && m.faction != Faction::Ally && !d.boss && !m.is_unique(), d.sight as f32)
+                (
+                    m.x,
+                    m.y,
+                    m.alive && m.faction != Faction::Ally && !d.boss && !m.is_unique(),
+                    d.sight as f32,
+                )
             };
             if !ok {
                 continue;
@@ -2355,7 +4022,10 @@ impl Game {
             }
         }
         if scared > 0 {
-            self.msg("Its death scream echoes through the halls. Nearby monsters flee in terror!", Rgb(255, 160, 90));
+            self.msg(
+                "Its death scream echoes through the halls. Nearby monsters flee in terror!",
+                Rgb(255, 160, 90),
+            );
         }
 
         // Champions carry treasure from deeper down.
@@ -2363,20 +4033,40 @@ impl Game {
         let deeper = self.depth + 2;
         if self.rng.gen_bool(0.65) {
             let it = random_gear(deeper, &mut self.rng, luck);
-            self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item: it });
+            self.level.items.push(FloorItem {
+                x: drop_at.0,
+                y: drop_at.1,
+                item: it,
+            });
         }
         if self.rng.gen_bool(0.35) {
             let it = random_item(deeper, &mut self.rng, luck);
-            self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item: it });
+            self.level.items.push(FloorItem {
+                x: drop_at.0,
+                y: drop_at.1,
+                item: it,
+            });
         }
         // On the deepest floor, champions may carry a unique treasure.
         if self.depth == 10 && self.rng.gen_bool(0.25) {
-            let pool: Vec<usize> = (N_SIGNATURE..UNIQUES.len()).filter(|u| !self.found_uniques.contains(u)).collect();
+            let pool: Vec<usize> = (N_SIGNATURE..UNIQUES.len())
+                .filter(|u| !self.found_uniques.contains(u))
+                .collect();
             if let Some(&u) = pool.choose(&mut self.rng) {
                 self.found_uniques.push(u);
                 let item = unique_item(u);
-                self.level.items.push(FloorItem { x: drop_at.0, y: drop_at.1, item });
-                self.msg(format!("Something precious falls from the champion: {}!", item.name()), Rgb(220, 150, 255));
+                self.level.items.push(FloorItem {
+                    x: drop_at.0,
+                    y: drop_at.1,
+                    item,
+                });
+                self.msg(
+                    format!(
+                        "Something precious falls from the champion: {}!",
+                        item.name()
+                    ),
+                    Rgb(220, 150, 255),
+                );
                 self.emit(Sfx::Amulet, x, y, 0.7);
             }
         }
@@ -2400,7 +4090,10 @@ impl Game {
         self.p.max_mp += mpg;
         self.p.mp = (self.p.mp + mpg + self.p.max_mp / 4).min(self.p.max_mp);
         let lvl = self.p.level;
-        self.msg(format!("You feel stronger! Welcome to experience level {}.", lvl), Rgb(255, 220, 80));
+        self.msg(
+            format!("You feel stronger! Welcome to experience level {}.", lvl),
+            Rgb(255, 220, 80),
+        );
         let (fx, fy) = (self.p.x as f32 + 0.5, self.p.y as f32 + 0.5);
         self.fx.levelup(fx, fy);
         let (px, py) = (self.p.x, self.p.y);
@@ -2417,7 +4110,10 @@ impl Game {
             self.p.ward -= a;
             dmg -= a;
             if a > 0 {
-                self.msg(format!("Your ward absorbs {} damage.", a), Rgb(140, 180, 255));
+                self.msg(
+                    format!("Your ward absorbs {} damage.", a),
+                    Rgb(140, 180, 255),
+                );
                 self.fx.flash(Rgb(120, 160, 255), 0.25);
             }
             if self.p.ward == 0 {
@@ -2434,10 +4130,14 @@ impl Game {
         if self.p.hp <= 0 && self.has(UPower::Undying) && !self.p.undying_used {
             self.p.undying_used = true;
             self.p.hp = 1;
-            self.msg("The Bride's locket weeps cold tears... death releases you! (1 HP)", Rgb(180, 220, 255));
+            self.msg(
+                "The Bride's locket weeps cold tears... death releases you! (1 HP)",
+                Rgb(180, 220, 255),
+            );
             self.fx.flash(Rgb(180, 220, 255), 0.7);
             let (px, py) = (self.p.x, self.p.y);
-            self.fx.mist(px as f32 + 0.5, py as f32 + 0.5, Rgb(180, 220, 255));
+            self.fx
+                .mist(px as f32 + 0.5, py as f32 + 0.5, Rgb(180, 220, 255));
             self.emit(Sfx::Voice(VoiceKind::Wail, Mood::Hurt), px, py, 0.7);
         }
         if self.p.hp <= 0 && self.bonus.anchor && !self.p.anchor_used {
@@ -2463,14 +4163,19 @@ impl Game {
         self.p.poison = 0;
         let (px, py) = (self.p.x, self.p.y);
         let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
-        self.msg("Your soul is anchored to this world! You tear yourself back from death!", Rgb(200, 160, 255));
+        self.msg(
+            "Your soul is anchored to this world! You tear yourself back from death!",
+            Rgb(200, 160, 255),
+        );
         self.fx.flash(Rgb(200, 150, 255), 0.9);
-        self.fx.ring(fx, fy, 60, 4.0, Rgb(200, 140, 255), &['*', '+', '@'], 0.8);
+        self.fx
+            .ring(fx, fy, 60, 4.0, Rgb(200, 140, 255), &['*', '+', '@'], 0.8);
         self.fx.light(fx, fy, [1.8, 1.2, 2.4], 5.0, 1.2);
         self.fx.shake = self.fx.shake.max(1.2);
         self.emit(Sfx::Amulet, px, py, 1.0);
         for m in self.level.monsters.iter_mut() {
-            if m.alive && m.faction != Faction::Ally && !m.def().boss && cheb(m.x, m.y, px, py) <= 5 {
+            if m.alive && m.faction != Faction::Ally && !m.def().boss && cheb(m.x, m.y, px, py) <= 5
+            {
                 m.fear = m.fear.max(6);
                 m.target = None;
             }
@@ -2492,7 +4197,15 @@ impl Game {
         self.die(DeathCause::Abandoned);
     }
 
-    fn explode(&mut self, cx: i32, cy: i32, dice: i32, bonus: i32, cause: DeathCause, hurts_player: bool) {
+    fn explode(
+        &mut self,
+        cx: i32,
+        cy: i32,
+        dice: i32,
+        bonus: i32,
+        cause: DeathCause,
+        hurts_player: bool,
+    ) {
         let ids: Vec<usize> = self
             .level
             .monsters
@@ -2507,7 +4220,13 @@ impl Game {
                 dmg += self.rng.gen_range(1..=6);
             }
             let (mx, my) = (self.level.monsters[mi].x, self.level.monsters[mi].y);
-            self.fx.text(mx as f32 + 0.5, my as f32 + 0.5, 0.9, dmg.to_string(), Rgb(255, 150, 40));
+            self.fx.text(
+                mx as f32 + 0.5,
+                my as f32 + 0.5,
+                0.9,
+                dmg.to_string(),
+                Rgb(255, 150, 40),
+            );
             self.damage_monster(mi, dmg, Src::Player);
         }
         if hurts_player && cheb(self.p.x, self.p.y, cx, cy) <= 1 {
@@ -2516,7 +4235,10 @@ impl Game {
                 dmg += self.rng.gen_range(1..=6);
             }
             dmg /= 2;
-            self.msg(format!("You are caught in the blast! ({} damage)", dmg), Rgb(255, 120, 40));
+            self.msg(
+                format!("You are caught in the blast! ({} damage)", dmg),
+                Rgb(255, 120, 40),
+            );
             self.player_hit(dmg, cause, false);
         }
         self.noise(cx, cy, 12);
@@ -2525,7 +4247,10 @@ impl Game {
 
     fn use_skill(&mut self, s: Skill) -> Option<f64> {
         if self.cursed(Curse::Hush) {
-            self.msg("The walls swallow the words before they leave your lips.", Curse::Hush.color());
+            self.msg(
+                "The walls swallow the words before they leave your lips.",
+                Curse::Hush.color(),
+            );
             return None;
         }
         let wait = self.skill_ready_in(s);
@@ -2538,7 +4263,10 @@ impl Game {
         let blood = if self.p.mp < cost {
             let need = (cost - self.p.mp) * 2;
             if !self.bonus.bloodmagic || self.p.hp <= need {
-                self.msg(format!("Not enough mana for {}.", s.name()), Rgb(120, 140, 255));
+                self.msg(
+                    format!("Not enough mana for {}.", s.name()),
+                    Rgb(120, 140, 255),
+                );
                 return None;
             }
             need
@@ -2568,7 +4296,8 @@ impl Game {
                 } else {
                     self.cam.swing = 1.0;
                     self.emit(Sfx::Swing, px, py, 0.9);
-                    self.fx.ring(fx, fy, 24, 1.5, Rgb(230, 230, 255), &['-', '=', '~'], 0.3);
+                    self.fx
+                        .ring(fx, fy, 24, 1.5, Rgb(230, 230, 255), &['-', '=', '~'], 0.3);
                     self.msg("You cleave in a wide arc!", Rgb(255, 200, 120));
                     for mi in targets {
                         self.player_strike(mi, 1.0, 1, None);
@@ -2580,8 +4309,19 @@ impl Game {
             Skill::WarStomp => {
                 self.emit(Sfx::Stomp, px, py, 1.0);
                 self.fx.shake = 1.5;
-                self.fx.ring(fx, fy, 40, 3.0, Rgb(170, 140, 100), &['.', ',', 'o', '~'], 0.6);
-                self.msg("You stomp the ground with tremendous force!", Rgb(255, 200, 120));
+                self.fx.ring(
+                    fx,
+                    fy,
+                    40,
+                    3.0,
+                    Rgb(170, 140, 100),
+                    &['.', ',', 'o', '~'],
+                    0.6,
+                );
+                self.msg(
+                    "You stomp the ground with tremendous force!",
+                    Rgb(255, 200, 120),
+                );
                 let ids = self.monsters_within(px, py, 2.5, true);
                 for mi in ids {
                     let dmg = self.rng.gen_range(1..=6) + lvl / 2;
@@ -2607,7 +4347,17 @@ impl Game {
                 for k in -1..=1 {
                     let d = (f + k).rem_euclid(8);
                     let (hx, hy, mi) = self.fire_line(d, 6);
-                    self.fx.bolt(fx, fy, hx as f32 + 0.5, hy as f32 + 0.5, 20.0, '+', Rgb(200, 210, 230), None, BoltEnd::Sparks(Rgb(220, 220, 240)));
+                    self.fx.bolt(
+                        fx,
+                        fy,
+                        hx as f32 + 0.5,
+                        hy as f32 + 0.5,
+                        20.0,
+                        '+',
+                        Rgb(200, 210, 230),
+                        None,
+                        BoltEnd::Sparks(Rgb(220, 220, 240)),
+                    );
                     if let Some(mi) = mi {
                         self.player_strike(mi, 1.0, 1, Some((2, 6 + lvl / 2)));
                     }
@@ -2618,7 +4368,17 @@ impl Game {
             }
             Skill::Fireball => {
                 let (cx, cy, _) = self.fire_line(f, 8);
-                self.fx.bolt(fx, fy, cx as f32 + 0.5, cy as f32 + 0.5, 12.0, '@', Rgb(255, 140, 30), Some([2.2, 1.0, 0.3]), BoltEnd::Explosion(Rgb(255, 120, 20)));
+                self.fx.bolt(
+                    fx,
+                    fy,
+                    cx as f32 + 0.5,
+                    cy as f32 + 0.5,
+                    12.0,
+                    '@',
+                    Rgb(255, 140, 30),
+                    Some([2.2, 1.0, 0.3]),
+                    BoltEnd::Explosion(Rgb(255, 120, 20)),
+                );
                 self.emit(Sfx::Fireball, px, py, 0.8);
                 self.emit(Sfx::Explosion, cx, cy, 1.0);
                 self.msg("You hurl a roaring fireball!", Rgb(255, 160, 60));
@@ -2626,10 +4386,14 @@ impl Game {
                 true
             }
             Skill::FrostNova => {
-                self.fx.ring(fx, fy, 48, 3.5, Rgb(160, 220, 255), &['*', '+', 'x'], 0.6);
+                self.fx
+                    .ring(fx, fy, 48, 3.5, Rgb(160, 220, 255), &['*', '+', 'x'], 0.6);
                 self.fx.ice(fx, fy);
                 self.emit(Sfx::Frost, px, py, 1.0);
-                self.msg("A wave of bitter frost explodes outward!", Rgb(150, 210, 255));
+                self.msg(
+                    "A wave of bitter frost explodes outward!",
+                    Rgb(150, 210, 255),
+                );
                 let ids = self.monsters_within(px, py, 2.5, true);
                 for mi in ids {
                     let dmg = self.rng.gen_range(2..=12) + lvl / 2;
@@ -2646,7 +4410,12 @@ impl Game {
                 true
             }
             Skill::SummonWolf => {
-                if self.level.monsters.iter().any(|m| m.alive && m.summoned && m.kind == M_WOLF) {
+                if self
+                    .level
+                    .monsters
+                    .iter()
+                    .any(|m| m.alive && m.summoned && m.kind == M_WOLF)
+                {
                     self.msg("Your wolf is already at your side.", GREY);
                     false
                 } else if let Some((sx, sy)) = self.free_adjacent(px, py) {
@@ -2658,7 +4427,8 @@ impl Game {
                     m.max_hp = 16 + lvl * 3;
                     m.hp = m.max_hp;
                     self.level.monsters.push(m);
-                    self.fx.mist(sx as f32 + 0.5, sy as f32 + 0.5, Rgb(180, 200, 255));
+                    self.fx
+                        .mist(sx as f32 + 0.5, sy as f32 + 0.5, Rgb(180, 200, 255));
                     self.emit(Sfx::Voice(VoiceKind::Snarl, Mood::Alert), sx, sy, 1.0);
                     self.msg("A dire wolf answers your call!", Rgb(140, 220, 140));
                     true
@@ -2673,7 +4443,10 @@ impl Game {
                 self.p.poison = 0;
                 self.fx.heal(fx, fy);
                 self.emit(Sfx::Heal, px, py, 0.8);
-                self.msg(format!("Holy light mends your wounds (+{}).", amt), Rgb(255, 240, 150));
+                self.msg(
+                    format!("Holy light mends your wounds (+{}).", amt),
+                    Rgb(255, 240, 150),
+                );
                 true
             }
             Skill::TurnUndead => {
@@ -2682,12 +4455,16 @@ impl Game {
                     .into_iter()
                     .filter(|&i| self.level.monsters[i].def().faction == Faction::Undead)
                     .collect();
-                self.fx.ring(fx, fy, 60, 5.0, Rgb(255, 250, 200), &['+', '*', '\''], 0.8);
+                self.fx
+                    .ring(fx, fy, 60, 5.0, Rgb(255, 250, 200), &['+', '*', '\''], 0.8);
                 self.fx.flash(Rgb(255, 250, 220), 0.4);
                 self.fx.light(fx, fy, [2.5, 2.4, 1.8], 6.0, 0.8);
                 self.emit(Sfx::Heal, px, py, 1.0);
                 if ids.is_empty() {
-                    self.msg("Holy light floods the area... but no undead are near.", Rgb(255, 240, 180));
+                    self.msg(
+                        "Holy light floods the area... but no undead are near.",
+                        Rgb(255, 240, 180),
+                    );
                 } else {
                     self.msg("The undead shriek in holy agony!", Rgb(255, 240, 150));
                     for mi in ids {
@@ -2699,40 +4476,72 @@ impl Game {
                 true
             }
             Skill::RaiseDead => {
-                let thralls = self.level.monsters.iter().filter(|m| m.alive && m.thrall).count();
+                let thralls = self
+                    .level
+                    .monsters
+                    .iter()
+                    .filter(|m| m.alive && m.thrall)
+                    .count();
                 if thralls >= 3 {
                     self.msg("You cannot bind any more thralls.", GREY);
                     false
                 } else {
-                    let mut best: Option<(usize, f32)> = None;
-                    for (i, c) in self.level.corpses.iter().enumerate() {
-                        let d = dist(c.x, c.y, px, py);
-                        if d <= 5.5
-                            && self.level.monster_at(c.x, c.y).is_none()
-                            && !(c.x == px && c.y == py)
-                            && best.map_or(true, |b| d < b.1)
-                        {
-                            best = Some((i, d));
+                    let opts = self.raise_options();
+                    let pick = match self.raise_pick {
+                        Some((x, y)) => opts.iter().find(|o| o.x == x && o.y == y).copied(),
+                        None if opts.len() > 1 => {
+                            // More than one body answers: let the player choose.
+                            self.raise_menu = opts.clone();
+                            None
                         }
-                    }
-                    match best {
+                        None => opts.first().copied(),
+                    };
+                    match pick {
                         None => {
-                            self.msg("There are no corpses nearby to raise.", GREY);
+                            if self.raise_menu.is_empty() {
+                                let spent = self
+                                    .level
+                                    .corpses
+                                    .iter()
+                                    .any(|c| dist(c.x, c.y, px, py) <= 5.5 && c.raises > 0);
+                                if spent && opts.is_empty() {
+                                    self.msg(
+                                        "The fallen thralls nearby have nothing left to give you.",
+                                        GREY,
+                                    );
+                                } else {
+                                    self.msg("There are no corpses nearby to raise.", GREY);
+                                }
+                            }
                             false
                         }
-                        Some((ci, _)) => {
+                        Some(o) => {
+                            let Some(ci) = self
+                                .level
+                                .corpses
+                                .iter()
+                                .position(|c| c.x == o.x && c.y == o.y && c.kind == o.kind)
+                            else {
+                                return None;
+                            };
                             let c = self.level.corpses.remove(ci);
                             let id = self.new_id();
                             let mut m = Monster::new(id, c.kind, c.x, c.y, self.time + 50.0);
                             m.faction = Faction::Ally;
                             m.summoned = true;
                             m.thrall = true;
+                            m.raises = c.raises + 1;
                             m.awake = true;
                             self.level.monsters.push(m);
-                            self.fx.mist(c.x as f32 + 0.5, c.y as f32 + 0.5, Rgb(120, 255, 120));
+                            self.fx
+                                .mist(c.x as f32 + 0.5, c.y as f32 + 0.5, Rgb(120, 255, 120));
                             self.emit(Sfx::Revive, c.x, c.y, 1.0);
+                            let again = if o.again { " once more" } else { "" };
                             self.msg(
-                                format!("The {} rises to serve you! (-{} max HP while it lives)", MONSTERS[c.kind].name, self.thrall_cost()),
+                                format!(
+                                    "The {} rises{} to serve you! (-{} max HP while it lives)",
+                                    MONSTERS[c.kind].name, again, o.cost
+                                ),
                                 Rgb(150, 255, 150),
                             );
                             self.sync_upkeep();
@@ -2750,13 +4559,32 @@ impl Game {
                     }
                     Some(mi) => {
                         let dmg = self.rng.gen_range(2..=12) + lvl;
-                        self.fx.bolt(hx as f32 + 0.5, hy as f32 + 0.5, fx, fy, 10.0, '*', Rgb(150, 255, 120), Some([0.4, 1.4, 0.5]), BoltEnd::None);
+                        self.fx.bolt(
+                            hx as f32 + 0.5,
+                            hy as f32 + 0.5,
+                            fx,
+                            fy,
+                            10.0,
+                            '*',
+                            Rgb(150, 255, 120),
+                            Some([0.4, 1.4, 0.5]),
+                            BoltEnd::None,
+                        );
                         self.emit(Sfx::Bolt, px, py, 0.8);
                         let heal = dmg / 2 + 1;
                         self.p.hp = (self.p.hp + heal).min(self.p.max_hp);
                         let name = self.level.monsters[mi].def().name;
-                        self.msg(format!("You drain {} life from the {}.", dmg, name), Rgb(150, 255, 150));
-                        self.fx.text(hx as f32 + 0.5, hy as f32 + 0.5, 0.9, dmg.to_string(), Rgb(150, 255, 120));
+                        self.msg(
+                            format!("You drain {} life from the {}.", dmg, name),
+                            Rgb(150, 255, 150),
+                        );
+                        self.fx.text(
+                            hx as f32 + 0.5,
+                            hy as f32 + 0.5,
+                            0.9,
+                            dmg.to_string(),
+                            Rgb(150, 255, 120),
+                        );
                         self.damage_monster(mi, dmg, Src::Player);
                         true
                     }
@@ -2781,10 +4609,18 @@ impl Game {
                         false
                     }
                     Some((x, y)) => {
-                        self.fx.rise(fx, fy, 20, Rgb(180, 120, 255), &['*', '.', '+'], 0.8);
+                        self.fx
+                            .rise(fx, fy, 20, Rgb(180, 120, 255), &['*', '.', '+'], 0.8);
                         self.p.x = x;
                         self.p.y = y;
-                        self.fx.rise(x as f32 + 0.5, y as f32 + 0.5, 20, Rgb(180, 120, 255), &['*', '.', '+'], 0.8);
+                        self.fx.rise(
+                            x as f32 + 0.5,
+                            y as f32 + 0.5,
+                            20,
+                            Rgb(180, 120, 255),
+                            &['*', '.', '+'],
+                            0.8,
+                        );
                         self.emit(Sfx::Blink, x, y, 0.8);
                         self.after_player_move();
                         true
@@ -2792,7 +4628,8 @@ impl Game {
                 }
             }
             Skill::SoulBurst => {
-                self.fx.ring(fx, fy, 60, 4.0, Rgb(200, 120, 255), &['*', '@', '%'], 0.7);
+                self.fx
+                    .ring(fx, fy, 60, 4.0, Rgb(200, 120, 255), &['*', '@', '%'], 0.7);
                 self.fx.light(fx, fy, [1.5, 0.6, 2.2], 4.0, 0.7);
                 self.fx.shake = 1.0;
                 self.emit(Sfx::Explosion, px, py, 0.9);
@@ -2810,10 +4647,14 @@ impl Game {
             }
             Skill::PhaseWard => {
                 self.p.ward = 20 + lvl * 2;
-                self.fx.ring(fx, fy, 30, 1.0, Rgb(120, 170, 255), &['o', 'O', '0'], 0.6);
+                self.fx
+                    .ring(fx, fy, 30, 1.0, Rgb(120, 170, 255), &['o', 'O', '0'], 0.6);
                 self.emit(Sfx::Frost, px, py, 0.7);
                 let w = self.p.ward;
-                self.msg(format!("A shimmering ward surrounds you ({}).", w), Rgb(140, 180, 255));
+                self.msg(
+                    format!("A shimmering ward surrounds you ({}).", w),
+                    Rgb(140, 180, 255),
+                );
                 true
             }
             Skill::SecondWind => {
@@ -2822,13 +4663,24 @@ impl Game {
                 self.p.poison = 0;
                 self.fx.heal(fx, fy);
                 self.emit(Sfx::Heal, px, py, 0.9);
-                self.msg(format!("You catch your second wind (+{}).", amt), Rgb(150, 255, 150));
+                self.msg(
+                    format!("You catch your second wind (+{}).", amt),
+                    Rgb(150, 255, 150),
+                );
                 true
             }
             Skill::BattleCry => {
                 self.p.fury = 8;
                 self.fx.shake = self.fx.shake.max(1.0);
-                self.fx.ring(fx, fy, 50, 5.0, Rgb(255, 120, 60), &['!', '>', '<', '~'], 0.6);
+                self.fx.ring(
+                    fx,
+                    fy,
+                    50,
+                    5.0,
+                    Rgb(255, 120, 60),
+                    &['!', '>', '<', '~'],
+                    0.6,
+                );
                 self.fx.flash(Rgb(255, 90, 40), 0.3);
                 self.emit(Sfx::Voice(VoiceKind::Roar, Mood::Alert), px, py, 1.0);
                 self.emit(Sfx::Stomp, px, py, 0.8);
@@ -2844,7 +4696,11 @@ impl Game {
                     fled += 1;
                 }
                 self.msg(
-                    if fled > 0 { "You bellow a terrible battle cry! Your foes quail, and fury fills you!" } else { "You bellow a terrible battle cry! Fury fills you!" },
+                    if fled > 0 {
+                        "You bellow a terrible battle cry! Your foes quail, and fury fills you!"
+                    } else {
+                        "You bellow a terrible battle cry! Fury fills you!"
+                    },
                     Rgb(255, 140, 80),
                 );
                 self.noise(px, py, 14);
@@ -2867,12 +4723,17 @@ impl Game {
                     let (sx, sy) = ((mx - px).signum(), (my - py).signum());
                     let behind = (mx + sx, my + sy);
                     let ok = |g: &Game, x: i32, y: i32| {
-                        g.level.tile(x, y).walkable() && g.level.monster_at(x, y).is_none() && !(x == px && y == py)
+                        g.level.tile(x, y).walkable()
+                            && g.level.monster_at(x, y).is_none()
+                            && !(x == px && y == py)
                     };
                     if ok(self, behind.0, behind.1) {
                         Some((mi, behind))
                     } else {
-                        DIRS.iter().map(|&(dx, dy)| (mx + dx, my + dy)).find(|&(x, y)| ok(self, x, y)).map(|p| (mi, p))
+                        DIRS.iter()
+                            .map(|&(dx, dy)| (mx + dx, my + dy))
+                            .find(|&(x, y)| ok(self, x, y))
+                            .map(|p| (mi, p))
                     }
                 });
                 match spot {
@@ -2887,10 +4748,14 @@ impl Game {
                         self.cam.x = x as f32 + 0.5;
                         self.cam.y = y as f32 + 0.5;
                         let (mx, my) = (self.level.monsters[mi].x, self.level.monsters[mi].y);
-                        if let Some(d) = DIRS.iter().position(|&d| d == ((mx - x).signum(), (my - y).signum())) {
+                        if let Some(d) = DIRS
+                            .iter()
+                            .position(|&d| d == ((mx - x).signum(), (my - y).signum()))
+                        {
                             self.p.facing = d as i32;
                         }
-                        self.fx.mist(x as f32 + 0.5, y as f32 + 0.5, Rgb(70, 70, 110));
+                        self.fx
+                            .mist(x as f32 + 0.5, y as f32 + 0.5, Rgb(70, 70, 110));
                         self.emit(Sfx::Blink, x, y, 0.6);
                         self.msg("You step through the shadows!", Rgb(160, 160, 220));
                         // It never saw you coming.
@@ -2904,14 +4769,27 @@ impl Game {
             }
             Skill::SmokeBomb => {
                 self.fx.mist(fx, fy, Rgb(120, 120, 130));
-                self.fx.burst(fx, fy, 0.3, 50, Rgb(110, 110, 120), &['%', '@', 'o', '.'], 1.2, 2.5, -0.2, false);
+                self.fx.burst(
+                    fx,
+                    fy,
+                    0.3,
+                    50,
+                    Rgb(110, 110, 120),
+                    &['%', '@', 'o', '.'],
+                    1.2,
+                    2.5,
+                    -0.2,
+                    false,
+                );
                 self.emit(Sfx::Explosion, px, py, 0.4);
                 let ids: Vec<usize> = self
                     .level
                     .monsters
                     .iter()
                     .enumerate()
-                    .filter(|(_, m)| m.alive && m.faction != Faction::Ally && cheb(m.x, m.y, px, py) <= 4)
+                    .filter(|(_, m)| {
+                        m.alive && m.faction != Faction::Ally && cheb(m.x, m.y, px, py) <= 4
+                    })
                     .map(|(i, _)| i)
                     .collect();
                 for mi in ids {
@@ -2923,7 +4801,10 @@ impl Game {
                     }
                 }
                 self.p.invis = self.p.invis.max(5);
-                self.msg("You hurl a smoke bomb and vanish in the choking cloud!", Rgb(170, 170, 190));
+                self.msg(
+                    "You hurl a smoke bomb and vanish in the choking cloud!",
+                    Rgb(170, 170, 190),
+                );
                 true
             }
             Skill::ChainLightning => {
@@ -2932,8 +4813,17 @@ impl Game {
                         .monsters
                         .iter()
                         .enumerate()
-                        .filter(|(_, m)| m.alive && m.faction != Faction::Ally && self.level.is_visible(m.x, m.y) && dist(px, py, m.x, m.y) <= 6.5)
-                        .min_by(|a, b| dist(px, py, a.1.x, a.1.y).partial_cmp(&dist(px, py, b.1.x, b.1.y)).unwrap())
+                        .filter(|(_, m)| {
+                            m.alive
+                                && m.faction != Faction::Ally
+                                && self.level.is_visible(m.x, m.y)
+                                && dist(px, py, m.x, m.y) <= 6.5
+                        })
+                        .min_by(|a, b| {
+                            dist(px, py, a.1.x, a.1.y)
+                                .partial_cmp(&dist(px, py, b.1.x, b.1.y))
+                                .unwrap()
+                        })
                         .map(|(i, _)| i)
                 });
                 match first {
@@ -2953,9 +4843,25 @@ impl Game {
                                 (m.x, m.y, m.id)
                             };
                             hit.push(cid);
-                            self.fx.bolt(fx0 as f32 + 0.5, fy0 as f32 + 0.5, cx as f32 + 0.5, cy as f32 + 0.5, 30.0, '~', Rgb(170, 200, 255), Some([0.8, 1.0, 2.2]), BoltEnd::Sparks(Rgb(200, 220, 255)));
+                            self.fx.bolt(
+                                fx0 as f32 + 0.5,
+                                fy0 as f32 + 0.5,
+                                cx as f32 + 0.5,
+                                cy as f32 + 0.5,
+                                30.0,
+                                '~',
+                                Rgb(170, 200, 255),
+                                Some([0.8, 1.0, 2.2]),
+                                BoltEnd::Sparks(Rgb(200, 220, 255)),
+                            );
                             self.emit(Sfx::Bolt, cx, cy, 0.7);
-                            self.fx.text(cx as f32 + 0.5, cy as f32 + 0.5, 0.9, dmg.to_string(), Rgb(170, 200, 255));
+                            self.fx.text(
+                                cx as f32 + 0.5,
+                                cy as f32 + 0.5,
+                                0.9,
+                                dmg.to_string(),
+                                Rgb(170, 200, 255),
+                            );
                             self.damage_monster(ci, dmg, Src::Player);
                             if hit.len() >= 5 {
                                 break;
@@ -2968,7 +4874,13 @@ impl Game {
                                 .monsters
                                 .iter()
                                 .enumerate()
-                                .filter(|(_, o)| o.alive && o.faction != Faction::Ally && !hit.contains(&o.id) && cheb(o.x, o.y, cx, cy) <= 4 && self.level.los(cx, cy, o.x, o.y))
+                                .filter(|(_, o)| {
+                                    o.alive
+                                        && o.faction != Faction::Ally
+                                        && !hit.contains(&o.id)
+                                        && cheb(o.x, o.y, cx, cy) <= 4
+                                        && self.level.los(cx, cy, o.x, o.y)
+                                })
                                 .min_by_key(|(_, o)| cheb(o.x, o.y, cx, cy))
                                 .map(|(i, _)| i);
                         }
@@ -2985,20 +4897,30 @@ impl Game {
                         false
                     }
                     Some(mi) => {
-                        let unholy = matches!(self.level.monsters[mi].def().faction, Faction::Undead | Faction::Demon);
-                        let mut dmg = (0..2).map(|_| self.rng.gen_range(1..=8)).sum::<i32>() + lvl + 2;
+                        let unholy = matches!(
+                            self.level.monsters[mi].def().faction,
+                            Faction::Undead | Faction::Demon
+                        );
+                        let mut dmg =
+                            (0..2).map(|_| self.rng.gen_range(1..=8)).sum::<i32>() + lvl + 2;
                         if unholy {
                             dmg *= 2;
                         }
                         let (tx, ty) = (hx as f32 + 0.5, hy as f32 + 0.5);
-                        self.fx.ring(tx, ty, 30, 1.2, Rgb(255, 245, 180), &['+', '|', '*'], 0.6);
+                        self.fx
+                            .ring(tx, ty, 30, 1.2, Rgb(255, 245, 180), &['+', '|', '*'], 0.6);
                         self.fx.light(tx, ty, [2.6, 2.4, 1.6], 3.0, 0.6);
                         self.fx.flash(Rgb(255, 250, 210), 0.25);
                         self.emit(Sfx::Heal, hx, hy, 1.0);
-                        self.fx.text(tx, ty, 0.9, dmg.to_string(), Rgb(255, 240, 150));
+                        self.fx
+                            .text(tx, ty, 0.9, dmg.to_string(), Rgb(255, 240, 150));
                         let name = self.level.monsters[mi].label();
                         self.msg(
-                            if unholy { format!("Holy fire SEARS the unholy {} ({})!", name, dmg) } else { format!("Holy fire smites the {} ({}).", name, dmg) },
+                            if unholy {
+                                format!("Holy fire SEARS the unholy {} ({})!", name, dmg)
+                            } else {
+                                format!("Holy fire smites the {} ({}).", name, dmg)
+                            },
                             Rgb(255, 240, 150),
                         );
                         self.damage_monster(mi, dmg, Src::Player);
@@ -3009,7 +4931,11 @@ impl Game {
             }
             Skill::PiercingShot => {
                 let (dx, dy) = DIRS[f as usize];
-                let custom = if self.wdef().range > 0 { None } else { Some((2, 8)) };
+                let custom = if self.wdef().range > 0 {
+                    None
+                } else {
+                    Some((2, 8))
+                };
                 let mut end = (px, py);
                 let mut targets = Vec::new();
                 for k in 1..=10 {
@@ -3025,9 +4951,22 @@ impl Game {
                     }
                 }
                 let ch = ['|', '/', '-', '\\', '|', '/', '-', '\\'][f as usize];
-                self.fx.bolt(fx, fy, end.0 as f32 + 0.5, end.1 as f32 + 0.5, 30.0, ch, Rgb(255, 230, 160), Some([1.2, 1.0, 0.5]), BoltEnd::Sparks(Rgb(255, 230, 160)));
+                self.fx.bolt(
+                    fx,
+                    fy,
+                    end.0 as f32 + 0.5,
+                    end.1 as f32 + 0.5,
+                    30.0,
+                    ch,
+                    Rgb(255, 230, 160),
+                    Some([1.2, 1.0, 0.5]),
+                    BoltEnd::Sparks(Rgb(255, 230, 160)),
+                );
                 self.emit(Sfx::Arrow, px, py, 0.9);
-                self.msg("You loose an arrow that tears through everything in its path!", Rgb(230, 230, 150));
+                self.msg(
+                    "You loose an arrow that tears through everything in its path!",
+                    Rgb(230, 230, 150),
+                );
                 for mi in targets {
                     self.player_strike(mi, 1.25, 3, custom);
                 }
@@ -3051,7 +4990,17 @@ impl Game {
                 for _ in 0..8 {
                     let ox = self.rng.gen_range(-1.2..1.2);
                     let oy = self.rng.gen_range(-1.2..1.2);
-                    self.fx.bolt(fx, fy, cx + ox, cy + oy, 18.0 + self.rng.gen_range(0.0..8.0), '\'', Rgb(225, 205, 160), None, BoltEnd::Sparks(Rgb(200, 190, 160)));
+                    self.fx.bolt(
+                        fx,
+                        fy,
+                        cx + ox,
+                        cy + oy,
+                        18.0 + self.rng.gen_range(0.0..8.0),
+                        '\'',
+                        Rgb(225, 205, 160),
+                        None,
+                        BoltEnd::Sparks(Rgb(200, 190, 160)),
+                    );
                 }
                 self.emit(Sfx::Arrow, px, py, 1.0);
                 self.emit(Sfx::Arrow, c.0, c.1, 0.8);
@@ -3061,13 +5010,21 @@ impl Game {
                     .monsters
                     .iter()
                     .enumerate()
-                    .filter(|(_, m)| m.alive && m.faction != Faction::Ally && cheb(m.x, m.y, c.0, c.1) <= 1)
+                    .filter(|(_, m)| {
+                        m.alive && m.faction != Faction::Ally && cheb(m.x, m.y, c.0, c.1) <= 1
+                    })
                     .map(|(i, _)| i)
                     .collect();
                 for mi in ids {
                     let dmg = (0..2).map(|_| self.rng.gen_range(1..=6)).sum::<i32>() + lvl / 2 + 1;
                     let (mx, my) = (self.level.monsters[mi].x, self.level.monsters[mi].y);
-                    self.fx.text(mx as f32 + 0.5, my as f32 + 0.5, 0.9, dmg.to_string(), Rgb(230, 220, 170));
+                    self.fx.text(
+                        mx as f32 + 0.5,
+                        my as f32 + 0.5,
+                        0.9,
+                        dmg.to_string(),
+                        Rgb(230, 220, 170),
+                    );
                     self.damage_monster(mi, dmg, Src::Player);
                 }
                 self.noise(px, py, 6);
@@ -3079,7 +5036,9 @@ impl Game {
                     .corpses
                     .iter()
                     .enumerate()
-                    .filter(|(_, c)| dist(c.x, c.y, px, py) <= 6.5 && self.level.los(px, py, c.x, c.y))
+                    .filter(|(_, c)| {
+                        dist(c.x, c.y, px, py) <= 6.5 && self.level.los(px, py, c.x, c.y)
+                    })
                     .map(|(i, _)| i)
                     .collect();
                 picks.truncate(6);
@@ -3087,13 +5046,24 @@ impl Game {
                     self.msg("There are no corpses in reach to detonate.", GREY);
                     false
                 } else {
-                    self.msg(format!("You detonate {} corpse{}!", picks.len(), if picks.len() == 1 { "" } else { "s" }), Rgb(170, 255, 140));
-                    let spots: Vec<(i32, i32)> = picks.iter().map(|&i| (self.level.corpses[i].x, self.level.corpses[i].y)).collect();
+                    self.msg(
+                        format!(
+                            "You detonate {} corpse{}!",
+                            picks.len(),
+                            if picks.len() == 1 { "" } else { "s" }
+                        ),
+                        Rgb(170, 255, 140),
+                    );
+                    let spots: Vec<(i32, i32)> = picks
+                        .iter()
+                        .map(|&i| (self.level.corpses[i].x, self.level.corpses[i].y))
+                        .collect();
                     for &i in picks.iter().rev() {
                         self.level.corpses.remove(i);
                     }
                     for (x, y) in spots {
-                        self.fx.explosion(x as f32 + 0.5, y as f32 + 0.5, Rgb(140, 255, 90));
+                        self.fx
+                            .explosion(x as f32 + 0.5, y as f32 + 0.5, Rgb(140, 255, 90));
                         self.fx.blood(x as f32 + 0.5, y as f32 + 0.5, 0.6, 16);
                         self.emit(Sfx::Explosion, x, y, 0.8);
                         self.explode(x, y, 2, 2 + lvl / 2, DeathCause::OwnFire, false);
@@ -3107,7 +5077,10 @@ impl Game {
             if blood > 0 {
                 self.p.hp -= blood;
                 self.p.mp = 0;
-                self.msg(format!("Your blood fuels the spell (-{} HP).", blood), Rgb(200, 40, 60));
+                self.msg(
+                    format!("Your blood fuels the spell (-{} HP).", blood),
+                    Rgb(200, 40, 60),
+                );
                 self.fx.blood(fx, fy, 0.3, 8);
             } else {
                 self.p.mp -= cost;
@@ -3126,7 +5099,9 @@ impl Game {
         loop {
             let here = self.items_here();
             // Pick from the back so earlier indices stay valid; stop when full.
-            let Some(&ii) = here.iter().rev().find(|&&i| self.level.items[i].item == Item::Amulet || self.p.inv.len() < self.inv_cap()) else {
+            let Some(&ii) = here.iter().rev().find(|&&i| {
+                self.level.items[i].item == Item::Amulet || self.p.inv.len() < self.inv_cap()
+            }) else {
                 break;
             };
             if self.pickup_index(ii).is_none() {
@@ -3156,15 +5131,23 @@ impl Game {
             self.level.items.remove(ii);
             self.p.has_amulet = true;
             let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
-            self.fx.ring(fx, fy, 60, 4.0, Rgb(255, 210, 60), &['*', '+', '$'], 1.0);
+            self.fx
+                .ring(fx, fy, 60, 4.0, Rgb(255, 210, 60), &['*', '+', '$'], 1.0);
             self.fx.flash(Rgb(255, 200, 40), 0.8);
             self.fx.light(fx, fy, [2.5, 2.0, 0.6], 6.0, 2.0);
             self.fx.shake = 1.5;
             self.emit(Sfx::Amulet, px, py, 1.0);
-            self.msg("You seize the AMULET OF GRAZZARK! It throbs with dark power.", Rgb(255, 215, 60));
-            self.msg("The whole dungeon shudders. Now RETURN TO THE SURFACE alive!", Rgb(255, 150, 60));
-            self.msg("Every creature in GRAZZARK's halls now knows where you are...", Rgb(255, 90, 60));
-            self.msg("The faces in the walls twist in terror. Some of them go still forever.", Rgb(220, 160, 160));
+            self.msg(
+                "You seize the AMULET OF GRAZZARK! His heart beats against your palm.",
+                Rgb(255, 215, 60),
+            );
+            self.msg("The whole dungeon shudders awake. Carry his heart into the SUNLIGHT and it will burn!", Rgb(255, 150, 60));
+            self.msg(
+                "Every creature in GRAZZARK's halls now knows where you are...",
+                Rgb(255, 90, 60),
+            );
+            self.msg("The faces in the walls begin to shriek in torment. Some of them fall silent forever.", Rgb(220, 160, 160));
+            self.crumble_all_wards();
             self.rouse_all();
             self.combat_heat = 1.0;
             return Some(100.0);
@@ -3177,7 +5160,13 @@ impl Game {
         self.msg(format!("You pick up {}.", item.name()), Rgb(220, 220, 150));
         if let Some(u) = item.unique() {
             let d = &UNIQUES[u];
-            self.msg(format!("A unique treasure! {} (equip it from the inventory)", d.desc), d.color);
+            self.msg(
+                format!(
+                    "A unique treasure! {} (equip it from the inventory)",
+                    d.desc
+                ),
+                d.color,
+            );
         }
         self.p.inv.push(item);
         self.emit(Sfx::Pickup, px, py, 0.6);
@@ -3190,7 +5179,11 @@ impl Game {
         }
         let it = self.p.inv.remove(i);
         let (px, py) = (self.p.x, self.p.y);
-        self.level.items.push(FloorItem { x: px, y: py, item: it });
+        self.level.items.push(FloorItem {
+            x: px,
+            y: py,
+            item: it,
+        });
         self.msg(format!("You drop {}.", it.name()), GREY);
         Some(50.0)
     }
@@ -3206,7 +5199,10 @@ impl Game {
         }
         let it = self.p.inv[i];
         if matches!(it, Item::Scroll(_)) && self.cursed(Curse::Hush) {
-            self.msg("You open the scroll, but no sound will leave your throat.", Curse::Hush.color());
+            self.msg(
+                "You open the scroll, but no sound will leave your throat.",
+                Curse::Hush.color(),
+            );
             return None;
         }
         let (px, py) = (self.p.x, self.p.y);
@@ -3220,23 +5216,35 @@ impl Game {
                         let amt = self.potency(amt);
                         self.p.hp = (self.p.hp + amt).min(self.p.max_hp);
                         self.p.poison = 0;
-                        self.msg(format!("You feel much better (+{} HP).", amt), Rgb(255, 120, 120));
+                        self.msg(
+                            format!("You feel much better (+{} HP).", amt),
+                            Rgb(255, 120, 120),
+                        );
                     }
                     Potion::Mana => {
                         let amt = self.potency(10 + self.p.max_mp / 2);
                         self.p.mp = (self.p.mp + amt).min(self.p.max_mp);
-                        self.msg(format!("Arcane energy surges through you (+{} MP).", amt), Rgb(120, 150, 255));
+                        self.msg(
+                            format!("Arcane energy surges through you (+{} MP).", amt),
+                            Rgb(120, 150, 255),
+                        );
                     }
                     Potion::Might => {
                         let n = if self.bonus.alchemy >= 3 { 2 } else { 1 };
                         self.p.extra_dmg += n;
-                        self.msg(format!("Your muscles swell with power! (+{} damage)", n), Rgb(255, 170, 60));
+                        self.msg(
+                            format!("Your muscles swell with power! (+{} damage)", n),
+                            Rgb(255, 170, 60),
+                        );
                     }
                     Potion::Vigor => {
                         let n = self.potency(5);
                         self.p.max_hp += n;
                         self.p.hp += n;
-                        self.msg(format!("You feel hardier! (+{} max HP)", n), Rgb(120, 255, 120));
+                        self.msg(
+                            format!("You feel hardier! (+{} max HP)", n),
+                            Rgb(120, 255, 120),
+                        );
                     }
                     Potion::Cure => {
                         self.p.poison = 0;
@@ -3261,7 +5269,8 @@ impl Game {
                                 break;
                             }
                         }
-                        self.fx.rise(fx, fy, 25, Rgb(180, 120, 255), &['*', '.', '+'], 0.8);
+                        self.fx
+                            .rise(fx, fy, 25, Rgb(180, 120, 255), &['*', '.', '+'], 0.8);
                         self.p.x = dest.0;
                         self.p.y = dest.1;
                         self.emit(Sfx::Blink, dest.0, dest.1, 0.8);
@@ -3275,7 +5284,9 @@ impl Game {
                         let h = self.level.h;
                         for y in 0..h {
                             for x in 0..w {
-                                let near_open = DIRS.iter().any(|&(dx, dy)| !self.level.tile(x + dx, y + dy).opaque())
+                                let near_open = DIRS
+                                    .iter()
+                                    .any(|&(dx, dy)| !self.level.tile(x + dx, y + dy).opaque())
                                     || !self.level.tile(x, y).opaque();
                                 if near_open {
                                     let i = self.level.idx(x, y);
@@ -3284,11 +5295,15 @@ impl Game {
                             }
                         }
                         self.emit(Sfx::Amulet, px, py, 0.4);
-                        self.msg("A map of the level burns itself into your mind.", Rgb(230, 220, 160));
+                        self.msg(
+                            "A map of the level burns itself into your mind.",
+                            Rgb(230, 220, 160),
+                        );
                     }
                     Scroll::Fire => {
                         self.fx.explosion(fx, fy, Rgb(255, 120, 20));
-                        self.fx.ring(fx, fy, 50, 4.0, Rgb(255, 140, 30), &['*', '#', '%'], 0.6);
+                        self.fx
+                            .ring(fx, fy, 50, 4.0, Rgb(255, 140, 30), &['*', '#', '%'], 0.6);
                         self.emit(Sfx::Explosion, px, py, 1.0);
                         self.msg("A ring of fire erupts around you!", Rgb(255, 150, 60));
                         let ids = self.monsters_within(px, py, 2.9, true);
@@ -3300,10 +5315,23 @@ impl Game {
                     }
                     Scroll::Vision => {
                         self.p.vision = 10;
-                        self.fx.ring(fx, fy, 40, 5.0, Rgb(255, 120, 90), &['o', '.', '*'], 0.7);
+                        self.fx
+                            .ring(fx, fy, 40, 5.0, Rgb(255, 120, 90), &['o', '.', '*'], 0.7);
                         self.emit(Sfx::Whisper, px, py, 0.8);
-                        let n = self.level.monsters.iter().filter(|m| self.vision_shows(m) && m.faction != Faction::Ally).count();
-                        self.msg(format!("Your eyes burn red. You sense {} creature{} nearby.", n, if n == 1 { "" } else { "s" }), Rgb(255, 140, 110));
+                        let n = self
+                            .level
+                            .monsters
+                            .iter()
+                            .filter(|m| self.vision_shows(m) && m.faction != Faction::Ally)
+                            .count();
+                        self.msg(
+                            format!(
+                                "Your eyes burn red. You sense {} creature{} nearby.",
+                                n,
+                                if n == 1 { "" } else { "s" }
+                            ),
+                            Rgb(255, 140, 110),
+                        );
                     }
                 }
                 Some(100.0)
@@ -3325,7 +5353,11 @@ impl Game {
             }
             Item::Trinket(u) => {
                 let d = &UNIQUES[u as usize];
-                let slot = if d.slot == USlot::Ring { &mut self.p.ring } else { &mut self.p.neck };
+                let slot = if d.slot == USlot::Ring {
+                    &mut self.p.ring
+                } else {
+                    &mut self.p.neck
+                };
                 let old = slot.replace(u);
                 match old {
                     Some(o) => self.p.inv[i] = Item::Trinket(o),
@@ -3333,7 +5365,11 @@ impl Game {
                         self.p.inv.remove(i);
                     }
                 }
-                let verb = if d.slot == USlot::Ring { "slip on" } else { "fasten" };
+                let verb = if d.slot == USlot::Ring {
+                    "slip on"
+                } else {
+                    "fasten"
+                };
                 self.msg(format!("You {} {}. {}", verb, d.name, d.desc), d.color);
                 self.emit(Sfx::Amulet, px, py, 0.4);
                 Some(100.0)
@@ -3347,7 +5383,10 @@ impl Game {
         match self.level.tile(px, py) {
             Tile::StairsDown => {
                 if self.depth >= 10 {
-                    self.msg("The stair plunges into a wall of black flame. Nothing lies deeper.", Rgb(255, 120, 80));
+                    self.msg(
+                        "The stair plunges into a wall of black flame. Nothing lies deeper.",
+                        Rgb(255, 120, 80),
+                    );
                     None
                 } else {
                     self.change_level(true);
@@ -3357,11 +5396,17 @@ impl Game {
             Tile::StairsUp => {
                 if self.depth == 1 {
                     if self.p.has_amulet {
-                        self.msg("You climb into the light of day, the Amulet blazing in your fist!", Rgb(255, 230, 120));
+                        self.msg(
+                            "You climb into the light of day, the Amulet blazing in your fist!",
+                            Rgb(255, 230, 120),
+                        );
                         self.over = Some(Outcome::Won);
                         Some(0.0)
                     } else {
-                        self.msg("You cannot leave without the Amulet of GRAZZARK!", Rgb(255, 160, 80));
+                        self.msg(
+                            "You cannot leave without the Amulet of GRAZZARK!",
+                            Rgb(255, 160, 80),
+                        );
                         None
                     }
                 } else {
@@ -3405,7 +5450,19 @@ impl Game {
                 let chance = self.unique_chance[(new_depth as usize - 1).min(9)];
                 let unique = self.rng.gen::<f32>() < chance;
                 let hp_mult = self.diff().hp;
-                populate(&mut l, &mut self.rng, &mut self.next_id, luck, self.time, unique, hp_mult);
+                populate(
+                    &mut l,
+                    &mut self.rng,
+                    &mut self.next_id,
+                    luck,
+                    self.time,
+                    unique,
+                    hp_mult,
+                );
+                if self.ward_depths.contains(&new_depth) && !self.p.has_amulet {
+                    place_ward(&mut l, &mut self.rng);
+                }
+                l.theme_doors();
                 chart_level(&mut l, self.bonus.carto);
                 l
             }
@@ -3437,7 +5494,12 @@ impl Game {
         self.emit(Sfx::Stairs, sx, sy, 0.8);
         let name = self.floor_name();
         self.msg(
-            format!("You {} to depth {}: {}.", if down { "descend" } else { "climb" }, new_depth, name),
+            format!(
+                "You {} to depth {}: {}.",
+                if down { "descend" } else { "climb" },
+                new_depth,
+                name
+            ),
             Rgb(200, 180, 255),
         );
         if self.p.has_amulet && !down {
@@ -3455,12 +5517,24 @@ impl Game {
             self.spawn_figments();
         }
         if new_depth == 10 && down {
-            self.msg("An overwhelming malice fills these halls. The Warden is near.", Rgb(255, 80, 80));
+            self.msg(
+                "An overwhelming malice fills these halls. The Warden is near.",
+                Rgb(255, 80, 80),
+            );
+            self.weaken_wardens();
+            let n = self.wards_destroyed.min(4);
+            let t = match n {
+                0 => "Four ward prisms still feed the Warden's power. It is at its full, terrible strength.".to_string(),
+                4 => "All four wards are broken. The Warden is a hollow shell of what it was.".to_string(),
+                _ => format!("{} of the 4 wards lie broken. The Warden's power is diminished.", n),
+            };
+            self.msg(t, Rgb(220, 170, 255));
         }
         self.announce_unique();
 
         if self.p.has_amulet && !self.level.hunted {
             self.level.hunted = true;
+            self.infest_level();
             // The dead on this floor stir faster the nearer you are to the surface.
             let f = self.respawn_factor();
             let now = self.time;
@@ -3495,7 +5569,10 @@ impl Game {
                     self.level.monsters.push(m);
                 }
             }
-            self.msg("The Amulet's pulse echoes through the halls. Things are hunting you...", Rgb(255, 120, 80));
+            self.msg(
+                "The Amulet's pulse echoes through the halls. Things are hunting you...",
+                Rgb(255, 120, 80),
+            );
             self.emit(Sfx::Rumble, sx, sy, 1.0);
         }
         if self.amulet_rage() {
@@ -3522,8 +5599,19 @@ impl Game {
             return;
         }
         let kind = M_UNIQUE0 + self.depth as usize - 1;
-        if self.level.monsters.iter().any(|m| m.alive && m.kind == kind) {
-            self.msg(format!("A dreadful presence haunts this floor: {}.", MONSTERS[kind].name), Rgb(210, 140, 255));
+        if self
+            .level
+            .monsters
+            .iter()
+            .any(|m| m.alive && m.kind == kind)
+        {
+            self.msg(
+                format!(
+                    "A dreadful presence haunts this floor: {}.",
+                    MONSTERS[kind].name
+                ),
+                Rgb(210, 140, 255),
+            );
         }
     }
 
@@ -3557,7 +5645,8 @@ impl Game {
         let in_range = dist(mx, my, px, py) <= def.sight as f32 && (self.p.invis == 0 || pd <= 1);
         let los_player = self.level.los(mx, my, px, py);
         // Ghosts sense the living through solid stone once they are hunting.
-        let sees_player = amulet || (hunts_player && in_range && (los_player || (def.ghost && awake)));
+        let sees_player =
+            amulet || (hunts_player && in_range && (los_player || (def.ghost && awake)));
 
         if !awake {
             if hunts_player && in_range && los_player {
@@ -3602,15 +5691,29 @@ impl Game {
                     }
                 }
                 Some(Target::Mon(id)) => match self.mon_index(id) {
-                    Some(oi) if cheb(self.level.monsters[oi].x, self.level.monsters[oi].y, mx, my) <= 10 => tgt,
+                    Some(oi)
+                        if cheb(self.level.monsters[oi].x, self.level.monsters[oi].y, mx, my)
+                            <= 10 =>
+                    {
+                        tgt
+                    }
                     _ => None,
                 },
                 None => None,
             };
             if tgt.is_none() || self.rng.gen_bool(0.15) {
-                let mut best: Option<(Target, i32)> = if sees_player { Some((Target::Player, pd)) } else { None };
+                let mut best: Option<(Target, i32)> = if sees_player {
+                    Some((Target::Player, pd))
+                } else {
+                    None
+                };
+                let can_hit_boss = self.may_harm_boss(mi);
                 for (oi, o) in self.level.monsters.iter().enumerate() {
-                    if oi == mi || !o.alive || !hostile(fac, o.faction) {
+                    if oi == mi
+                        || !o.alive
+                        || !hostile(fac, o.faction)
+                        || (o.def().boss && !can_hit_boss)
+                    {
                         continue;
                     }
                     let d = cheb(o.x, o.y, mx, my);
@@ -3628,10 +5731,30 @@ impl Game {
                     }
                 }
             }
+            // The Warden guards the Amulet and nothing else: it only ever
+            // hunts you, and no monster but your thralls will touch it.
+            if def.boss {
+                tgt = if sees_player {
+                    Some(Target::Player)
+                } else {
+                    None
+                };
+            }
+            if let Some(Target::Mon(id)) = tgt {
+                if self
+                    .mon_index(id)
+                    .map_or(false, |oi| self.level.monsters[oi].def().boss)
+                    && !self.may_harm_boss(mi)
+                {
+                    tgt = None;
+                }
+            }
             // Champions cannot abide a rival: when two meet, they fight at once.
-            if self.level.monsters[mi].champion {
+            if self.level.monsters[mi].champion && !def.boss {
                 let fighting_rival = match tgt {
-                    Some(Target::Mon(id)) => self.mon_index(id).map_or(false, |oi| self.level.monsters[oi].champion),
+                    Some(Target::Mon(id)) => self
+                        .mon_index(id)
+                        .map_or(false, |oi| self.level.monsters[oi].champion),
                     _ => false,
                 };
                 if !fighting_rival {
@@ -3639,7 +5762,10 @@ impl Game {
                         tgt = Some(Target::Mon(rid));
                         if self.level.is_visible(mx, my) && self.rng.gen_bool(0.5) {
                             let who = self.level.monsters[mi].the();
-                            self.msg(format!("{} spots a rival champion and charges!", cap(&who)), Rgb(255, 170, 70));
+                            self.msg(
+                                format!("{} spots a rival champion and charges!", cap(&who)),
+                                Rgb(255, 170, 70),
+                            );
                         }
                     }
                 }
@@ -3649,7 +5775,10 @@ impl Game {
 
         // An overlord thrall's own powers.
         if let Some(Target::Mon(_)) = tgt {
-            if self.level.monsters[mi].thrall && self.level.monsters[mi].overlord && self.thrall_power(mi) {
+            if self.level.monsters[mi].thrall
+                && self.level.monsters[mi].overlord
+                && self.thrall_power(mi)
+            {
                 return;
             }
         }
@@ -3679,7 +5808,11 @@ impl Game {
                     return;
                 }
                 if let Some(r) = &def.ranged {
-                    if d > 1 && d <= r.range && self.level.los(mx, my, tx, ty) && self.rng.gen::<f32>() < r.chance {
+                    if d > 1
+                        && d <= r.range
+                        && self.level.los(mx, my, tx, ty)
+                        && self.rng.gen::<f32>() < r.chance
+                    {
                         self.monster_ranged(mi, t);
                         return;
                     }
@@ -3757,11 +5890,25 @@ impl Game {
         let (tx, ty) = self.target_pos(t);
         let d = cheb(mx, my, tx, ty);
         let vis = self.level.is_visible(mx, my);
-        let name = cap(def.name);
+        let name = cap(&self.level.monsters[mi].the());
+        let weak = self.level.monsters[mi].ward_weaken;
         for &ab in def.abil {
+            // Broken wards strip the Warden of its powers one by one.
+            if def.boss
+                && (weak >= 4
+                    || (weak >= 2 && matches!(ab, MAbil::Summon(..)))
+                    || (weak >= 3 && ab == MAbil::Quake))
+            {
+                continue;
+            }
             match ab {
                 MAbil::Summon(k, n) => {
-                    let minions = self.level.monsters.iter().filter(|m| m.alive && m.summoned && m.faction == fac && m.kind == k).count();
+                    let minions = self
+                        .level
+                        .monsters
+                        .iter()
+                        .filter(|m| m.alive && m.summoned && m.faction == fac && m.kind == k)
+                        .count();
                     if minions >= 6 || !self.rng.gen_bool(0.3) {
                         continue;
                     }
@@ -3778,14 +5925,18 @@ impl Game {
                             }
                             m.target = Some(t);
                             self.level.monsters.push(m);
-                            self.fx.mist(sx as f32 + 0.5, sy as f32 + 0.5, Rgb(160, 120, 200));
+                            self.fx
+                                .mist(sx as f32 + 0.5, sy as f32 + 0.5, Rgb(160, 120, 200));
                             made += 1;
                         }
                     }
                     if made > 0 {
                         self.emit(Sfx::Voice(def.voice, Mood::Alert), mx, my, 1.0);
                         if vis {
-                            self.msg(format!("{} calls its brood to its side!", name), Rgb(220, 150, 255));
+                            self.msg(
+                                format!("{} calls its brood to its side!", name),
+                                Rgb(220, 150, 255),
+                            );
                         }
                         self.level.monsters[mi].abil_cd = self.time + 900.0;
                         return true;
@@ -3796,7 +5947,10 @@ impl Game {
                     let mut i = 0;
                     while i < self.level.corpses.len() && raised < 2 {
                         let c = &self.level.corpses[i];
-                        if cheb(c.x, c.y, mx, my) <= 6 && self.level.monster_at(c.x, c.y).is_none() && !(c.x == self.p.x && c.y == self.p.y) {
+                        if cheb(c.x, c.y, mx, my) <= 6
+                            && self.level.monster_at(c.x, c.y).is_none()
+                            && !(c.x == self.p.x && c.y == self.p.y)
+                        {
                             let c = self.level.corpses.remove(i);
                             let id = self.new_id();
                             let mut m = Monster::new(id, c.kind, c.x, c.y, self.time + 80.0);
@@ -3807,7 +5961,8 @@ impl Game {
                             }
                             m.target = Some(t);
                             self.level.monsters.push(m);
-                            self.fx.mist(c.x as f32 + 0.5, c.y as f32 + 0.5, Rgb(200, 120, 255));
+                            self.fx
+                                .mist(c.x as f32 + 0.5, c.y as f32 + 0.5, Rgb(200, 120, 255));
                             self.emit(Sfx::Revive, c.x, c.y, 1.0);
                             raised += 1;
                         } else {
@@ -3816,15 +5971,25 @@ impl Game {
                     }
                     if raised > 0 {
                         if vis {
-                            self.msg(format!("{} raises the dead to serve it!", name), Rgb(200, 140, 255));
+                            self.msg(
+                                format!("{} raises the dead to serve it!", name),
+                                Rgb(200, 140, 255),
+                            );
                         }
                         self.level.monsters[mi].abil_cd = self.time + 700.0;
                         return true;
                     }
                 }
-                MAbil::Blink | MAbil::Charge => {
-                    let charge = ab == MAbil::Charge;
-                    let ok_range = if charge { (2..=6).contains(&d) } else { (3..=8).contains(&d) };
+                MAbil::Blink | MAbil::Charge | MAbil::Pounce => {
+                    let pounce = ab == MAbil::Pounce;
+                    let charge = ab == MAbil::Charge || pounce;
+                    let ok_range = if pounce {
+                        (2..=4).contains(&d)
+                    } else if charge {
+                        (2..=6).contains(&d)
+                    } else {
+                        (3..=8).contains(&d)
+                    };
                     if !ok_range || !self.level.los(mx, my, tx, ty) || !self.rng.gen_bool(0.35) {
                         continue;
                     }
@@ -3846,11 +6011,23 @@ impl Game {
                     let Some((nx, ny, _)) = best else { continue };
                     let (ofx, ofy) = (mx as f32 + 0.5, my as f32 + 0.5);
                     if charge {
-                        self.fx.burst(ofx, ofy, 0.1, 14, Rgb(150, 130, 110), &['.', ',', 'o'], 0.5, 1.5, -0.2, false);
+                        self.fx.burst(
+                            ofx,
+                            ofy,
+                            0.1,
+                            14,
+                            Rgb(150, 130, 110),
+                            &['.', ',', 'o'],
+                            0.5,
+                            1.5,
+                            -0.2,
+                            false,
+                        );
                         self.emit(Sfx::Stomp, mx, my, 0.9);
                         self.fx.shake = self.fx.shake.max(0.6);
                     } else {
-                        self.fx.rise(ofx, ofy, 18, Rgb(160, 200, 255), &['*', '.', '+'], 0.7);
+                        self.fx
+                            .rise(ofx, ofy, 18, Rgb(160, 200, 255), &['*', '.', '+'], 0.7);
                         self.emit(Sfx::Blink, mx, my, 0.8);
                     }
                     {
@@ -3864,15 +6041,542 @@ impl Game {
                         m.abil_cd = self.time + if charge { 500.0 } else { 600.0 };
                     }
                     if vis || self.level.is_visible(nx, ny) {
-                        let txt = if charge { format!("{} CHARGES!", name) } else { format!("{} vanishes and reappears beside you!", name) };
-                        let txt = if t == Target::Player { txt } else { format!("{} lunges across the room!", name) };
+                        let txt = if pounce {
+                            format!("{} pounces!", name)
+                        } else if charge {
+                            format!("{} CHARGES!", name)
+                        } else {
+                            format!("{} vanishes and reappears beside you!", name)
+                        };
+                        let txt = if t == Target::Player {
+                            txt
+                        } else {
+                            format!("{} lunges across the room!", name)
+                        };
                         self.msg(txt, Rgb(255, 150, 120));
                     }
-                    if charge {
-                        // The charge carries extra force into the blow.
+                    if pounce {
+                        self.monster_melee(mi, t);
+                    } else if charge {
+                        // The charge carries extra force into the blow, and hurls the target back.
+                        let before = self.target_hp(t);
                         self.level.monsters[mi].charging = true;
                         self.monster_melee(mi, t);
-                        self.level.monsters[mi].charging = false;
+                        if mi < self.level.monsters.len() {
+                            self.level.monsters[mi].charging = false;
+                        }
+                        if self.over.is_none() && self.target_hp(t) < before {
+                            let n = self.rng.gen_range(1..=2);
+                            self.knock_back(mi, t, n);
+                        }
+                    }
+                    return true;
+                }
+                MAbil::Rally => {
+                    if fac == Faction::Ally || !self.rng.gen_bool(0.35) {
+                        continue;
+                    }
+                    let mut n = 0;
+                    for (oi, o) in self.level.monsters.iter_mut().enumerate() {
+                        if oi != mi
+                            && o.alive
+                            && o.faction == fac
+                            && cheb(o.x, o.y, mx, my) <= 10
+                            && (!o.awake || o.target.is_none())
+                        {
+                            o.awake = true;
+                            o.target = Some(t);
+                            o.last_known = Some((tx, ty));
+                            n += 1;
+                        }
+                    }
+                    if n == 0 {
+                        continue;
+                    }
+                    self.emit(Sfx::Voice(def.voice, Mood::Alert), mx, my, 1.0);
+                    if vis || cheb(mx, my, self.p.x, self.p.y) <= 12 {
+                        self.msg(
+                            format!("{} calls out, and its kin answer!", name),
+                            Rgb(255, 170, 90),
+                        );
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 1500.0;
+                    return true;
+                }
+                MAbil::Web => {
+                    if !(2..=5).contains(&d)
+                        || !self.level.los(mx, my, tx, ty)
+                        || !self.rng.gen_bool(0.35)
+                    {
+                        continue;
+                    }
+                    self.fx.bolt(
+                        mx as f32 + 0.5,
+                        my as f32 + 0.5,
+                        tx as f32 + 0.5,
+                        ty as f32 + 0.5,
+                        12.0,
+                        '#',
+                        Rgb(230, 230, 230),
+                        None,
+                        BoltEnd::None,
+                    );
+                    self.emit(Sfx::Arrow, mx, my, 0.6);
+                    let turns = self.rng.gen_range(2..=3);
+                    self.root(t, turns);
+                    if t == Target::Player {
+                        self.msg(
+                            format!("{} spits a sticky web over you. You are stuck fast!", name),
+                            Rgb(230, 230, 200),
+                        );
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 800.0;
+                    return true;
+                }
+                MAbil::Grab => {
+                    if d != 1
+                        || !self.level.can_step(mx, my, tx - mx, ty - my)
+                        || !self.rng.gen_bool(0.3)
+                    {
+                        continue;
+                    }
+                    self.root(t, 2);
+                    if t == Target::Player {
+                        self.msg(
+                            format!("{} seizes you in a cold, crushing grip!", name),
+                            Rgb(200, 220, 160),
+                        );
+                    }
+                    self.level.monsters[mi].lunge = ((tx - mx) as f32, (ty - my) as f32, 1.0);
+                    self.level.monsters[mi].abil_cd = self.time + 700.0;
+                    return true;
+                }
+                MAbil::Guard => {
+                    let m = &self.level.monsters[mi];
+                    if m.guard > 0 || d > 3 || !self.rng.gen_bool(0.3) {
+                        continue;
+                    }
+                    self.level.monsters[mi].guard = 5;
+                    self.emit(Sfx::Clang, mx, my, 0.6);
+                    if vis {
+                        let txt = if def.name == "gargoyle" {
+                            format!("{}'s stone hide hardens!", name)
+                        } else {
+                            format!("{} raises its guard!", name)
+                        };
+                        self.msg(txt, Rgb(190, 190, 210));
+                        self.fx.ring(
+                            mx as f32 + 0.5,
+                            my as f32 + 0.5,
+                            12,
+                            0.8,
+                            Rgb(180, 180, 220),
+                            &['+', '.'],
+                            0.5,
+                        );
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 1200.0;
+                    return true;
+                }
+                MAbil::Flurry => {
+                    if d != 1
+                        || !self.level.can_step(mx, my, tx - mx, ty - my)
+                        || !self.rng.gen_bool(0.35)
+                    {
+                        continue;
+                    }
+                    if vis {
+                        self.msg(format!("{} strikes in a frenzy!", name), Rgb(255, 160, 100));
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 500.0;
+                    for _ in 0..2 {
+                        if self.over.is_some()
+                            || !self.level.monsters[mi].alive
+                            || self.target_hp(t) <= 0
+                        {
+                            break;
+                        }
+                        self.monster_melee(mi, t);
+                    }
+                    return true;
+                }
+                MAbil::Blind => {
+                    if d > 4 || !self.level.los(mx, my, tx, ty) || !self.rng.gen_bool(0.3) {
+                        continue;
+                    }
+                    match t {
+                        Target::Player => {
+                            self.p.blind = self.p.blind.max(self.rng.gen_range(3..=4));
+                            let txt = if def.faction == Faction::Dark {
+                                format!("{} conjures a globe of darkness around you! You can barely see!", name)
+                            } else {
+                                format!("{} flings grit into your eyes! You can barely see!", name)
+                            };
+                            self.msg(txt, Rgb(200, 180, 140));
+                            self.fx.flash(Rgb(40, 30, 20), 0.5);
+                            self.refresh_view();
+                        }
+                        Target::Mon(_) => {
+                            self.stagger(t, 100.0);
+                        }
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 1000.0;
+                    return true;
+                }
+                MAbil::LifeSap => {
+                    if d > 5 || !self.level.los(mx, my, tx, ty) || !self.rng.gen_bool(0.3) {
+                        continue;
+                    }
+                    let dmg = self.mon_damage(mi, (2, 5)) + self.depth as i32 / 3;
+                    self.fx.bolt(
+                        tx as f32 + 0.5,
+                        ty as f32 + 0.5,
+                        mx as f32 + 0.5,
+                        my as f32 + 0.5,
+                        9.0,
+                        'o',
+                        Rgb(170, 255, 200),
+                        Some([0.4, 1.2, 0.8]),
+                        BoltEnd::None,
+                    );
+                    self.emit(Sfx::Whisper, mx, my, 0.9);
+                    {
+                        let m = &mut self.level.monsters[mi];
+                        m.hp = (m.hp + dmg).min(m.max_hp);
+                    }
+                    if t == Target::Player {
+                        self.msg(
+                            format!(
+                                "{} saps your life! ({} damage, and it grows stronger)",
+                                name, dmg
+                            ),
+                            Rgb(170, 255, 200),
+                        );
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 700.0;
+                    self.hurt(mi, t, dmg, false);
+                    return true;
+                }
+                MAbil::Quake => {
+                    if d > 2 || !self.rng.gen_bool(0.3) {
+                        continue;
+                    }
+                    let mid = self.level.monsters[mi].id;
+                    self.level.monsters[mi].abil_cd = self.time + 900.0;
+                    self.fx.ring(
+                        mx as f32 + 0.5,
+                        my as f32 + 0.5,
+                        40,
+                        2.5,
+                        Rgb(150, 130, 100),
+                        &['.', ',', 'o', '#'],
+                        0.7,
+                    );
+                    self.fx.shake = self.fx.shake.max(1.0);
+                    self.emit(Sfx::Stomp, mx, my, 1.0);
+                    self.emit(Sfx::Rumble, mx, my, 0.8);
+                    if vis || cheb(mx, my, self.p.x, self.p.y) <= 8 {
+                        self.msg(
+                            format!("{} slams the ground! The floor bucks and heaves!", name),
+                            Rgb(220, 180, 120),
+                        );
+                    }
+                    let victims: Vec<u32> = self
+                        .level
+                        .monsters
+                        .iter()
+                        .enumerate()
+                        .filter(|(oi, o)| {
+                            *oi != mi
+                                && o.alive
+                                && cheb(o.x, o.y, mx, my) <= 2
+                                && !(fac == Faction::Ally && o.faction == Faction::Ally)
+                                && !(def.boss && o.faction != Faction::Ally)
+                        })
+                        .map(|(_, o)| o.id)
+                        .collect();
+                    if fac != Faction::Ally && cheb(self.p.x, self.p.y, mx, my) <= 2 {
+                        let dmg = self.mon_damage(mi, (2, 6));
+                        self.msg(
+                            format!("The shockwave hits you for {}!", dmg),
+                            Rgb(255, 90, 90),
+                        );
+                        self.player_hit(dmg, DeathCause::Monster(kind), true);
+                        if self.over.is_none() {
+                            self.stagger(Target::Player, 100.0);
+                        }
+                    }
+                    for id in victims {
+                        if self.over.is_some() {
+                            break;
+                        }
+                        if let Some(oi) = self.mon_index(id) {
+                            let dmg = self.mon_damage(mi, (2, 6));
+                            self.level.monsters[oi].stun = self.level.monsters[oi].stun.max(1);
+                            self.damage_monster(oi, dmg, Src::Mon(mid));
+                        }
+                    }
+                    return true;
+                }
+                MAbil::Throw => {
+                    if !(2..=7).contains(&d)
+                        || !self.level.los(mx, my, tx, ty)
+                        || !self.rng.gen_bool(0.3)
+                    {
+                        continue;
+                    }
+                    let mid = self.level.monsters[mi].id;
+                    let (hx, hy, hit) = self.trace(mx, my, tx, ty, d + 2, Some(mid));
+                    self.fx.bolt(
+                        mx as f32 + 0.5,
+                        my as f32 + 0.5,
+                        hx as f32 + 0.5,
+                        hy as f32 + 0.5,
+                        9.0,
+                        'O',
+                        Rgb(150, 140, 130),
+                        None,
+                        BoltEnd::Sparks(Rgb(150, 140, 130)),
+                    );
+                    self.emit(Sfx::Stomp, hx, hy, 0.8);
+                    if vis {
+                        self.msg(format!("{} hurls a boulder!", name), Rgb(220, 180, 140));
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 700.0;
+                    match hit {
+                        Some(Target::Player) => {
+                            let roll = self.rng.gen_range(1..=20);
+                            if roll == 20 || (roll != 1 && roll + def.hit >= 10 + self.player_ac())
+                            {
+                                let dmg = self.mon_damage(mi, (4, 10));
+                                self.msg(
+                                    format!("The boulder smashes into you for {}!", dmg),
+                                    Rgb(255, 90, 90),
+                                );
+                                self.player_hit(dmg, DeathCause::Monster(kind), true);
+                            } else {
+                                self.msg("The boulder thunders past you.", GREY);
+                            }
+                        }
+                        Some(Target::Mon(oid)) => {
+                            if let Some(oi) = self.mon_index(oid) {
+                                if self.rng.gen_bool(0.75) {
+                                    let dmg = self.mon_damage(mi, (4, 10));
+                                    self.damage_monster(oi, dmg, Src::Mon(mid));
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                    return true;
+                }
+                MAbil::Spores => {
+                    if d > 3 || !self.rng.gen_bool(0.35) {
+                        continue;
+                    }
+                    let until = self.time + 500.0;
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            let (cx, cy) = (mx + dx, my + dy);
+                            if self.level.tile(cx, cy).walkable() && !self.level.cloud_at(cx, cy) {
+                                self.level.clouds.push(Cloud {
+                                    x: cx,
+                                    y: cy,
+                                    until,
+                                });
+                            }
+                        }
+                    }
+                    self.fx.burst(
+                        mx as f32 + 0.5,
+                        my as f32 + 0.5,
+                        0.4,
+                        30,
+                        Rgb(220, 160, 210),
+                        &['*', '.', 'o', ':'],
+                        1.2,
+                        1.4,
+                        -0.1,
+                        false,
+                    );
+                    self.emit(Sfx::Whisper, mx, my, 0.8);
+                    if vis {
+                        self.msg(
+                            format!("{} bursts, releasing a cloud of choking spores!", name),
+                            Rgb(230, 160, 220),
+                        );
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 800.0;
+                    if fac != Faction::Ally && cheb(self.p.x, self.p.y, mx, my) <= 1 {
+                        self.spore_player();
+                    }
+                    return true;
+                }
+                MAbil::Split => {
+                    let (hp, max_hp) = (self.level.monsters[mi].hp, self.level.monsters[mi].max_hp);
+                    let kin = self
+                        .level
+                        .monsters
+                        .iter()
+                        .filter(|o| o.alive && o.kind == kind)
+                        .count();
+                    if hp < 8 || hp * 10 >= max_hp * 8 || kin >= 10 || !self.rng.gen_bool(0.35) {
+                        continue;
+                    }
+                    let Some((sx, sy)) = self.free_adjacent(mx, my) else {
+                        continue;
+                    };
+                    let half = hp / 2;
+                    let id = self.new_id();
+                    let mut m = Monster::new(id, kind, sx, sy, self.time + 60.0);
+                    m.faction = fac;
+                    m.summoned = true;
+                    m.awake = true;
+                    m.target = Some(t);
+                    m.hp = half;
+                    m.max_hp = half;
+                    self.level.monsters.push(m);
+                    {
+                        let me = &mut self.level.monsters[mi];
+                        me.hp -= half;
+                        me.max_hp = (me.max_hp - half).max(me.hp);
+                        me.abil_cd = self.time + 600.0;
+                    }
+                    self.fx.burst(
+                        mx as f32 + 0.5,
+                        my as f32 + 0.5,
+                        0.2,
+                        14,
+                        def.color,
+                        &['o', '.', '~'],
+                        0.8,
+                        0.8,
+                        0.3,
+                        false,
+                    );
+                    if vis {
+                        self.msg(
+                            format!("{} quivers and splits in two!", name),
+                            Rgb(150, 220, 120),
+                        );
+                    }
+                    return true;
+                }
+                MAbil::Mend => {
+                    if !self.rng.gen_bool(0.4) {
+                        continue;
+                    }
+                    let pick = (0..self.level.monsters.len()).find(|&j| {
+                        let o = &self.level.monsters[j];
+                        o.alive
+                            && o.faction == fac
+                            && o.hp * 10 < o.max_hp * 7
+                            && cheb(o.x, o.y, mx, my) <= 6
+                            && self.level.los(mx, my, o.x, o.y)
+                    });
+                    let Some(j) = pick else { continue };
+                    let heal = 6 + self.depth as i32;
+                    let (ox, oy) = (self.level.monsters[j].x, self.level.monsters[j].y);
+                    {
+                        let o = &mut self.level.monsters[j];
+                        o.hp = (o.hp + heal).min(o.max_hp);
+                    }
+                    self.fx.heal(ox as f32 + 0.5, oy as f32 + 0.5);
+                    self.emit(Sfx::Heal, mx, my, 0.7);
+                    if vis || self.level.is_visible(ox, oy) {
+                        let who = if j == mi {
+                            "its own".to_string()
+                        } else {
+                            format!("{}'s", self.level.monsters[j].the())
+                        };
+                        self.msg(
+                            format!("{} chants, and {} wounds close!", name, who),
+                            Rgb(150, 230, 150),
+                        );
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 600.0;
+                    return true;
+                }
+                MAbil::Bash => {
+                    if d != 1
+                        || !self.level.can_step(mx, my, tx - mx, ty - my)
+                        || !self.rng.gen_bool(0.3)
+                    {
+                        continue;
+                    }
+                    let before = self.target_hp(t);
+                    self.level.monsters[mi].abil_cd = self.time + 600.0;
+                    self.monster_melee(mi, t);
+                    if self.over.is_none() && self.target_hp(t) < before && self.stagger(t, 100.0) {
+                        if t == Target::Player {
+                            self.msg(
+                                format!(
+                                    "{} slams its shield into you, knocking you off balance!",
+                                    name
+                                ),
+                                Rgb(230, 190, 120),
+                            );
+                        }
+                        self.emit(Sfx::Clang, tx, ty, 0.8);
+                    }
+                    return true;
+                }
+                MAbil::Gaze => {
+                    if d > 5 || !self.level.los(mx, my, tx, ty) || !self.rng.gen_bool(0.25) {
+                        continue;
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 1000.0;
+                    if self.stagger(t, 200.0) {
+                        if t == Target::Player {
+                            self.msg(
+                                format!("{} meets your eyes... your limbs turn to stone!", name),
+                                Rgb(200, 255, 120),
+                            );
+                            self.fx.flash(Rgb(150, 160, 120), 0.4);
+                        }
+                        self.fx.bolt(
+                            mx as f32 + 0.5,
+                            my as f32 + 0.5,
+                            tx as f32 + 0.5,
+                            ty as f32 + 0.5,
+                            20.0,
+                            '*',
+                            Rgb(220, 255, 100),
+                            Some([1.0, 1.2, 0.3]),
+                            BoltEnd::None,
+                        );
+                        self.emit(Sfx::Frost, tx, ty, 0.7);
+                        return true;
+                    }
+                }
+                MAbil::Shriek => {
+                    if d > 5 || !self.rng.gen_bool(0.25) {
+                        continue;
+                    }
+                    self.level.monsters[mi].abil_cd = self.time + 900.0;
+                    self.emit(Sfx::Voice(def.voice, Mood::Alert), mx, my, 1.0);
+                    self.fx.ring(
+                        mx as f32 + 0.5,
+                        my as f32 + 0.5,
+                        30,
+                        3.0,
+                        Rgb(180, 230, 255),
+                        &['~', ')', '('],
+                        0.6,
+                    );
+                    if vis {
+                        self.msg(
+                            format!(
+                                "{} lets out a keening shriek that freezes your blood!",
+                                name
+                            ),
+                            Rgb(180, 230, 255),
+                        );
+                    }
+                    let dmg = self.mon_damage(mi, (2, 5));
+                    self.hurt(mi, t, dmg, false);
+                    if self.over.is_none() {
+                        self.stagger(t, 100.0);
                     }
                     return true;
                 }
@@ -3880,6 +6584,173 @@ impl Game {
             }
         }
         false
+    }
+
+    /// Current health of a target (0 if it is gone).
+    fn target_hp(&self, t: Target) -> i32 {
+        match t {
+            Target::Player => self.p.hp + self.p.ward,
+            Target::Mon(id) => self.mon_index(id).map_or(0, |i| self.level.monsters[i].hp),
+        }
+    }
+
+    /// Damage a target with a monster's special power.
+    fn hurt(&mut self, mi: usize, t: Target, dmg: i32, crush: bool) {
+        let kind = self.level.monsters[mi].kind;
+        let mid = self.level.monsters[mi].id;
+        match t {
+            Target::Player => self.player_hit(dmg, DeathCause::Spell(kind), crush),
+            Target::Mon(id) => {
+                if let Some(oi) = self.mon_index(id) {
+                    let (ox, oy) = (self.level.monsters[oi].x, self.level.monsters[oi].y);
+                    self.fx.text(
+                        ox as f32 + 0.5,
+                        oy as f32 + 0.5,
+                        0.9,
+                        dmg.to_string(),
+                        Rgb(255, 160, 80),
+                    );
+                    self.damage_monster(oi, dmg, Src::Mon(mid));
+                }
+            }
+        }
+    }
+
+    /// Stagger a target for `ticks`. The player gets a grace period afterwards
+    /// so paralysis can never chain into a lock; a monster is stunned.
+    pub fn stagger(&mut self, t: Target, ticks: f64) -> bool {
+        match t {
+            Target::Player => {
+                if self.time < self.p.para_guard {
+                    return false;
+                }
+                self.p.para_guard = self.time + ticks + 300.0;
+                self.p.slow += ticks;
+                if self.realtime {
+                    self.p.next_act = self.p.next_act.max(self.time) + ticks;
+                    self.p.slow = 0.0;
+                }
+                true
+            }
+            Target::Mon(id) => match self.mon_index(id) {
+                Some(i) => {
+                    let m = &mut self.level.monsters[i];
+                    m.stun = m.stun.max((ticks / 100.0).ceil() as i32);
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+
+    /// Hold a target in place: the player cannot step away, a monster is stunned.
+    fn root(&mut self, t: Target, turns: i32) {
+        match t {
+            Target::Player => self.p.rooted = self.p.rooted.max(turns),
+            Target::Mon(id) => {
+                if let Some(i) = self.mon_index(id) {
+                    let m = &mut self.level.monsters[i];
+                    m.stun = m.stun.max(turns - 1);
+                }
+            }
+        }
+    }
+
+    /// Hurl a target 1-2 tiles away from monster `mi`; walls hurt.
+    fn knock_back(&mut self, mi: usize, t: Target, n: i32) {
+        let (mx, my, kind, mid) = {
+            let m = &self.level.monsters[mi];
+            (m.x, m.y, m.kind, m.id)
+        };
+        let (tx, ty) = self.target_pos(t);
+        let (dx, dy) = ((tx - mx).signum(), (ty - my).signum());
+        if (dx, dy) == (0, 0) {
+            return;
+        }
+        let mut moved = false;
+        for _ in 0..n {
+            let (cx, cy) = self.target_pos(t);
+            let (nx, ny) = (cx + dx, cy + dy);
+            let blocked = !self.level.can_step(cx, cy, dx, dy)
+                || !self.level.tile(nx, ny).walkable()
+                || self.level.monster_at(nx, ny).is_some()
+                || (nx == self.p.x && ny == self.p.y);
+            if blocked {
+                let dmg = self.rng.gen_range(1..=4);
+                match t {
+                    Target::Player => {
+                        self.msg(
+                            format!("You are slammed into the wall for {}!", dmg),
+                            Rgb(255, 110, 90),
+                        );
+                        self.player_hit(dmg, DeathCause::Monster(kind), true);
+                    }
+                    Target::Mon(id) => {
+                        if let Some(oi) = self.mon_index(id) {
+                            self.damage_monster(oi, dmg, Src::Mon(mid));
+                        }
+                    }
+                }
+                break;
+            }
+            match t {
+                Target::Player => {
+                    self.p.x = nx;
+                    self.p.y = ny;
+                }
+                Target::Mon(id) => {
+                    if let Some(oi) = self.mon_index(id) {
+                        self.level.monsters[oi].x = nx;
+                        self.level.monsters[oi].y = ny;
+                    }
+                }
+            }
+            moved = true;
+        }
+        if moved && t == Target::Player && self.over.is_none() {
+            self.msg("You are hurled backwards!", Rgb(255, 150, 120));
+            self.fx.shake = self.fx.shake.max(0.8);
+            self.after_player_move();
+        }
+    }
+
+    /// Spores take hold of the player: a short paralysis.
+    fn spore_player(&mut self) {
+        if self.stagger(Target::Player, 150.0) {
+            self.msg(
+                "You breathe in the spores! Your muscles seize up!",
+                Rgb(230, 160, 220),
+            );
+            self.fx.flash(Rgb(160, 90, 150), 0.3);
+        }
+    }
+
+    /// Spore clouds drift away in time; anything caught in one is seized.
+    fn tick_clouds(&mut self) {
+        let now = self.time;
+        self.level.clouds.retain(|c| c.until > now);
+        if self.level.clouds.is_empty() {
+            return;
+        }
+        let (px, py) = (self.p.x, self.p.y);
+        if self.level.cloud_at(px, py) {
+            self.spore_player();
+        }
+        for i in 0..self.level.monsters.len() {
+            let (x, y, alive, immune) = {
+                let m = &self.level.monsters[i];
+                (
+                    m.x,
+                    m.y,
+                    m.alive,
+                    m.def().abil.contains(&MAbil::Spores) || m.def().death == DeathKind::Undead,
+                )
+            };
+            if alive && !immune && self.level.cloud_at(x, y) && self.rng.gen_bool(0.5) {
+                let m = &mut self.level.monsters[i];
+                m.stun = m.stun.max(1);
+            }
+        }
     }
 
     /// Ignar's searing aura burns everything standing next to him.
@@ -3897,7 +6768,11 @@ impl Game {
         let mut any = false;
         if cheb(mx, my, self.p.x, self.p.y) <= 1 {
             let dmg = ((self.rng.gen_range(2..=5) + d / 2) as f32 * self.diff().dmg).round() as i32;
-            self.msg(format!("Searing heat from {} scorches you! ({} damage)", MONSTERS[kind].name, dmg), Rgb(255, 130, 40));
+            let who = self.level.monsters[mi].the();
+            self.msg(
+                format!("Searing heat from {} scorches you! ({} damage)", who, dmg),
+                Rgb(255, 130, 40),
+            );
             self.player_hit(dmg, DeathCause::Spell(kind), false);
             any = true;
         }
@@ -3906,7 +6781,13 @@ impl Game {
             .monsters
             .iter()
             .enumerate()
-            .filter(|(i, o)| *i != mi && o.alive && o.id != mid && cheb(o.x, o.y, mx, my) <= 1 && hostile(self.level.monsters[mi].faction, o.faction))
+            .filter(|(i, o)| {
+                *i != mi
+                    && o.alive
+                    && o.id != mid
+                    && cheb(o.x, o.y, mx, my) <= 1
+                    && hostile(self.level.monsters[mi].faction, o.faction)
+            })
             .map(|(i, _)| i)
             .collect();
         for oi in near {
@@ -3915,7 +6796,8 @@ impl Game {
             any = true;
         }
         if any {
-            self.fx.ring(fx, fy, 16, 1.2, Rgb(255, 120, 30), &['^', '*', '~'], 0.4);
+            self.fx
+                .ring(fx, fy, 16, 1.2, Rgb(255, 120, 30), &['^', '*', '~'], 0.4);
             self.fx.light(fx, fy, [2.0, 0.8, 0.2], 2.0, 0.3);
             self.emit(Sfx::Fireball, mx, my, 0.5);
         }
@@ -3929,7 +6811,7 @@ impl Game {
     fn monster_free(&self, mx: i32, my: i32, dx: i32, dy: i32) -> bool {
         let (nx, ny) = (mx + dx, my + dy);
         let t = self.level.tile(nx, ny);
-        (t.walkable() || t == Tile::DoorClosed)
+        (t.walkable() || t.is_closed_door())
             && self.level.can_step(mx, my, dx, dy)
             && self.level.monster_at(nx, ny).is_none()
             && !(nx == self.p.x && ny == self.p.y)
@@ -3940,7 +6822,9 @@ impl Game {
         let m = &self.level.monsters[mi];
         if m.def().ghost {
             let (nx, ny) = (m.x + dx, m.y + dy);
-            self.ghost_can_enter(nx, ny) && self.level.monster_at(nx, ny).is_none() && !(nx == self.p.x && ny == self.p.y)
+            self.ghost_can_enter(nx, ny)
+                && self.level.monster_at(nx, ny).is_none()
+                && !(nx == self.p.x && ny == self.p.y)
         } else {
             self.monster_free(m.x, m.y, dx, dy)
         }
@@ -3986,12 +6870,11 @@ impl Game {
 
     fn move_monster(&mut self, mi: usize, nx: i32, ny: i32) {
         let ghost = self.level.monsters[mi].def().ghost;
-        if !ghost && self.level.tile(nx, ny) == Tile::DoorClosed {
-            self.level.set(nx, ny, Tile::DoorOpen);
-            self.emit(Sfx::Creak, nx, ny, 0.8);
-            self.refresh_view();
+        let t = self.level.tile(nx, ny);
+        if !ghost && t.is_closed_door() {
+            let txt = self.open_door(nx, ny);
             if self.level.is_visible(nx, ny) {
-                self.msg("A door creaks open.", GREY);
+                self.msg(txt.replacen("The ", "A ", 1), GREY);
             }
             return;
         }
@@ -4001,7 +6884,11 @@ impl Game {
             m.y = ny;
         }
         // Distant, unseen footsteps give you something to listen for.
-        if !ghost && !self.level.is_visible(nx, ny) && self.dmap[self.level.idx(nx, ny)] <= 12 && self.rng.gen_bool(0.25) {
+        if !ghost
+            && !self.level.is_visible(nx, ny)
+            && self.dmap[self.level.idx(nx, ny)] <= 12
+            && self.rng.gen_bool(0.25)
+        {
             self.emit(Sfx::Step, nx, ny, 0.45);
         }
     }
@@ -4037,7 +6924,7 @@ impl Game {
                     continue;
                 }
                 let t = self.level.tile(nx, ny);
-                if !(t.walkable() || t == Tile::DoorClosed) {
+                if !(t.walkable() || t.is_closed_door()) {
                     continue;
                 }
             }
@@ -4080,7 +6967,11 @@ impl Game {
     fn mon_damage(&mut self, mi: usize, range: (i32, i32)) -> i32 {
         let base = self.rng.gen_range(range.0..=range.1);
         let m = &self.level.monsters[mi];
-        let diff = if m.faction == Faction::Ally { 1.0 } else { self.diff().dmg };
+        let diff = if m.faction == Faction::Ally {
+            1.0
+        } else {
+            self.diff().dmg
+        };
         ((base as f32) * m.dmg_mult() * diff).round() as i32
     }
 
@@ -4095,7 +6986,11 @@ impl Game {
         let vis = self.level.is_visible(mx, my);
         let ally = fac == Faction::Ally;
         let label = self.level.monsters[mi].the();
-        let aname = if ally { format!("your {}", self.level.monsters[mi].label()) } else { label };
+        let aname = if ally {
+            format!("your {}", self.level.monsters[mi].label())
+        } else {
+            label
+        };
         // A ghost lurking inside the stone.
         let in_wall = def.ghost && self.level.tile(mx, my).opaque();
         match t {
@@ -4110,10 +7005,19 @@ impl Game {
                 if roll == 20 || (roll != 1 && roll + def.hit >= ac) {
                     let dmg = self.mon_damage(mi, def.dmg);
                     if in_wall {
-                        self.msg(format!("An unseen power hits you from a nearby wall for {} damage!", dmg), Rgb(170, 200, 255));
+                        self.msg(
+                            format!(
+                                "An unseen power hits you from a nearby wall for {} damage!",
+                                dmg
+                            ),
+                            Rgb(170, 200, 255),
+                        );
                         self.fx.flash(Rgb(120, 160, 255), 0.35);
                     } else {
-                        self.msg(format!("{} hits you for {}!", cap(&aname), dmg), Rgb(255, 90, 90));
+                        self.msg(
+                            format!("{} hits you for {}!", cap(&aname), dmg),
+                            Rgb(255, 90, 90),
+                        );
                     }
                     let (px, py) = (self.p.x, self.p.y);
                     self.emit(Sfx::Hit, px, py, 0.8);
@@ -4129,43 +7033,81 @@ impl Game {
                         self.on_hit_powers(mi, dmg);
                     }
                     // Thorned Hide (altar boon).
-                    if self.over.is_none() && self.bonus.thorns > 0 && !in_wall && self.level.monsters[mi].alive {
-                        let th: i32 = (0..self.bonus.thorns).map(|_| self.rng.gen_range(1..=3)).sum();
-                        self.fx.text(mx as f32 + 0.5, my as f32 + 0.5, 0.9, th.to_string(), Rgb(170, 220, 110));
+                    if self.over.is_none()
+                        && self.bonus.thorns > 0
+                        && !in_wall
+                        && self.level.monsters[mi].alive
+                    {
+                        let th: i32 = (0..self.bonus.thorns)
+                            .map(|_| self.rng.gen_range(1..=3))
+                            .sum();
+                        self.fx.text(
+                            mx as f32 + 0.5,
+                            my as f32 + 0.5,
+                            0.9,
+                            th.to_string(),
+                            Rgb(170, 220, 110),
+                        );
                         self.damage_monster(mi, th, Src::Player);
                     }
                     // Briarmail: thorns tear at anything that strikes you.
-                    if self.over.is_none() && self.has(UPower::Thorns) && self.level.monsters[mi].alive {
+                    if self.over.is_none()
+                        && self.has(UPower::Thorns)
+                        && self.level.monsters[mi].alive
+                    {
                         let th = 2 + self.depth as i32 / 2;
-                        self.fx.text(mx as f32 + 0.5, my as f32 + 0.5, 0.9, th.to_string(), Rgb(140, 200, 90));
+                        self.fx.text(
+                            mx as f32 + 0.5,
+                            my as f32 + 0.5,
+                            0.9,
+                            th.to_string(),
+                            Rgb(140, 200, 90),
+                        );
                         self.damage_monster(mi, th, Src::Player);
                     }
                 } else if in_wall {
-                    self.msg("Something cold brushes past you from within the wall.", Rgb(150, 160, 200));
+                    self.msg(
+                        "Something cold brushes past you from within the wall.",
+                        Rgb(150, 160, 200),
+                    );
                 } else {
                     self.msg(format!("{} misses you.", cap(&aname)), GREY);
                 }
             }
             Target::Mon(oid) => {
-                let Some(oi) = self.mon_index(oid) else { return };
-                let (okind, ox, oy, ofac) = {
-                    let o = &self.level.monsters[oi];
-                    (o.kind, o.x, o.y, o.faction)
+                let Some(oi) = self.mon_index(oid) else {
+                    return;
                 };
-                let odef = &MONSTERS[okind];
+                let (ox, oy, ofac) = {
+                    let o = &self.level.monsters[oi];
+                    (o.x, o.y, o.faction)
+                };
                 let ovis = self.level.is_visible(ox, oy);
-                let oname = if ofac == Faction::Ally { format!("your {}", self.level.monsters[oi].label()) } else { self.level.monsters[oi].the() };
+                let oname = if ofac == Faction::Ally {
+                    format!("your {}", self.level.monsters[oi].label())
+                } else {
+                    self.level.monsters[oi].the()
+                };
                 let roll = self.rng.gen_range(1..=20);
-                if roll + def.hit >= 10 + odef.ac {
+                if roll + def.hit >= 10 + self.level.monsters[oi].ac() {
                     let dmg = self.mon_damage(mi, def.dmg);
                     if vis || ovis {
-                        self.msg(format!("{} hits {}.", cap(&aname), oname), Rgb(200, 170, 140));
+                        self.msg(
+                            format!("{} hits {}.", cap(&aname), oname),
+                            Rgb(200, 170, 140),
+                        );
                     }
                     self.emit(Sfx::Hit, ox, oy, 0.8);
                     if self.rng.gen_bool(0.4) {
                         self.emit(Sfx::Voice(def.voice, Mood::Attack), mx, my, 0.8);
                     }
-                    self.fx.text(ox as f32 + 0.5, oy as f32 + 0.5, 0.9, dmg.to_string(), Rgb(255, 160, 80));
+                    self.fx.text(
+                        ox as f32 + 0.5,
+                        oy as f32 + 0.5,
+                        0.9,
+                        dmg.to_string(),
+                        Rgb(255, 160, 80),
+                    );
                     if def.abil.contains(&MAbil::Vampiric) {
                         let m = &mut self.level.monsters[mi];
                         m.hp = (m.hp + dmg / 2).min(m.max_hp);
@@ -4176,7 +7118,10 @@ impl Game {
                 }
                 if !(vis || ovis) && self.turns > self.last_fight_msg + 20 {
                     self.last_fight_msg = self.turns;
-                    self.msg("You hear the sounds of a fight somewhere nearby.", Rgb(180, 160, 140));
+                    self.msg(
+                        "You hear the sounds of a fight somewhere nearby.",
+                        Rgb(180, 160, 140),
+                    );
                 }
                 self.noise(mx, my, 6);
             }
@@ -4189,7 +7134,7 @@ impl Game {
         if def.abil.is_empty() {
             return;
         }
-        let name = cap(def.name);
+        let name = cap(&self.level.monsters[mi].the());
         if def.abil.contains(&MAbil::Vampiric) {
             let m = &mut self.level.monsters[mi];
             m.hp = (m.hp + dmg / 2 + 1).min(m.max_hp);
@@ -4206,10 +7151,26 @@ impl Game {
             self.emit(Sfx::Frost, px, py, 0.8);
             self.msg("A deathly chill freezes you in place!", Rgb(150, 210, 255));
         }
+        if def.abil.contains(&MAbil::Paralyze)
+            && self.level.monsters[mi].abil_cd <= self.time
+            && self.rng.gen_bool(0.3)
+        {
+            if self.stagger(Target::Player, 150.0) {
+                self.level.monsters[mi].abil_cd = self.time + 800.0;
+                self.msg(
+                    format!("{}'s venom locks your limbs: you are PARALYSED!", name),
+                    Rgb(200, 255, 120),
+                );
+                self.fx.flash(Rgb(150, 220, 80), 0.3);
+            }
+        }
         if def.abil.contains(&MAbil::ManaDrain) && self.p.mp > 0 {
             let drain = self.rng.gen_range(3..=6).min(self.p.mp);
             self.p.mp -= drain;
-            self.msg(format!("{} tears {} mana from your soul!", name, drain), Rgb(180, 120, 255));
+            self.msg(
+                format!("{} tears {} mana from your soul!", name, drain),
+                Rgb(180, 120, 255),
+            );
         }
     }
 
@@ -4237,7 +7198,17 @@ impl Game {
             Element::Frost => Some([0.5, 0.9, 1.8]),
             Element::Phys => None,
         };
-        self.fx.bolt(mx as f32 + 0.5, my as f32 + 0.5, hx as f32 + 0.5, hy as f32 + 0.5, 14.0, r.ch, r.color, light, end);
+        self.fx.bolt(
+            mx as f32 + 0.5,
+            my as f32 + 0.5,
+            hx as f32 + 0.5,
+            hy as f32 + 0.5,
+            14.0,
+            r.ch,
+            r.color,
+            light,
+            end,
+        );
         let sfx = match r.element {
             Element::Fire => Sfx::Fireball,
             Element::Magic => Sfx::Bolt,
@@ -4249,14 +7220,22 @@ impl Game {
             let who = self.level.monsters[mi].the();
             self.msg(format!("{} {}!", cap(&who), r.verb), Rgb(255, 180, 120));
         }
-        self.level.monsters[mi].lunge = ((tx - mx).signum() as f32 * 0.5, (ty - my).signum() as f32 * 0.5, 0.6);
+        self.level.monsters[mi].lunge = (
+            (tx - mx).signum() as f32 * 0.5,
+            (ty - my).signum() as f32 * 0.5,
+            0.6,
+        );
         match hit {
             Some(Target::Player) => {
                 let roll = self.rng.gen_range(1..=20);
                 if roll == 20 || (roll != 1 && roll + def.hit >= 10 + self.player_ac()) {
                     let dmg = self.mon_damage(mi, r.dmg);
                     self.msg(format!("You are struck for {}!", dmg), Rgb(255, 90, 90));
-                    let cause = if r.element == Element::Phys { DeathCause::Monster(kind) } else { DeathCause::Spell(kind) };
+                    let cause = if r.element == Element::Phys {
+                        DeathCause::Monster(kind)
+                    } else {
+                        DeathCause::Spell(kind)
+                    };
                     self.player_hit(dmg, cause, false);
                 } else {
                     self.msg("It misses you.", GREY);
@@ -4267,14 +7246,22 @@ impl Game {
                     if self.rng.gen_bool(0.75) {
                         let dmg = self.mon_damage(mi, r.dmg);
                         let (ox, oy) = (self.level.monsters[oi].x, self.level.monsters[oi].y);
-                        self.fx.text(ox as f32 + 0.5, oy as f32 + 0.5, 0.9, dmg.to_string(), Rgb(255, 160, 80));
+                        self.fx.text(
+                            ox as f32 + 0.5,
+                            oy as f32 + 0.5,
+                            0.9,
+                            dmg.to_string(),
+                            Rgb(255, 160, 80),
+                        );
                         self.damage_monster(oi, dmg, Src::Mon(mid));
                     }
                 }
             }
             None => {}
         }
-        self.combat_heat = self.combat_heat.max(if t == Target::Player { 1.0 } else { 0.3 });
+        self.combat_heat = self
+            .combat_heat
+            .max(if t == Target::Player { 1.0 } else { 0.3 });
     }
 
     // ------------------------------------------------------------ sound
@@ -4290,8 +7277,16 @@ impl Game {
         let ty = sy.floor() as i32;
         let straight = ((sx - lx).powi(2) + (sy - ly).powi(2)).sqrt();
         let los = straight < 1.2 || self.level.los(px, py, tx, ty);
-        let path = if self.level.inb(tx, ty) { self.dmap[self.level.idx(tx, ty)] } else { UNREACH };
-        let path_f = if path >= UNREACH { straight * 2.5 + 12.0 } else { path as f32 };
+        let path = if self.level.inb(tx, ty) {
+            self.dmap[self.level.idx(tx, ty)]
+        } else {
+            UNREACH
+        };
+        let path_f = if path >= UNREACH {
+            straight * 2.5 + 12.0
+        } else {
+            path as f32
+        };
 
         let (eff, mut cutoff, ax, ay, extra) = if los {
             (straight, 14000.0, sx, sy, 0.0)
@@ -4334,10 +7329,18 @@ impl Game {
         if gain < 0.006 {
             return None;
         }
-        let ear_ang = if self.overhead { -PI / 2.0 } else { self.cam.ang };
+        let ear_ang = if self.overhead {
+            -PI / 2.0
+        } else {
+            self.cam.ang
+        };
         let rel = (ay - ly).atan2(ax - lx) - ear_ang;
         let dist_here = ((ax - lx).powi(2) + (ay - ly).powi(2)).sqrt();
-        let pan = if dist_here < 0.3 { 0.0 } else { rel.sin() * 0.9 };
+        let pan = if dist_here < 0.3 {
+            0.0
+        } else {
+            rel.sin() * 0.9
+        };
         if rel.cos() < 0.0 && dist_here >= 0.3 {
             cutoff *= 0.65;
         }
@@ -4351,8 +7354,16 @@ impl Game {
             echoes.push((d.min(0.4), 0.35, -pan));
             echoes.push(((d * 1.9).min(0.6), 0.18, pan * 0.5));
         }
-        let reverb = (0.15 + 0.35 * room + if los { 0.0 } else { 0.25 } + (eff / 30.0).min(0.3)).min(0.95);
-        Some(Spatial { gain, pan, cutoff, echoes, reverb, room })
+        let reverb =
+            (0.15 + 0.35 * room + if los { 0.0 } else { 0.25 } + (eff / 30.0).min(0.3)).min(0.95);
+        Some(Spatial {
+            gain,
+            pan,
+            cutoff,
+            echoes,
+            reverb,
+            room,
+        })
     }
 
     /// A random ambient event somewhere in the level.
@@ -4390,7 +7401,9 @@ impl Game {
                 .monsters
                 .iter()
                 .enumerate()
-                .filter(|(_, m)| m.alive && m.faction != Faction::Ally && !self.level.is_visible(m.x, m.y))
+                .filter(|(_, m)| {
+                    m.alive && m.faction != Faction::Ally && !self.level.is_visible(m.x, m.y)
+                })
                 .map(|(i, _)| i)
                 .collect();
             if let Some(&i) = cands.choose(&mut self.rng) {
@@ -4415,7 +7428,14 @@ mod tests {
     const M_SKELETON: usize = 4;
 
     fn game() -> Game {
-        let mut g = Game::new(0, Bonuses { xp_mult: 1.0, ..Default::default() }, 0);
+        let mut g = Game::new(
+            0,
+            Bonuses {
+                xp_mult: 1.0,
+                ..Default::default()
+            },
+            0,
+        );
         g.level.monsters.clear();
         g.p.max_hp = 10_000;
         g.p.hp = 10_000;
@@ -4456,7 +7476,9 @@ mod tests {
         for _ in 0..60 {
             g.monster_melee(mi, Target::Player);
         }
-        assert!(g.msgs.iter().any(|m| m.text.starts_with("An unseen power hits you from a nearby wall for")));
+        assert!(g.msgs.iter().any(|m| m
+            .text
+            .starts_with("An unseen power hits you from a nearby wall for")));
         assert!(g.p.hp < 10_000);
     }
 
@@ -4474,7 +7496,10 @@ mod tests {
             }
         }
         let m = &g.level.monsters[mi];
-        assert!(cheb(m.x, m.y, px, py) <= 1, "ghost should reach the player in a straight line");
+        assert!(
+            cheb(m.x, m.y, px, py) <= 1,
+            "ghost should reach the player in a straight line"
+        );
     }
 
     #[test]
@@ -4497,7 +7522,10 @@ mod tests {
         let xp0 = g.p.xp;
         let hp = g.level.monsters[ci].hp;
         g.damage_monster(ci, hp + 1, Src::Player);
-        assert!(g.p.xp - xp0 >= MONSTERS[M_ORC].xp * 3, "champions give triple experience");
+        assert!(
+            g.p.xp - xp0 >= MONSTERS[M_ORC].xp * 3,
+            "champions give triple experience"
+        );
         assert!(g.p.hp > 100 + g.bonus.siphon, "champion kills heal more");
         let w = &g.level.monsters[wi];
         assert!((5..=20).contains(&w.fear), "witness fear {}", w.fear);
@@ -4535,8 +7563,15 @@ mod tests {
             let mi = spawn(&mut g, kind, x, y);
             g.damage_monster(mi, 9999, Src::Player);
             let sig = MONSTERS[kind].sig;
-            assert!(g.level.items.iter().any(|i| i.item.unique() == Some(sig)), "floor {} drop", floor);
-            assert!(g.level.corpses.iter().all(|c| c.kind != kind), "uniques leave no corpse to raise");
+            assert!(
+                g.level.items.iter().any(|i| i.item.unique() == Some(sig)),
+                "floor {} drop",
+                floor
+            );
+            assert!(
+                g.level.corpses.iter().all(|c| c.kind != kind),
+                "uniques leave no corpse to raise"
+            );
         }
     }
 
@@ -4565,14 +7600,20 @@ mod tests {
     #[test]
     fn unique_gear_powers_apply() {
         let mut g = game();
-        let ring = UNIQUES.iter().position(|u| u.power == UPower::Wrath).unwrap();
+        let ring = UNIQUES
+            .iter()
+            .position(|u| u.power == UPower::Wrath)
+            .unwrap();
         let before = g.dmg_bonus();
         g.p.inv.push(unique_item(ring));
         let i = g.p.inv.len() - 1;
         g.use_item(i);
         assert_eq!(g.p.ring, Some(ring as u8));
         assert_eq!(g.dmg_bonus(), before + 3);
-        let neck = UNIQUES.iter().position(|u| u.power == UPower::Undying).unwrap();
+        let neck = UNIQUES
+            .iter()
+            .position(|u| u.power == UPower::Undying)
+            .unwrap();
         g.p.neck = Some(neck as u8);
         g.p.hp = 5;
         g.player_hit(50, DeathCause::Abandoned, false);
@@ -4593,7 +7634,10 @@ mod tests {
         let json = serde_json::to_string(&g).expect("serialize");
         let mut h: Game = serde_json::from_str(&json).expect("deserialize");
         h.enter_level_keep_facing();
-        assert_eq!((h.p.x, h.p.y, h.depth, h.turns, h.p.hp), (g.p.x, g.p.y, g.depth, g.turns, g.p.hp));
+        assert_eq!(
+            (h.p.x, h.p.y, h.depth, h.turns, h.p.hp),
+            (g.p.x, g.p.y, g.depth, g.turns, g.p.hp)
+        );
         assert_eq!(h.level.monsters.len(), g.level.monsters.len());
         assert!(h.level.monsters.iter().any(|m| m.overlord));
         assert_eq!(h.p.ring, Some(13));
@@ -4620,12 +7664,30 @@ mod tests {
         g.level.monsters[o].x = 1;
         g.make_overlord(o);
         assert!(g.level.monsters[o].overlord && g.level.monsters[o].dmg_mult() > 1.4);
-        let before = (g.p.max_hp, g.p.extra_dmg, g.p.extra_ac, g.p.max_mp, g.p.extra_crit);
+        let before = (
+            g.p.max_hp,
+            g.p.extra_dmg,
+            g.p.extra_ac,
+            g.p.max_mp,
+            g.p.extra_crit,
+        );
         g.p.hp = 100;
         g.damage_monster(o, 99_999, Src::Player);
-        let after = (g.p.max_hp, g.p.extra_dmg, g.p.extra_ac, g.p.max_mp, g.p.extra_crit);
-        assert_ne!(before, after, "slaying an overlord grants a permanent boost");
-        assert!(g.msgs.iter().any(|m| m.text.contains("steal the overlord's power")));
+        let after = (
+            g.p.max_hp,
+            g.p.extra_dmg,
+            g.p.extra_ac,
+            g.p.max_mp,
+            g.p.extra_crit,
+        );
+        assert_ne!(
+            before, after,
+            "slaying an overlord grants a permanent boost"
+        );
+        assert!(g
+            .msgs
+            .iter()
+            .any(|m| m.text.contains("steal the overlord's power")));
     }
 
     #[test]
@@ -4634,8 +7696,16 @@ mod tests {
         let (px, py) = (g.p.x, g.p.y);
         g.level.items.retain(|i| !(i.x == px && i.y == py));
         g.p.inv.clear();
-        for it in [Item::Potion(Potion::Mana), Item::Scroll(Scroll::Vision), Item::Potion(Potion::Cure)] {
-            g.level.items.push(FloorItem { x: px, y: py, item: it });
+        for it in [
+            Item::Potion(Potion::Mana),
+            Item::Scroll(Scroll::Vision),
+            Item::Potion(Potion::Cure),
+        ] {
+            g.level.items.push(FloorItem {
+                x: px,
+                y: py,
+                item: it,
+            });
         }
         assert_eq!(g.items_here().len(), 3);
         g.do_action(Action::PickupOne(1));
@@ -4644,9 +7714,16 @@ mod tests {
         g.do_action(Action::PickupAll);
         assert!(g.items_here().is_empty());
         assert_eq!(g.p.inv.len(), 3);
-        assert!((g.time - t0 - 100.0).abs() < 1e-6, "grab-all takes one turn");
+        assert!(
+            (g.time - t0 - 100.0).abs() < 1e-6,
+            "grab-all takes one turn"
+        );
         // Read the scroll of monster vision.
-        let i = g.p.inv.iter().position(|i| *i == Item::Scroll(Scroll::Vision)).unwrap();
+        let i =
+            g.p.inv
+                .iter()
+                .position(|i| *i == Item::Scroll(Scroll::Vision))
+                .unwrap();
         g.use_item(i);
         assert_eq!(g.p.vision, 10);
     }
@@ -4675,7 +7752,11 @@ mod tests {
             for _ in 0..12 {
                 let mut lv = generate(depth, &mut rng);
                 let kinds: Vec<usize> = (0..MONSTERS.len())
-                    .filter(|&i| !MONSTERS[i].boss && depth >= MONSTERS[i].depth.0 && depth <= MONSTERS[i].depth.1)
+                    .filter(|&i| {
+                        !MONSTERS[i].boss
+                            && depth >= MONSTERS[i].depth.0
+                            && depth <= MONSTERS[i].depth.1
+                    })
                     .collect();
                 let mut id = 1;
                 place_closet(&mut lv, &mut rng, &mut id, &kinds, 0.0, 1.0);
@@ -4730,8 +7811,19 @@ mod tests {
         assert_eq!(tot_norm, 4000);
         assert_eq!(tot_hard, 6800);
         // A fresh Chaotic run builds its floors with tougher monsters.
-        let g2 = Game::new(0, Bonuses { xp_mult: 1.0, ..Default::default() }, 3);
-        assert!(g2.level.monsters.iter().any(|m| m.max_hp >= MONSTERS[m.kind].hp * 2));
+        let g2 = Game::new(
+            0,
+            Bonuses {
+                xp_mult: 1.0,
+                ..Default::default()
+            },
+            3,
+        );
+        assert!(g2
+            .level
+            .monsters
+            .iter()
+            .any(|m| m.max_hp >= MONSTERS[m.kind].hp * 2));
     }
 
     #[test]
@@ -4789,7 +7881,15 @@ mod tests {
     fn class_skills_stay_with_their_class() {
         let all: Vec<Skill> = UPGRADES.iter().filter_map(|u| u.skill).collect();
         for class in 0..CLASSES.len() {
-            let g = Game::new(class, Bonuses { xp_mult: 1.0, skills: all.clone(), ..Default::default() }, 0);
+            let g = Game::new(
+                class,
+                Bonuses {
+                    xp_mult: 1.0,
+                    skills: all.clone(),
+                    ..Default::default()
+                },
+                0,
+            );
             let sk = g.skills();
             assert_eq!(sk.len(), 4, "two class skills plus two altar skills");
             for s in &sk[2..] {
@@ -4826,7 +7926,10 @@ mod tests {
             g.level.monsters[mi].hp = 5000;
             g.refresh_view();
             assert!(g.use_skill(Skill::Shadowstep).is_some());
-            assert!(cheb(g.p.x, g.p.y, px + dx * 3, py + dy * 3) == 1, "lands next to the foe");
+            assert!(
+                cheb(g.p.x, g.p.y, px + dx * 3, py + dy * 3) == 1,
+                "lands next to the foe"
+            );
         }
 
         // Necromancer: corpses explode and never rise.
@@ -4834,10 +7937,19 @@ mod tests {
         g.p.mp = 100;
         let (px, py) = (g.p.x, g.p.y);
         let (cx, cy) = g.free_adjacent(px, py).unwrap();
-        g.level.corpses.push(Corpse { kind: M_SKELETON, x: cx, y: cy, revive_at: 1.0 });
+        g.level.corpses.push(Corpse {
+            kind: M_SKELETON,
+            x: cx,
+            y: cy,
+            revive_at: 1.0,
+            raises: 0,
+        });
         let mi = spawn(&mut g, M_GOBLIN, cx, cy);
         assert!(g.use_skill(Skill::CorpseExplosion).is_some());
-        assert!(!g.level.corpses.iter().any(|c| c.kind == M_SKELETON), "the skeleton is gone for good");
+        assert!(
+            !g.level.corpses.iter().any(|c| c.kind == M_SKELETON),
+            "the skeleton is gone for good"
+        );
         let gob = &g.level.monsters[mi];
         assert!(!gob.alive || gob.hp < MONSTERS[M_GOBLIN].hp);
 
@@ -4886,21 +7998,32 @@ mod tests {
     fn themes_are_dealt_in_bands() {
         let mut rng = StdRng::seed_from_u64(7);
         let mut firsts = std::collections::HashSet::new();
-        for _ in 0..60 {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
             let th = roll_themes(&mut rng);
             assert_eq!(th.len(), 9);
-            let mut bands: Vec<(u8, usize)> = Vec::new();
-            for &s in &th {
-                assert!(FLOOR_THEMES.contains(&s));
-                match bands.last_mut() {
-                    Some(b) if b.0 == s => b.1 += 1,
-                    _ => bands.push((s, 1)),
-                }
+            // Near the surface: cellars, crypts, gaols and sewers. The strange places wait below.
+            assert!(
+                th[..3].iter().all(|s| SHALLOW_THEMES.contains(s)),
+                "{:?}",
+                th
+            );
+            assert!(
+                th[3..6].iter().all(|s| MIDDLE_THEMES.contains(s)),
+                "{:?}",
+                th
+            );
+            assert!(th[6..].iter().all(|s| DEEP_THEMES.contains(s)), "{:?}", th);
+            for tier in th.chunks(3) {
+                let distinct: std::collections::HashSet<_> = tier.iter().collect();
+                assert!(distinct.len() <= 2);
+                // A theme never comes back after it has given way.
+                assert!(!(tier[0] == tier[2] && tier[1] != tier[0]));
             }
-            assert_eq!(bands.len(), 3, "{:?}", th);
-            assert!(bands.iter().all(|b| (2..=4).contains(&b.1)));
+            seen.extend(th.iter().copied());
             firsts.insert(th[3]);
         }
+        assert_eq!(seen.len(), FLOOR_THEMES.len(), "every theme turns up");
         assert!(firsts.len() > 2, "depth 4 is not always the same theme");
         // Older saves keep the classic layout and names.
         let c = classic_themes();
@@ -4926,7 +8049,10 @@ mod tests {
     fn rare_monsters_have_short_lore() {
         let warden = MONSTERS.iter().find(|m| m.boss).unwrap();
         let lt = warden.lore();
-        assert_eq!((lt.name, lt.basic, lt.desc, lt.adv, lt.master), (1, 3, 5, 7, 10));
+        assert_eq!(
+            (lt.name, lt.basic, lt.desc, lt.adv, lt.master),
+            (1, 3, 5, 7, 10)
+        );
         let mut prof = crate::profile::Profile::default();
         prof.bestiary.insert(warden.name.into(), 9);
         let mut slain = HashMap::new();
@@ -4982,24 +8108,48 @@ mod tests {
         g.start_curse(Curse::Forgetting, 5);
         let left = g.level.explored.iter().filter(|&&e| e).count();
         assert!(left < before.iter().filter(|&&e| e).count());
-        assert!(g.level.explored.iter().zip(g.level.visible.iter()).all(|(&e, &v)| !e || v));
+        assert!(g
+            .level
+            .explored
+            .iter()
+            .zip(g.level.visible.iter())
+            .all(|(&e, &v)| !e || v));
         for _ in 0..5 {
             g.tick_curses();
         }
         assert!(!g.cursed(Curse::Forgetting));
-        assert!(before.iter().zip(g.level.explored.iter()).all(|(&b, &e)| !b || e));
+        assert!(before
+            .iter()
+            .zip(g.level.explored.iter())
+            .all(|(&b, &e)| !b || e));
 
         // Figments can be walked straight through.
         let mut g = game();
         let (fx, fy) = g.free_adjacent(g.p.x, g.p.y).unwrap();
-        g.curses.push(ActiveCurse { kind: Curse::Figments, turns: 10 });
-        g.figments.push(Figment { id: 999, kind: M_ORC, x: fx, y: fy, rx: 0.0, ry: 0.0 });
-        let dir = DIRS.iter().position(|&(dx, dy)| (g.p.x + dx, g.p.y + dy) == (fx, fy)).unwrap() as i32;
+        g.curses.push(ActiveCurse {
+            kind: Curse::Figments,
+            turns: 10,
+        });
+        g.figments.push(Figment {
+            id: 999,
+            kind: M_ORC,
+            x: fx,
+            y: fy,
+            rx: 0.0,
+            ry: 0.0,
+        });
+        let dir = DIRS
+            .iter()
+            .position(|&(dx, dy)| (g.p.x + dx, g.p.y + dy) == (fx, fy))
+            .unwrap() as i32;
         let hp = g.p.hp;
         assert!(g.player_move(dir).is_some());
         assert_eq!((g.p.x, g.p.y), (fx, fy));
         assert!(g.figments.is_empty());
-        assert!(g.msgs.iter().any(|m| m.text == "An evil figment of the mind!"));
+        assert!(g
+            .msgs
+            .iter()
+            .any(|m| m.text == "An evil figment of the mind!"));
         assert_eq!(g.p.hp, hp);
         // ...and they never hurt you.
         g.spawn_figments();
@@ -5023,7 +8173,10 @@ mod tests {
 
         // Leaden limbs slow you down.
         let mut g = game();
-        g.curses.push(ActiveCurse { kind: Curse::Leaden, turns: 5 });
+        g.curses.push(ActiveCurse {
+            kind: Curse::Leaden,
+            turns: 5,
+        });
         assert!(g.action_cost(100.0) > 100.0);
 
         // Curses only strike while you hold the Amulet.
@@ -5040,7 +8193,10 @@ mod tests {
                 break;
             }
         }
-        assert!(g.msgs.iter().any(|m| Curse::ALL.iter().any(|c| m.text == c.onset())));
+        assert!(g
+            .msgs
+            .iter()
+            .any(|m| Curse::ALL.iter().any(|c| m.text == c.onset())));
     }
 
     fn thrall(g: &mut Game, kind: usize) -> usize {
@@ -5060,13 +8216,19 @@ mod tests {
         let base = g.p.max_hp;
         let a = thrall(&mut g, M_SKELETON);
         let _b = thrall(&mut g, M_SKELETON);
-        assert_eq!(g.p.max_hp, base - 6);
+        assert_eq!(g.p.max_hp, base - 4);
         g.damage_monster(a, 9999, Src::Env);
-        assert_eq!(g.p.max_hp, base - 3, "a dead thrall gives its share back");
+        assert_eq!(g.p.max_hp, base - 2, "a dead thrall gives its share back");
+        // Stronger monsters hold more of your life.
+        assert!(g.thrall_cost(M_ORC, false) > g.thrall_cost(0, false));
+        let ogre = MONSTERS.iter().position(|m| m.name == "ogre").unwrap();
+        assert_eq!(g.thrall_cost(ogre, false), 5);
+        assert_eq!(g.thrall_cost(ogre, true), 7, "raised again costs more");
         // The cost shrinks every 10 levels.
         g.p.level = 10;
-        g.sync_upkeep();
-        assert_eq!(g.p.max_hp, base - 2);
+        assert_eq!(g.thrall_cost(ogre, false), 4);
+        g.p.level = 20;
+        assert_eq!(g.thrall_cost(ogre, false), 3);
         g.p.level = 25;
         g.sync_upkeep();
         assert_eq!(g.p.max_hp, base - 1);
@@ -5144,7 +8306,9 @@ mod tests {
         assert!(g.thrall_power(t));
         let minions: Vec<u32> = g.level.monsters[before..].iter().map(|m| m.id).collect();
         assert_eq!(minions.len(), 2);
-        assert!(g.level.monsters[before..].iter().all(|m| m.faction == Faction::Ally && !m.thrall && m.expires > 0.0));
+        assert!(g.level.monsters[before..]
+            .iter()
+            .all(|m| m.faction == Faction::Ally && !m.thrall && m.expires > 0.0));
         let upkeep = g.p.thrall_upkeep;
         g.sync_upkeep();
         assert_eq!(g.p.thrall_upkeep, upkeep, "minions cost nothing");
@@ -5175,6 +8339,860 @@ mod tests {
         }
         let t = g.mon_index(tid).unwrap();
         let healed = g.level.monsters[t].hp - 1;
-        assert!(healed > 0 && healed < g.p.hp - 1, "thrall {} vs you {}", healed, g.p.hp - 1);
+        assert!(
+            healed > 0 && healed < g.p.hp - 1,
+            "thrall {} vs you {}",
+            healed,
+            g.p.hp - 1
+        );
+    }
+
+    #[test]
+    fn new_monsters_are_complete_and_brawl() {
+        assert_eq!(
+            MONSTER_LORE.len(),
+            MONSTERS.len(),
+            "every monster has a bestiary entry"
+        );
+        let mut order = bestiary_order();
+        order.sort();
+        assert_eq!(order, (0..MONSTERS.len()).collect::<Vec<_>>());
+        let first_new = M_UNIQUE0 + 10;
+        assert!(MONSTERS.len() >= first_new + 13);
+        for k in first_new..MONSTERS.len() {
+            let d = &MONSTERS[k];
+            assert!(!d.art.is_empty() && d.unique == 0 && !d.boss, "{}", d.name);
+            // Find something it hates and drop the two side by side, out of your sight.
+            let foe = (0..first_new)
+                .find(|&o| {
+                    MONSTERS[o].unique == 0
+                        && !MONSTERS[o].boss
+                        && hostile(d.faction, MONSTERS[o].faction)
+                })
+                .unwrap_or_else(|| panic!("{} has no enemies", d.name));
+            let mut g = game();
+            g.p.invis = 1000;
+            let (x, y) = floor_away(&mut g, 12);
+            let a = spawn(&mut g, k, x, y);
+            let (bx, by) = g.free_adjacent(x, y).expect("room");
+            let b = spawn(&mut g, foe, bx, by);
+            let bid = g.level.monsters[b].id;
+            g.monster_act(a);
+            assert_eq!(
+                g.level.monsters[a].target,
+                Some(Target::Mon(bid)),
+                "{} ignores a {}",
+                d.name,
+                MONSTERS[foe].name
+            );
+        }
+    }
+
+    #[test]
+    fn weak_monsters_crowd_the_upper_floors() {
+        let mut rng = StdRng::seed_from_u64(3);
+        let avg_xp = |depth: u32, rng: &mut StdRng| {
+            let kinds: Vec<usize> = (0..MONSTERS.len())
+                .filter(|&i| spawn_weight(&MONSTERS[i], depth) > 0.0)
+                .collect();
+            let n = 2000;
+            (0..n)
+                .map(|_| MONSTERS[pick_kind(&kinds, depth, rng)].xp as f32)
+                .sum::<f32>()
+                / n as f32
+        };
+        let mut last = 0.0;
+        for depth in [1, 3, 5, 7, 9] {
+            let a = avg_xp(depth, &mut rng);
+            assert!(a > last, "depth {} average xp {} after {}", depth, a, last);
+            last = a;
+        }
+        // Within a floor, a monster at the end of its range is rarer than at home.
+        let skel = &MONSTERS[M_SKELETON];
+        assert!(spawn_weight(skel, 7) < spawn_weight(skel, 4));
+        // The new monsters really turn up.
+        let mut seen = std::collections::HashSet::new();
+        for depth in 1..=10 {
+            for _ in 0..6 {
+                let mut lv = generate(depth, &mut rng);
+                let mut id = 1;
+                populate(&mut lv, &mut rng, &mut id, 0, 0.0, false, 1.0);
+                seen.extend(lv.monsters.iter().map(|m| m.kind));
+            }
+        }
+        for k in (M_UNIQUE0 + 10)..MONSTERS.len() {
+            if k == M_GUARDIAN {
+                continue; // only ever torn out of a ward prism
+            }
+            assert!(seen.contains(&k), "{} never spawned", MONSTERS[k].name);
+        }
+    }
+
+    #[test]
+    fn the_log_keeps_a_hundred_turns() {
+        let mut g = game();
+        g.msgs.clear();
+        for t in 0..250u64 {
+            g.turns = t;
+            g.msg(format!("turn {}", t), GREY);
+            g.msg(format!("again {}", t), GREY);
+        }
+        let oldest = g.msgs.first().unwrap().turn;
+        assert!(oldest >= 149 && oldest <= 150, "oldest kept {}", oldest);
+        assert_eq!(g.msgs.last().unwrap().text, "again 249");
+        assert!(g.msgs.windows(2).all(|w| w[0].turn <= w[1].turn));
+    }
+
+    #[test]
+    fn a_gale_snuffs_the_torch() {
+        let mut g = game();
+        g.p.has_amulet = true;
+        g.start_curse(Curse::Gale, 3);
+        // No other curse may wander in and muddy the test.
+        g.p.has_amulet = false;
+        assert!(g.p.torch_out);
+        assert_eq!(g.sight(), 0);
+        assert_eq!(
+            g.level.visible.iter().filter(|&&v| v).count(),
+            1,
+            "you see only where you stand"
+        );
+        // The wind tears the smoke sideways.
+        for _ in 0..30 {
+            g.update(0.03, false);
+        }
+        assert!(g.smoke.iter().any(|s| s.x > 3.0));
+        // You cannot relight it while the wind howls...
+        g.do_action(Action::Relight);
+        assert!(g.p.torch_out);
+        for _ in 0..3 {
+            g.tick_curses();
+        }
+        assert!(!g.cursed(Curse::Gale));
+        // ...and it stays out until you do.
+        assert!(g.p.torch_out);
+        g.do_action(Action::Relight);
+        assert!(!g.p.torch_out);
+        assert!(g.sight() > 2);
+        assert!(g.level.visible.iter().filter(|&&v| v).count() > 1);
+        // A lit torch smokes steadily.
+        g.smoke.clear();
+        for _ in 0..20 {
+            g.update(0.05, false);
+        }
+        assert!(!g.smoke.is_empty() && g.smoke.iter().all(|s| s.y < 3.0));
+    }
+
+    fn necro() -> Game {
+        let mut g = Game::new(
+            C_NECRO,
+            Bonuses {
+                xp_mult: 1.0,
+                ..Default::default()
+            },
+            0,
+        );
+        g.level.monsters.clear();
+        g.level.corpses.clear();
+        g.p.max_hp = 500;
+        g.p.hp = 500;
+        g.p.mp = 500;
+        g.p.max_mp = 500;
+        g
+    }
+
+    fn corpse_near(g: &mut Game, kind: usize) -> (i32, i32) {
+        for r in 1..4 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let (x, y) = (g.p.x + dx, g.p.y + dy);
+                    if g.level.tile(x, y).walkable()
+                        && (x, y) != (g.p.x, g.p.y)
+                        && !g.level.corpses.iter().any(|c| (c.x, c.y) == (x, y))
+                    {
+                        g.level.corpses.push(Corpse {
+                            kind,
+                            x,
+                            y,
+                            revive_at: -1.0,
+                            raises: 0,
+                        });
+                        return (x, y);
+                    }
+                }
+            }
+        }
+        panic!("no room for a corpse");
+    }
+
+    #[test]
+    fn raising_offers_a_choice_and_fallen_thralls_stay_down() {
+        let mut g = necro();
+        corpse_near(&mut g, 0);
+        let (ox, oy) = corpse_near(&mut g, M_ORC);
+        let mp = g.p.mp;
+        assert!(
+            g.use_skill(Skill::RaiseDead).is_none(),
+            "two bodies: ask first"
+        );
+        assert_eq!(g.raise_menu.len(), 2);
+        assert_eq!(g.p.mp, mp, "nothing is spent until you choose");
+        let orc_opt = g
+            .raise_menu
+            .iter()
+            .find(|o| o.kind == M_ORC)
+            .copied()
+            .unwrap();
+        assert_eq!(orc_opt.cost, g.thrall_cost(M_ORC, false));
+        let max = g.p.max_hp;
+        g.do_action(Action::RaiseAt(ox, oy));
+        assert!(g.raise_menu.is_empty());
+        assert!(g.p.mp < mp);
+        let ti = g.level.monsters.iter().position(|m| m.thrall).unwrap();
+        assert_eq!(g.level.monsters[ti].kind, M_ORC);
+        assert_eq!(g.p.max_hp, max - orc_opt.cost);
+
+        // The orc falls: its body will never answer you again.
+        let (fx, fy) = floor_away(&mut g, 4);
+        let foe = spawn(&mut g, M_ORC, fx, fy);
+        let fid = g.level.monsters[foe].id;
+        g.damage_monster(ti, 9999, Src::Mon(fid));
+        let c = g.level.corpses.iter().find(|c| c.kind == M_ORC).unwrap();
+        assert_eq!(c.raises, 1);
+        assert!(c.revive_at < 0.0, "it will not rise on its own either");
+        assert!(g.raise_options().iter().all(|o| o.kind != M_ORC));
+
+        // Undying Bond allows one more raising, at a higher price.
+        g.bonus.rebind = true;
+        // The killer has done its job; keep it from interfering with the rest.
+        if let Some(fi) = g.mon_index(fid) {
+            g.level.monsters[fi].alive = false;
+        }
+        let again = g
+            .raise_options()
+            .into_iter()
+            .find(|o| o.kind == M_ORC)
+            .unwrap();
+        assert!(again.again && again.cost > orc_opt.cost);
+        g.p.cds.clear();
+        g.do_action(Action::RaiseAt(again.x, again.y));
+        let ti = g
+            .level
+            .monsters
+            .iter()
+            .position(|m| m.thrall && m.alive && m.kind == M_ORC)
+            .unwrap();
+        assert_eq!(g.level.monsters[ti].raises, 2);
+        g.damage_monster(ti, 9999, Src::Mon(fid));
+        assert!(
+            g.raise_options().iter().all(|o| o.kind != M_ORC),
+            "twice is the limit"
+        );
+
+        // A single body needs no menu.
+        let mut g = necro();
+        corpse_near(&mut g, 0);
+        assert!(g.use_skill(Skill::RaiseDead).is_some());
+        assert!(g.raise_menu.is_empty());
+        assert!(g.level.monsters.iter().any(|m| m.thrall));
+    }
+
+    /// An open hall to test abilities in, with the player in the middle.
+    fn arena() -> Game {
+        let mut g = game();
+        for y in 2..14 {
+            for x in 2..40 {
+                g.level.set(x, y, Tile::Floor);
+            }
+        }
+        g.level.traps.clear();
+        g.level.corpses.clear();
+        g.level.items.clear();
+        g.p.x = 20;
+        g.p.y = 8;
+        g.refresh_view();
+        g
+    }
+
+    fn kind_of(name: &str) -> usize {
+        MONSTERS.iter().position(|m| m.name == name).unwrap()
+    }
+
+    /// Keep giving the monster a turn until it uses a power.
+    fn trigger(g: &mut Game, mi: usize, t: Target) -> bool {
+        for _ in 0..400 {
+            g.level.monsters[mi].abil_cd = 0.0;
+            g.p.para_guard = 0.0;
+            if g.unique_power(mi, t) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn every_monster_has_a_power() {
+        for m in MONSTERS.iter() {
+            assert!(!m.abil.is_empty(), "{} has no special ability", m.name);
+        }
+    }
+
+    #[test]
+    fn monster_powers_work() {
+        // Minotaur: charges from afar and hurls you back.
+        let mut g = arena();
+        let mi = spawn(&mut g, kind_of("minotaur"), 15, 8);
+        let mut knocked = false;
+        for _ in 0..200 {
+            g.level.monsters[mi].x = 15;
+            g.level.monsters[mi].y = 8;
+            g.p.x = 20;
+            g.p.y = 8;
+            g.p.hp = 10_000;
+            if trigger(&mut g, mi, Target::Player) && g.p.x > 20 {
+                knocked = true;
+                break;
+            }
+        }
+        assert!(knocked, "the charge should knock you back");
+
+        // Wraith: saps your life to heal itself.
+        let mut g = arena();
+        let mi = spawn(&mut g, kind_of("wraith"), 17, 8);
+        g.level.monsters[mi].hp = 5;
+        let hp = g.p.hp;
+        assert!(trigger(&mut g, mi, Target::Player));
+        assert!(g.p.hp < hp && g.level.monsters[mi].hp > 5);
+
+        // Myconid: spores paralyse whoever walks into them.
+        let mut g = arena();
+        let mi = spawn(&mut g, kind_of("myconid"), 22, 8);
+        assert!(trigger(&mut g, mi, Target::Player));
+        assert!(!g.level.clouds.is_empty());
+        g.p.para_guard = 0.0;
+        g.p.slow = 0.0;
+        g.p.x = 21;
+        g.after_player_move();
+        assert!(g.p.slow >= 150.0, "the spores seize you");
+        // ...but never twice in a row.
+        assert!(!g.stagger(Target::Player, 100.0));
+        g.time += 1000.0;
+        g.tick_clouds();
+        assert!(g.level.clouds.is_empty(), "the clouds disperse");
+
+        // Spider: webs root you in place, but you can still fight.
+        let mut g = arena();
+        let mi = spawn(&mut g, kind_of("giant spider"), 24, 8);
+        assert!(trigger(&mut g, mi, Target::Player));
+        assert!(g.p.rooted > 0);
+        assert!(g.player_move(4).is_some());
+        assert_eq!((g.p.x, g.p.y), (20, 8));
+
+        // Slime: splits in two when wounded.
+        let mut g = arena();
+        let mi = spawn(&mut g, kind_of("green slime"), 21, 8);
+        g.level.monsters[mi].hp = 10;
+        assert!(trigger(&mut g, mi, Target::Player));
+        assert_eq!(
+            g.level
+                .monsters
+                .iter()
+                .filter(|m| m.alive && m.kind == kind_of("green slime"))
+                .count(),
+            2
+        );
+
+        // Ogre: the quake hits everything close by, friend or foe.
+        let mut g = arena();
+        let mi = spawn(&mut g, kind_of("ogre"), 21, 8);
+        let gi = spawn(&mut g, M_GOBLIN, 22, 9);
+        g.level.monsters[gi].hp = 500;
+        let hp = g.p.hp;
+        let mut ok = false;
+        for _ in 0..50 {
+            if trigger(&mut g, mi, Target::Player) && g.level.monsters[gi].hp < 500 {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok && g.p.hp < hp);
+
+        // Skeleton: raises its guard (+4 armour).
+        let mut g = arena();
+        let mi = spawn(&mut g, M_SKELETON, 21, 8);
+        let ac = g.level.monsters[mi].ac();
+        assert!(trigger(&mut g, mi, Target::Player));
+        assert_eq!(g.level.monsters[mi].ac(), ac + 4);
+
+        // Goblin shaman: mends a wounded goblin.
+        let mut g = arena();
+        g.p.x = 2;
+        g.p.y = 2;
+        let si = spawn(&mut g, kind_of("goblin shaman"), 30, 8);
+        let gi = spawn(&mut g, M_GOBLIN, 32, 8);
+        g.level.monsters[gi].hp = 1;
+        assert!(trigger(&mut g, si, Target::Player));
+        assert!(g.level.monsters[gi].hp > 1);
+
+        // Goblin: grit in the eyes.
+        let mut g = arena();
+        let mi = spawn(&mut g, M_GOBLIN, 22, 8);
+        assert!(trigger(&mut g, mi, Target::Player));
+        assert!(g.p.blind > 0 && g.sight() <= 1);
+
+        // Rats call their kin.
+        let mut g = arena();
+        let mi = spawn(&mut g, 0, 23, 8);
+        let ki = spawn(&mut g, 0, 30, 10);
+        g.level.monsters[ki].awake = false;
+        assert!(trigger(&mut g, mi, Target::Player));
+        assert!(g.level.monsters[ki].awake);
+        assert_eq!(g.level.monsters[ki].target, Some(Target::Player));
+
+        // Powers work in monster infighting too: a basilisk's gaze stuns a rival.
+        let mut g = arena();
+        let bi = spawn(&mut g, kind_of("basilisk"), 30, 8);
+        let oi = spawn(&mut g, M_GOBLIN, 33, 8);
+        let oid = g.level.monsters[oi].id;
+        assert!(trigger(&mut g, bi, Target::Mon(oid)));
+        assert!(g.level.monsters[oi].stun > 0);
+
+        // The Warden shakes the ground too.
+        let mut g = arena();
+        let wi = spawn(&mut g, M_WARDEN, 21, 8);
+        assert!(trigger(&mut g, wi, Target::Player));
+    }
+
+    #[test]
+    fn rooms_have_purposes() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let mut kinds = std::collections::HashSet::new();
+        for depth in 1..=9 {
+            for _ in 0..8 {
+                let mut lv = generate(depth, &mut rng);
+                let mut id = 1;
+                populate(&mut lv, &mut rng, &mut id, 0, 0.0, false, 1.0);
+                // Everything walkable can still be reached.
+                let dm = lv.dijkstra(lv.up.0, lv.up.1);
+                assert!(lv
+                    .tiles
+                    .iter()
+                    .enumerate()
+                    .all(|(i, t)| !t.walkable() || dm[i] < UNREACH));
+                for f in &lv.features {
+                    kinds.insert(format!("{:?}", f.kind));
+                    let r = f.room;
+                    let inside = |x: i32, y: i32| r.contains(x, y);
+                    match f.kind {
+                        RoomKind::Armory => assert!(lv.items.iter().any(|i| inside(i.x, i.y))),
+                        RoomKind::Library => assert!(lv
+                            .items
+                            .iter()
+                            .any(|i| inside(i.x, i.y) && matches!(i.item, Item::Scroll(_)))),
+                        RoomKind::Ossuary => assert!(lv.corpses.iter().any(|c| inside(c.x, c.y))),
+                        RoomKind::Garden => assert!(lv.clouds.iter().any(|c| inside(c.x, c.y))),
+                        RoomKind::Chamber => assert!(lv.tiles.iter().any(|&t| t.is_closed_door())),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(kinds.len() >= 9, "only saw {:?}", kinds);
+        // Walking in announces the room.
+        let mut g = game();
+        let f = Feature {
+            kind: RoomKind::Armory,
+            room: Rect {
+                x: g.p.x - 1,
+                y: g.p.y - 1,
+                w: 3,
+                h: 3,
+            },
+            seen: false,
+        };
+        g.level.features.push(f);
+        g.refresh_view();
+        assert!(g.msgs.iter().any(|m| m.text.contains("armory")));
+    }
+
+    #[test]
+    fn the_living_dungeon_fights_back() {
+        let mut g = game();
+        g.p.has_amulet = true;
+        g.depth = 2;
+        // Sinew and maws on arrival.
+        g.infest_level();
+        assert!(g.level.traps.iter().any(|t| t.kind == TrapKind::Maw));
+        assert!(!g.level.sinews.is_empty());
+        for s in &g.level.sinews {
+            assert_eq!(g.level.tile(s.x, s.y), Tile::Sinew);
+        }
+        // Sinew blocks the way, and takes a few cuts to get through.
+        let mut g = arena();
+        g.p.has_amulet = true;
+        g.depth = 2;
+        g.grow_sinew(21, 8);
+        assert!(g.level.tile(21, 8).opaque() && !g.level.tile(21, 8).walkable());
+        let mut cuts = 0;
+        while g.level.tile(21, 8) == Tile::Sinew && cuts < 50 {
+            g.player_move(2);
+            cuts += 1;
+        }
+        assert_eq!(g.level.tile(21, 8), Tile::Floor);
+        assert!(cuts >= 1);
+        assert_eq!((g.p.x, g.p.y), (20, 8), "cutting does not move you");
+        // Maws bite and hold.
+        let mut g = arena();
+        g.level.traps.push(Trap {
+            x: 21,
+            y: 8,
+            kind: TrapKind::Maw,
+            revealed: false,
+        });
+        let hp = g.p.hp;
+        g.player_move(2);
+        assert!(g.p.hp < hp && g.p.rooted > 0);
+        // Growth happens over time while you carry the heart.
+        let mut g = arena();
+        g.p.has_amulet = true;
+        g.depth = 1;
+        for y in 2..14 {
+            if y != 8 {
+                for x in 22..24 {
+                    g.level.set(x, y, Tile::Wall);
+                }
+            }
+        }
+        g.refresh_view();
+        for _ in 0..2000 {
+            g.living_dungeon_tick();
+            if !g.level.sinews.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            !g.level.sinews.is_empty(),
+            "the dungeon grows sinew across your path"
+        );
+    }
+
+    #[test]
+    fn wall_eyes_are_whole_and_stare() {
+        // An eye is only drawn where the flesh is solid all the way round it.
+        let c = 0.9;
+        let mut eyes = 0;
+        for my in 0..40 {
+            for mx in 0..60 {
+                if !crate::render::wall_eye(mx, my, c) {
+                    continue;
+                }
+                eyes += 1;
+                for k in 0..24 {
+                    let a = k as f32 / 24.0 * std::f32::consts::TAU;
+                    for r in [0.0f32, 0.4, 0.8, 0.98] {
+                        let (u, v) = (0.5 + a.cos() * 0.14 * r, 0.45 + a.sin() * 0.09 * r);
+                        let n = crate::color::vnoise(
+                            u * 2.5 + mx as f32 * 2.5,
+                            v * 2.5 + my as f32 * 1.9,
+                        );
+                        let cover = c * 1.3 - crate::color::hashf(mx * 7 + 3, my * 11 + 5) * 0.6;
+                        assert!(
+                            n <= cover - 0.05,
+                            "eye at {},{} has a hole at {},{}",
+                            mx,
+                            my,
+                            u,
+                            v
+                        );
+                    }
+                }
+            }
+        }
+        assert!(eyes > 20, "only {} eyes", eyes);
+        // A visible eye stares you into stillness.
+        let mut g = game();
+        g.p.has_amulet = true;
+        g.depth = 1;
+        let c = g.corruption();
+        let mut spot = None;
+        'find: for y in 1..g.level.h - 1 {
+            for x in 1..g.level.w - 1 {
+                if g.level.tile(x, y) == Tile::Wall && crate::render::wall_eye(x, y, c) {
+                    for &(dx, dy) in DIRS.iter() {
+                        if g.level.tile(x + dx, y + dy) == Tile::Floor {
+                            spot = Some((x + dx, y + dy));
+                            break 'find;
+                        }
+                    }
+                }
+            }
+        }
+        let (sx, sy) = spot.expect("some eye borders a floor");
+        g.p.x = sx;
+        g.p.y = sy;
+        g.refresh_view();
+        let mut stared = false;
+        for _ in 0..2000 {
+            g.stare_cd = 0.0;
+            g.p.para_guard = 0.0;
+            g.living_dungeon_tick();
+            if g.stare.is_some() {
+                stared = true;
+                break;
+            }
+        }
+        assert!(stared);
+        assert!(g.p.slow >= 150.0);
+    }
+
+    #[test]
+    fn the_torch_puffs_out_and_sparks_back() {
+        let mut g = game();
+        g.p.has_amulet = true;
+        g.start_curse(Curse::Gale, 2);
+        g.p.has_amulet = false;
+        g.smoke.clear();
+        for _ in 0..12 {
+            g.update(0.03, false);
+        }
+        assert!(g.smoke.len() >= 30, "a puff of smoke as the flame dies");
+        for _ in 0..2 {
+            g.tick_curses();
+        }
+        g.do_action(Action::Relight);
+        assert!(!g.p.torch_out);
+        assert!(g.light_age < 0.05, "the flint sparks start now");
+        assert!(g.msgs.iter().any(|m| m.text.contains("flint")));
+    }
+
+    #[test]
+    fn gates_can_be_seen_through() {
+        // Sewers, gaols, crypts and foundries get gates of bars.
+        let mut rng = StdRng::seed_from_u64(5);
+        let mut lv = generate(2, &mut rng);
+        lv.style = 8;
+        lv.set(5, 5, Tile::DoorClosed);
+        lv.theme_doors();
+        assert!(lv.tiles.iter().all(|&t| t != Tile::DoorClosed));
+        assert_eq!(lv.tile(5, 5), Tile::GateClosed);
+        // Other themes keep solid doors.
+        let mut lv = generate(2, &mut rng);
+        lv.style = 0;
+        lv.set(5, 5, Tile::DoorClosed);
+        lv.theme_doors();
+        assert_eq!(lv.tile(5, 5), Tile::DoorClosed);
+
+        let mut g = arena();
+        for y in 2..14 {
+            g.level.set(23, y, Tile::Wall);
+        }
+        g.level.set(23, 8, Tile::GateClosed);
+        g.refresh_view();
+        // You can see through the bars...
+        assert!(g.level.is_visible(26, 8));
+        assert!(g.level.los(20, 8, 26, 8));
+        // ...but not walk through until it is opened.
+        g.p.x = 22;
+        g.player_move(2);
+        assert_eq!((g.p.x, g.p.y), (22, 8));
+        assert_eq!(g.level.tile(23, 8), Tile::DoorOpen);
+        assert!(g.msgs.iter().any(|m| m.text.contains("gate")));
+        // A closed gate blocks squeezing diagonally past its corner.
+        g.level.set(23, 8, Tile::GateClosed);
+        g.level.set(23, 9, Tile::Floor);
+        assert!(!g.level.can_step(22, 8, 1, 1));
+    }
+
+    #[test]
+    fn switching_views_swoops_the_camera() {
+        let mut g = game();
+        assert!(!g.overhead);
+        g.toggle_view();
+        assert!(g.overhead, "the view changes at once for play");
+        assert_eq!(g.view_anim.map(|a| a.1), Some(true));
+        let mut c = crate::canvas::Canvas::new(100, 40);
+        for _ in 0..30 {
+            g.update(0.03, false);
+            crate::render::render_game(&mut c, &g, 1.0);
+        }
+        assert!(g.view_anim.is_none(), "the swoop finishes");
+        g.toggle_view();
+        assert!(!g.overhead);
+        assert_eq!(g.view_anim.map(|a| a.1), Some(false));
+        for _ in 0..30 {
+            g.update(0.03, false);
+            crate::render::render_game(&mut c, &g, 1.0);
+        }
+        assert!(g.view_anim.is_none());
+    }
+
+    #[test]
+    fn doors_open_in_their_own_way() {
+        let cases = [
+            (0u8, Tile::DoorClosed, DoorOpening::Swing, "creaks"),
+            (8, Tile::GateClosed, DoorOpening::Rise, "rises"),
+            (14, Tile::DoorClosed, DoorOpening::Split, "grind apart"),
+            (13, Tile::DoorClosed, DoorOpening::Dissolve, "dissipates"),
+            (5, Tile::DoorClosed, DoorOpening::Dissolve, "dissolves"),
+        ];
+        for (style, tile, kind, words) in cases {
+            let mut g = arena();
+            g.level.style = style;
+            for y in 2..14 {
+                g.level.set(23, y, Tile::Wall);
+            }
+            g.level.set(23, 8, tile);
+            g.p.x = 22;
+            g.player_move(2);
+            // The way is open at once; only the picture takes its time.
+            assert_eq!(g.level.tile(23, 8), Tile::DoorOpen);
+            assert_eq!(g.fx.door_at(23, 8).map(|d| d.0), Some(kind));
+            assert!(
+                g.msgs.iter().any(|m| m.text.contains(words)),
+                "style {}: {:?}",
+                style,
+                g.msgs.last().map(|m| &m.text)
+            );
+            let mut c = crate::canvas::Canvas::new(80, 30);
+            for _ in 0..25 {
+                g.update(0.03, false);
+                crate::render::render_game(&mut c, &g, 1.0);
+            }
+            assert!(g.fx.door_at(23, 8).is_none(), "the animation finishes");
+        }
+    }
+
+    #[test]
+    fn only_you_and_your_thralls_can_touch_the_warden() {
+        let mut g = arena();
+        g.p.invis = 1000;
+        let wi = spawn(&mut g, M_WARDEN, 30, 8);
+        let oi = spawn(&mut g, M_ORC, 31, 8);
+        let (wid, oid) = (g.level.monsters[wi].id, g.level.monsters[oi].id);
+        let hp = g.level.monsters[wi].hp;
+        // Monsters cannot hurt it, nor will they try.
+        g.damage_monster(wi, 50, Src::Mon(oid));
+        assert_eq!(g.level.monsters[wi].hp, hp);
+        g.monster_act(oi);
+        assert_ne!(g.level.monsters[oi].target, Some(Target::Mon(wid)));
+        // It never goes after monsters itself.
+        g.monster_act(wi);
+        assert_ne!(g.level.monsters[wi].target, Some(Target::Mon(oid)));
+        // You can hurt it, and so can a thrall.
+        g.damage_monster(wi, 5, Src::Player);
+        assert_eq!(g.level.monsters[wi].hp, hp - 5);
+        let ti = thrall(&mut g, M_ORC);
+        let tid = g.level.monsters[ti].id;
+        g.damage_monster(wi, 5, Src::Mon(tid));
+        assert_eq!(g.level.monsters[wi].hp, hp - 10);
+    }
+
+    #[test]
+    fn wards_spawn_guardians_and_weaken_the_warden() {
+        // One ward in each band of floors.
+        let g = game();
+        assert_eq!(g.ward_depths.len(), 4);
+        for (d, band) in g.ward_depths.iter().zip([(1, 3), (4, 5), (6, 8), (9, 10)]) {
+            assert!((band.0..=band.1).contains(d));
+        }
+
+        let mut g = arena();
+        g.level.rooms = vec![
+            Rect {
+                x: 2,
+                y: 2,
+                w: 2,
+                h: 2,
+            },
+            Rect {
+                x: 14,
+                y: 4,
+                w: 12,
+                h: 9,
+            },
+        ];
+        for y in 3..14 {
+            for x in 13..27 {
+                let edge = x == 13 || x == 26 || y == 3 || y == 13;
+                g.level
+                    .set(x, y, if edge { Tile::Wall } else { Tile::Floor });
+            }
+        }
+        g.level.set(13, 8, Tile::Floor); // a doorway
+        g.level.set(26, 6, Tile::DoorClosed);
+        g.level.up = (3, 3);
+        g.level.down = (30, 3);
+        place_ward(&mut g.level, &mut g.rng);
+        let w = g.level.ward.expect("a ward");
+        assert_eq!(g.level.tile(w.x, w.y), Tile::Ward);
+        // Walk up and strike it: out comes the Guardian, and the room is sealed.
+        let (px, py) = (w.x - 1, w.y);
+        g.p.x = px;
+        g.p.y = py;
+        g.refresh_view();
+        g.player_move(2);
+        assert_eq!((g.p.x, g.p.y), (px, py), "the prism blocks the way");
+        let gi = g
+            .level
+            .monsters
+            .iter()
+            .position(|m| m.kind == M_GUARDIAN && m.alive)
+            .expect("a Guardian");
+        assert_eq!(g.level.ward.unwrap().state, WardState::Shielded);
+        assert_eq!(g.level.tile(13, 8), Tile::Crystal);
+        assert_eq!(g.level.tile(26, 6), Tile::Crystal);
+        assert!(g.level.monsters[gi].max_hp > 40, "a tough fight");
+        // The shield holds while it lives.
+        g.player_move(2);
+        assert_eq!(g.level.ward.unwrap().state, WardState::Shielded);
+        // Kill it: the ward crumbles and the walls fall.
+        g.damage_monster(gi, 99_999, Src::Player);
+        assert_eq!(g.level.ward.unwrap().state, WardState::Broken);
+        assert_eq!(g.level.tile(w.x, w.y), Tile::Floor);
+        assert_eq!(g.level.tile(13, 8), Tile::Floor);
+        assert_eq!(g.level.tile(26, 6), Tile::DoorClosed);
+        assert_eq!(g.wards_destroyed, 1);
+        assert!(g.msgs.iter().any(|m| m.text.contains("scream")));
+
+        // Each broken ward weakens the Warden; all four leave it feeble and powerless.
+        let mut g = arena();
+        let wi = spawn(&mut g, M_WARDEN, 30, 8);
+        let full = g.level.monsters[wi].max_hp;
+        let dmg = g.level.monsters[wi].dmg_mult();
+        g.wards_destroyed = 2;
+        g.weaken_wardens();
+        assert!(g.level.monsters[wi].max_hp < full);
+        g.wards_destroyed = 4;
+        g.weaken_wardens();
+        let m = &g.level.monsters[wi];
+        assert_eq!(m.max_hp, (full as f32 * 0.3).round() as i32);
+        assert!(m.dmg_mult() < dmg * 0.5);
+        for _ in 0..50 {
+            g.level.monsters[wi].abil_cd = 0.0;
+            assert!(!g.unique_power(wi, Target::Player), "no powers left");
+        }
+    }
+
+    #[test]
+    fn taking_the_amulet_crumbles_the_remaining_wards() {
+        let mut g = game();
+        let mut rng = StdRng::seed_from_u64(4);
+        let mut other = generate(5, &mut rng);
+        place_ward(&mut other, &mut rng);
+        assert!(other.ward.is_some());
+        g.stash.insert(5, other);
+        let (px, py) = (g.p.x, g.p.y);
+        g.level.items.push(FloorItem {
+            x: px,
+            y: py,
+            item: Item::Amulet,
+        });
+        let i = g.level.items.len() - 1;
+        g.pickup_index(i);
+        let lv = &g.stash[&5];
+        let w = lv.ward.unwrap();
+        assert_eq!(w.state, WardState::Broken);
+        assert_eq!(lv.tile(w.x, w.y), Tile::Floor, "only the remains are left");
+        assert_eq!(g.wards_destroyed, 0, "they do not count as broken by you");
     }
 }

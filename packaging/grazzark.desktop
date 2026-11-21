@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GRAZZARK
+Comment=A first-person ASCII roguelike: claim the Amulet of GRAZZARK and return alive
+Exec=grazzark
+Terminal=true
+Categories=Game;RolePlaying;
+Keywords=roguelike;ascii;dungeon;

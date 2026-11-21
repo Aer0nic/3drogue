@@ -66,14 +66,63 @@ pub enum Tile {
     DoorOpen,
     StairsUp,
     StairsDown,
+    /// A wall of living sinew grown by the dungeon: cut through it.
+    Sinew,
+    /// A closed gate of bars (sewers, gaols, crypts, foundries): you can see
+    /// through it, but not walk through until it is opened.
+    GateClosed,
+    /// A ward prism, floating over the floor and feeding the Warden's power.
+    Ward,
+    /// A wall of crystal raised by the Prism Guardian to seal its room.
+    Crystal,
 }
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WardState {
+    /// Untouched, souls streaming from it.
+    Intact,
+    /// Its Guardian is loose; the prism is shielded until the Guardian falls.
+    Shielded,
+    /// Crumbled: only shards remain.
+    Broken,
+}
+
+/// One of the four ward prisms that strengthen the Warden.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
+pub struct Ward {
+    pub x: i32,
+    pub y: i32,
+    /// The room it stands in, sealed when its Guardian wakes.
+    pub room: Rect,
+    pub state: WardState,
+    /// The Guardian's monster id while it lives.
+    pub guardian: Option<u32>,
+    pub seen: bool,
+}
+
+/// Themes whose doors are gates of bars you can see through.
+pub const GATE_STYLES: [u8; 4] = [6, 7, 8, 15];
 
 impl Tile {
     pub fn opaque(self) -> bool {
-        matches!(self, Tile::Wall | Tile::DoorClosed)
+        matches!(
+            self,
+            Tile::Wall | Tile::DoorClosed | Tile::Sinew | Tile::Crystal
+        )
+    }
+    /// A door or gate that opens when bumped.
+    pub fn is_closed_door(self) -> bool {
+        matches!(self, Tile::DoorClosed | Tile::GateClosed)
+    }
+    /// Blocks a diagonal step around its corner.
+    pub fn blocks_corner(self) -> bool {
+        self.opaque() || self == Tile::GateClosed
     }
     pub fn walkable(self) -> bool {
-        matches!(self, Tile::Floor | Tile::DoorOpen | Tile::StairsUp | Tile::StairsDown)
+        matches!(
+            self,
+            Tile::Floor | Tile::DoorOpen | Tile::StairsUp | Tile::StairsDown
+        )
     }
 }
 
@@ -90,7 +139,10 @@ impl Rect {
         (self.x + self.w / 2, self.y + self.h / 2)
     }
     pub fn overlaps(&self, o: &Rect, m: i32) -> bool {
-        self.x - m < o.x + o.w && self.x + self.w + m > o.x && self.y - m < o.y + o.h && self.y + self.h + m > o.y
+        self.x - m < o.x + o.w
+            && self.x + self.w + m > o.x
+            && self.y - m < o.y + o.h
+            && self.y + self.h + m > o.y
     }
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
@@ -103,6 +155,81 @@ pub enum TrapKind {
     Gas,
     Fire,
     Alarm,
+    /// A fanged mouth in the living floor.
+    Maw,
+}
+
+/// Special rooms that give a floor some character.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RoomKind {
+    /// A hall of pillars.
+    Pillars,
+    /// Half fallen in, strewn with rubble.
+    Rubble,
+    /// A walled inner chamber with treasure behind its door.
+    Chamber,
+    /// Heaped bones, some of which twitch.
+    Ossuary,
+    /// Racks of old arms and armour.
+    Armory,
+    /// Shelves of mouldering scrolls.
+    Library,
+    /// A candlelit shrine with healing draughts.
+    Shrine,
+    /// A trapped gallery with a prize in it.
+    TrapHall,
+    /// A beasts' lair littered with gnawed bones.
+    Den,
+    /// Pale fungus whose spores hang in the air.
+    Garden,
+}
+
+impl RoomKind {
+    /// What you notice on first walking in, if anything.
+    pub fn enter_text(self) -> Option<&'static str> {
+        match self {
+            RoomKind::Pillars | RoomKind::Rubble => None,
+            RoomKind::Chamber => Some(
+                "A walled chamber stands in the middle of this room. Something is kept inside.",
+            ),
+            RoomKind::Ossuary => {
+                Some("Bones lie heaped in rows here: an ossuary. Some of them twitch.")
+            }
+            RoomKind::Armory => {
+                Some("Racks of old weapons and rusted mail line the walls: an armory!")
+            }
+            RoomKind::Library => {
+                Some("Rotting shelves sag under mouldering scrolls: a forgotten library.")
+            }
+            RoomKind::Shrine => {
+                Some("A quiet shrine. Pale candles still burn, though no one tends them.")
+            }
+            RoomKind::TrapHall => {
+                Some("The floor here is scored and stained, and something glints in the middle...")
+            }
+            RoomKind::Den => {
+                Some("Gnawed bones and a reek of musk: you have walked into a beast's den.")
+            }
+            RoomKind::Garden => {
+                Some("A garden of pale fungus. Spores hang thick in the air: tread carefully.")
+            }
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
+pub struct Feature {
+    pub kind: RoomKind,
+    pub room: Rect,
+    pub seen: bool,
+}
+
+/// A wall of living sinew and how much cutting it still takes.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
+pub struct Sinew {
+    pub x: i32,
+    pub y: i32,
+    pub hp: i32,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -120,6 +247,18 @@ pub struct Corpse {
     pub y: i32,
     /// World time at which it rises again; negative = never.
     pub revive_at: f64,
+    /// Times this body has served you as a thrall and fallen.
+    #[serde(default)]
+    pub raises: u8,
+}
+
+/// A drifting cloud of paralysing spores on one tile.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
+pub struct Cloud {
+    pub x: i32,
+    pub y: i32,
+    /// World time at which it disperses.
+    pub until: f64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -168,6 +307,21 @@ pub struct Level {
     /// The player has laid eyes on the monster closet.
     #[serde(default)]
     pub closet_found: bool,
+    /// Spore clouds.
+    #[serde(default)]
+    pub clouds: Vec<Cloud>,
+    /// Special rooms.
+    #[serde(default)]
+    pub features: Vec<Feature>,
+    /// Walls of sinew the living dungeon has grown.
+    #[serde(default)]
+    pub sinews: Vec<Sinew>,
+    /// A ward prism, if one stands on this floor.
+    #[serde(default)]
+    pub ward: Option<Ward>,
+    /// Crystal walls sealing the ward's room, with what they replaced.
+    #[serde(default)]
+    pub crystal: Vec<(i32, i32, Tile)>,
 }
 
 impl Level {
@@ -200,6 +354,11 @@ impl Level {
             has_unique: false,
             closet: None,
             closet_found: false,
+            clouds: Vec::new(),
+            features: Vec::new(),
+            sinews: Vec::new(),
+            ward: None,
+            crystal: Vec::new(),
         }
     }
 
@@ -236,14 +395,32 @@ impl Level {
     /// Diagonal moves may not cut past opaque corners.
     pub fn can_step(&self, x: i32, y: i32, dx: i32, dy: i32) -> bool {
         if dx != 0 && dy != 0 {
-            !self.tile(x + dx, y).opaque() && !self.tile(x, y + dy).opaque()
+            !self.tile(x + dx, y).blocks_corner() && !self.tile(x, y + dy).blocks_corner()
         } else {
             true
         }
     }
 
+    /// Doors take the look of the floor's theme: in sewers, gaols, crypts and
+    /// foundries they become gates of bars.
+    pub fn theme_doors(&mut self) {
+        if GATE_STYLES.contains(&self.style) {
+            for t in self.tiles.iter_mut() {
+                if *t == Tile::DoorClosed {
+                    *t = Tile::GateClosed;
+                }
+            }
+        }
+    }
+
+    pub fn cloud_at(&self, x: i32, y: i32) -> bool {
+        self.clouds.iter().any(|c| c.x == x && c.y == y)
+    }
+
     pub fn monster_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.monsters.iter().position(|m| m.alive && m.x == x && m.y == y)
+        self.monsters
+            .iter()
+            .position(|m| m.alive && m.x == x && m.y == y)
     }
 
     pub fn los(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> bool {
@@ -272,7 +449,12 @@ impl Level {
         let r2 = r * r + r;
         self.mark_seen(px, py);
         for i in -r..=r {
-            let targets = [(px + i, py - r), (px + i, py + r), (px - r, py + i), (px + r, py + i)];
+            let targets = [
+                (px + i, py - r),
+                (px + i, py + r),
+                (px - r, py + i),
+                (px + r, py + i),
+            ];
             for &(tx, ty) in targets.iter() {
                 let pts = line(px, py, tx, ty);
                 for &(x, y) in pts.iter().skip(1) {
@@ -300,7 +482,10 @@ impl Level {
                     for &(dx, dy) in DIRS.iter() {
                         let nx = x + dx;
                         let ny = y + dy;
-                        if self.inb(nx, ny) && self.tile(nx, ny).opaque() && !self.visible[self.idx(nx, ny)] {
+                        if self.inb(nx, ny)
+                            && self.tile(nx, ny).opaque()
+                            && !self.visible[self.idx(nx, ny)]
+                        {
                             extra.push((nx, ny));
                         }
                     }
@@ -336,8 +521,8 @@ impl Level {
                     continue;
                 }
                 let cost = match self.tile(nx, ny) {
-                    Tile::Wall => continue,
-                    Tile::DoorClosed => 3,
+                    Tile::Wall | Tile::Sinew | Tile::Crystal | Tile::Ward => continue,
+                    Tile::DoorClosed | Tile::GateClosed => 3,
                     _ => 1,
                 };
                 if !self.can_step(x, y, dx, dy) {
@@ -450,6 +635,108 @@ fn carve(lv: &mut Level, a: (i32, i32), b: (i32, i32), rng: &mut StdRng) {
     }
 }
 
+/// Is every walkable tile reachable from (sx,sy)?
+fn connected(lv: &Level, sx: i32, sy: i32) -> bool {
+    let dm = lv.dijkstra(sx, sy);
+    lv.tiles
+        .iter()
+        .enumerate()
+        .all(|(i, t)| !t.walkable() || dm[i] < UNREACH)
+}
+
+/// Give some rooms a purpose: pillared halls, rubble, walled chambers, and
+/// rooms whose contents are filled in later (armories, ossuaries, dens...).
+/// A room is put back as it was if its new walls would cut anything off.
+fn decorate_rooms(lv: &mut Level, rooms: &[Rect], round: &[bool], depth: u32, rng: &mut StdRng) {
+    let start = rooms[0].center();
+    for (i, r) in rooms.iter().enumerate().skip(1) {
+        if !rng.gen_bool(0.55) {
+            continue;
+        }
+        let mut kinds = vec![
+            RoomKind::Ossuary,
+            RoomKind::Armory,
+            RoomKind::Library,
+            RoomKind::Shrine,
+            RoomKind::Den,
+        ];
+        if !round[i] {
+            kinds.push(RoomKind::Rubble);
+            if r.w >= 6 && r.h >= 5 {
+                kinds.push(RoomKind::Pillars);
+                kinds.push(RoomKind::TrapHall);
+            }
+            if r.w >= 7 && r.h >= 7 {
+                kinds.push(RoomKind::Chamber);
+                kinds.push(RoomKind::Chamber);
+            }
+        }
+        if depth >= 3 {
+            kinds.push(RoomKind::Garden);
+        }
+        let kind = kinds[rng.gen_range(0..kinds.len())];
+        let saved: Vec<(i32, i32, Tile)> = (r.y - 1..=r.y + r.h)
+            .flat_map(|y| (r.x - 1..=r.x + r.w).map(move |x| (x, y)))
+            .map(|(x, y)| (x, y, lv.tile(x, y)))
+            .collect();
+        let c = r.center();
+        let interior = |x: i32, y: i32| {
+            x > r.x && x < r.x + r.w - 1 && y > r.y && y < r.y + r.h - 1 && (x, y) != c
+        };
+        match kind {
+            RoomKind::Pillars => {
+                for y in (r.y + 1..r.y + r.h - 1).step_by(2) {
+                    for x in (r.x + 1..r.x + r.w - 1).step_by(2) {
+                        if interior(x, y) && lv.tile(x, y) == Tile::Floor {
+                            lv.set(x, y, Tile::Wall);
+                        }
+                    }
+                }
+            }
+            RoomKind::Rubble => {
+                for y in r.y + 1..r.y + r.h - 1 {
+                    for x in r.x + 1..r.x + r.w - 1 {
+                        if interior(x, y) && lv.tile(x, y) == Tile::Floor && rng.gen_bool(0.18) {
+                            lv.set(x, y, Tile::Wall);
+                        }
+                    }
+                }
+            }
+            RoomKind::Chamber => {
+                let (x0, y0, x1, y1) = (r.x + 1, r.y + 1, r.x + r.w - 2, r.y + r.h - 2);
+                for y in y0..=y1 {
+                    for x in x0..=x1 {
+                        if x == x0 || x == x1 || y == y0 || y == y1 {
+                            lv.set(x, y, Tile::Wall);
+                        } else {
+                            lv.set(x, y, Tile::Floor);
+                        }
+                    }
+                }
+                let door = match rng.gen_range(0..4) {
+                    0 => ((x0 + x1) / 2, y0),
+                    1 => ((x0 + x1) / 2, y1),
+                    2 => (x0, (y0 + y1) / 2),
+                    _ => (x1, (y0 + y1) / 2),
+                };
+                lv.set(door.0, door.1, Tile::DoorClosed);
+            }
+            _ => {}
+        }
+        if !connected(lv, start.0, start.1) {
+            for (x, y, t) in saved {
+                lv.set(x, y, t);
+            }
+            continue;
+        }
+        lv.features.push(Feature {
+            kind,
+            room: *r,
+            seen: false,
+        });
+    }
+}
+
 fn try_generate(depth: u32, rng: &mut StdRng) -> Option<Level> {
     let mut lv = Level::blank(depth);
     let mut rooms: Vec<Rect> = Vec::new();
@@ -473,9 +760,11 @@ fn try_generate(depth: u32, rng: &mut StdRng) -> Option<Level> {
     }
     rooms.sort_by_key(|r| r.x);
 
+    let mut round = vec![false; rooms.len()];
     for i in 0..rooms.len() {
         let r = rooms[i];
-        let round = i > 0 && r.w >= 6 && r.h >= 6 && rng.gen_bool(0.3);
+        round[i] = i > 0 && r.w >= 6 && r.h >= 6 && rng.gen_bool(0.3);
+        let round = round[i];
         let cx = r.x as f32 + r.w as f32 / 2.0;
         let cy = r.y as f32 + r.h as f32 / 2.0;
         for yy in r.y..r.y + r.h {
@@ -490,7 +779,7 @@ fn try_generate(depth: u32, rng: &mut StdRng) -> Option<Level> {
                 lv.set(xx, yy, Tile::Floor);
             }
         }
-        if !round && r.w >= 8 && r.h >= 6 && rng.gen_bool(0.45) {
+        if !round && r.w >= 8 && r.h >= 6 && rng.gen_bool(0.25) {
             let pillars = [
                 (r.x + 2, r.y + 1),
                 (r.x + r.w - 3, r.y + 1),
@@ -553,6 +842,8 @@ fn try_generate(depth: u32, rng: &mut StdRng) -> Option<Level> {
             }
         }
     }
+
+    decorate_rooms(&mut lv, &rooms, &round, depth, rng);
 
     let up = rooms[0].center();
     lv.set(up.0, up.1, Tile::StairsUp);
@@ -619,9 +910,44 @@ fn try_generate(depth: u32, rng: &mut StdRng) -> Option<Level> {
                     if (4..=6).contains(&depth) && rng.gen_bool(0.3) {
                         c = [0.35, 1.0, 0.5];
                     }
-                    lv.torches.push(Torch { x: wx, y: wy, fx, fy, color: [c[0] * var, c[1] * var, c[2] * var] });
+                    lv.torches.push(Torch {
+                        x: wx,
+                        y: wy,
+                        fx,
+                        fy,
+                        color: [c[0] * var, c[1] * var, c[2] * var],
+                    });
                     break;
                 }
+            }
+        }
+    }
+    // Shrines burn with pale candles.
+    let shrines: Vec<Rect> = lv
+        .features
+        .iter()
+        .filter(|f| f.kind == RoomKind::Shrine)
+        .map(|f| f.room)
+        .collect();
+    for r in shrines {
+        let spots = [
+            (r.x + r.w / 2, r.y - 1, r.x + r.w / 2, r.y),
+            (r.x + r.w / 2, r.y + r.h, r.x + r.w / 2, r.y + r.h - 1),
+            (r.x - 1, r.y + r.h / 2, r.x, r.y + r.h / 2),
+            (r.x + r.w, r.y + r.h / 2, r.x + r.w - 1, r.y + r.h / 2),
+        ];
+        for (wx, wy, fx, fy) in spots {
+            if lv.tile(wx, wy) == Tile::Wall
+                && lv.tile(fx, fy) == Tile::Floor
+                && !lv.torches.iter().any(|t| t.x == wx && t.y == wy)
+            {
+                lv.torches.push(Torch {
+                    x: wx,
+                    y: wy,
+                    fx,
+                    fy,
+                    color: [0.6, 0.7, 1.1],
+                });
             }
         }
     }
