@@ -71,9 +71,28 @@ G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs
   The Hall of the Dead records your past runs.
 - **Difficulties**: Normal, Hard, Difficult and Chaotic. Escaping with the
   Amulet unlocks the next one. Higher difficulties give monsters more health and
-  damage, and multiply the soul points you earn.
+  damage, and multiply the soul points you earn. Normal pays 20% fewer.
 - **Bestiary**: every monster you slay is recorded across runs. 1 kill reveals
   its name, 10 its basic stats, 100 its lore, haunts and full stats. At 200 kills
   you master it: +1.5% crit chance and +2% crit damage against it in every run.
+  Uniques and the Warden need far fewer kills: 1 name, 3 stats, 5 lore,
+  7 full stats, 10 mastered.
 - **Monster closets**: some floors hide a big room packed with sleeping
   monsters, sometimes with champions or even an overlord among them.
+- **Necromancer thralls grow**: each kill gives a thrall a 5% chance to become
+  a champion (+2% per 5 levels). A champion thrall that slays an enemy champion
+  may become an overlord thrall (1.5%, +0.5% per 5 levels), which roars foes into
+  flight and raises short-lived skeleton minions, each on a 25-50 turn cooldown.
+  Every thrall binds 3 of your max HP (2 from level 10, 1 from level 20) until it
+  dies, and they heal a little slower than you.
+- **Shuffled floor themes**: each run deals three of five wall styles (brick
+  cellars, mossy halls, obsidian vaults, frozen catacombs, crystal caverns) in
+  random order, in bands of 2-4 floors, before the bone-walled Sanctum.
+- **The living dungeon**: faces surface in the Sanctum's walls in silent
+  screams. Take the Amulet and they stare in terror, or hang dead. On the
+  climb back up, flesh, veins and watching eyes spread over the dungeon, thicker
+  on every floor nearer the surface. It also torments you with curses that
+  last a few turns: Forgetting (your map is wiped until it passes), Paranoia
+  (phantom monsters that can't hurt you and vanish when touched), Darkness,
+  Vertigo (steps lurch the wrong way), Leaden limbs (40% slower) and Hush (no
+  skills or scrolls).

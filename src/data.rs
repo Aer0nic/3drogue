@@ -558,10 +558,34 @@ impl MAbil {
 }
 
 /// Kills needed for each tier of bestiary knowledge.
-pub const LORE_NAME: u32 = 1;
-pub const LORE_BASIC: u32 = 10;
-pub const LORE_FULL: u32 = 100;
-pub const LORE_MASTER: u32 = 200;
+#[derive(Clone, Copy, Debug)]
+pub struct LoreTiers {
+    /// Name and portrait.
+    pub name: u32,
+    /// Health, damage, armour, speed.
+    pub basic: u32,
+    /// The written description.
+    pub desc: u32,
+    /// Depths, accuracy, traits and the rest.
+    pub adv: u32,
+    /// The star, and the crit bonus against it.
+    pub master: u32,
+}
+
+/// Common monsters are slain by the hundred.
+pub const LORE_COMMON: LoreTiers = LoreTiers { name: 1, basic: 10, desc: 100, adv: 100, master: 200 };
+/// Uniques and the Warden are met at most once a run.
+pub const LORE_RARE: LoreTiers = LoreTiers { name: 1, basic: 3, desc: 5, adv: 7, master: 10 };
+
+impl MonsterDef {
+    pub fn lore(&self) -> LoreTiers {
+        if self.boss || self.unique > 0 {
+            LORE_RARE
+        } else {
+            LORE_COMMON
+        }
+    }
+}
 
 // ---------------------------------------------------------------- unique items
 
@@ -1091,16 +1115,18 @@ pub struct UpgradeDef {
     pub cost: u32,
     pub skill: Option<Skill>,
     pub cat: UCat,
+    /// Fixed price per rank, overriding the usual cost x rank^2.
+    pub ranks: &'static [u32],
 }
 
 const fn stat(id: &'static str, name: &'static str, desc: &'static str, max: u32, cost: u32) -> UpgradeDef {
-    UpgradeDef { id, name, desc, max, cost, skill: None, cat: UCat::Stat }
+    UpgradeDef { id, name, desc, max, cost, skill: None, cat: UCat::Stat, ranks: &[] }
 }
 const fn boon(id: &'static str, name: &'static str, desc: &'static str, max: u32, cost: u32) -> UpgradeDef {
-    UpgradeDef { id, name, desc, max, cost, skill: None, cat: UCat::Boon }
+    UpgradeDef { id, name, desc, max, cost, skill: None, cat: UCat::Boon, ranks: &[] }
 }
 const fn cskill(id: &'static str, class: usize, s: Skill, cost: u32) -> UpgradeDef {
-    UpgradeDef { id, name: "", desc: "", max: 1, cost, skill: Some(s), cat: UCat::Skill(class) }
+    UpgradeDef { id, name: "", desc: "", max: 1, cost, skill: Some(s), cat: UCat::Skill(class), ranks: &[] }
 }
 
 pub static UPGRADES: &[UpgradeDef] = &[
@@ -1117,7 +1143,10 @@ pub static UPGRADES: &[UpgradeDef] = &[
     boon("harvest", "Soul Harvest", "+10% soul points from every descent per rank", 3, 80),
     boon("bloodlust", "Bloodlust", "Each killing blow has a 10% chance per rank to cost no time at all", 3, 90),
     boon("pockets", "Deep Pockets", "+3 pack slots per rank", 2, 60),
-    boon("carto", "Cartographer", "Rank 1: the way down is revealed on every floor. Rank 2: every room is mapped too", 2, 100),
+    UpgradeDef {
+        ranks: &[1500, 5000],
+        ..boon("carto", "Cartographer", "Rank 1: the way down is revealed on every floor. Rank 2: every room is mapped too", 2, 1500)
+    },
     boon("anchor", "Soul Anchor", "Once per descent, cheat death: rise with 40% health as nearby foes flee", 1, 600),
     boon("coup", "Coup de Grace", "+15% damage per rank to foes below 30% health", 3, 80),
     boon("alchemy", "Alchemy", "Potions are 25% more potent per rank", 3, 70),
@@ -1130,8 +1159,8 @@ pub static UPGRADES: &[UpgradeDef] = &[
     boon("laststand", "Last Stand", "Below 25% health: +15% damage and +1 AC per rank", 3, 80),
     boon("fleet", "Fleet Foot", "Walking takes 10% less time per rank", 2, 120),
     boon("scavenger", "Scavenger", "Start each descent with one random scroll per rank", 3, 50),
-    UpgradeDef { id: "class_ranger", name: "Unlock: Ranger", desc: "New class: archer with a wolf companion", max: 1, cost: 400, skill: None, cat: UCat::Class },
-    UpgradeDef { id: "class_necro", name: "Unlock: Necromancer", desc: "New class: raise the dead, drain life", max: 1, cost: 700, skill: None, cat: UCat::Class },
+    UpgradeDef { id: "class_ranger", name: "Unlock: Ranger", desc: "New class: archer with a wolf companion", max: 1, cost: 400, skill: None, cat: UCat::Class, ranks: &[] },
+    UpgradeDef { id: "class_necro", name: "Unlock: Necromancer", desc: "New class: raise the dead, drain life", max: 1, cost: 700, skill: None, cat: UCat::Class, ranks: &[] },
     cskill("w_wind", 0, Skill::SecondWind, 350),
     cskill("w_cry", 0, Skill::BattleCry, 450),
     cskill("r_step", 1, Skill::Shadowstep, 400),
@@ -1180,24 +1209,65 @@ pub struct DiffDef {
 }
 
 pub static DIFFICULTIES: [DiffDef; 4] = [
-    DiffDef { name: "Normal", desc: "The dungeon as GRAZZARK made it.", hp: 1.0, dmg: 1.0, souls: 1.0, color: Rgb(170, 220, 170) },
+    DiffDef { name: "Normal", desc: "The dungeon as GRAZZARK made it. Souls come 20% thinner here.", hp: 1.0, dmg: 1.0, souls: 0.8, color: Rgb(170, 220, 170) },
     DiffDef { name: "Hard", desc: "Monsters have 30% more health and deal 20% more damage.", hp: 1.3, dmg: 1.2, souls: 1.5, color: Rgb(240, 210, 110) },
     DiffDef { name: "Difficult", desc: "Monsters have 60% more health and deal 40% more damage.", hp: 1.6, dmg: 1.4, souls: 2.0, color: Rgb(255, 140, 70) },
     DiffDef { name: "Chaotic", desc: "Monsters have double health and deal 70% more damage.", hp: 2.0, dmg: 1.7, souls: 3.0, color: Rgb(255, 60, 90) },
 ];
 
-pub static DEPTH_NAMES: [&str; 10] = [
-    "The Old Cellars",
-    "The Rat Warrens",
-    "The Forgotten Crypts",
-    "The Mossy Halls",
-    "The Sunken Galleries",
-    "The Fungal Deep",
-    "The Obsidian Vaults",
-    "The Molten Stair",
-    "The Halls of Torment",
-    "The Sanctum of GRAZZARK",
-];
+/// Wall styles for depths 1-9; a run deals three of them out in random
+/// order. Style 3 is reserved for the Sanctum on depth 10.
+pub const FLOOR_THEMES: [u8; 5] = [0, 1, 2, 4, 5];
+pub const SANCTUM_STYLE: u8 = 3;
+
+/// The names a theme's floors take, in the order you reach them.
+fn theme_names(style: u8) -> [&'static str; 4] {
+    match style {
+        0 => ["The Old Cellars", "The Rat Warrens", "The Forgotten Crypts", "The Drowned Cisterns"],
+        1 => ["The Mossy Halls", "The Sunken Galleries", "The Fungal Deep", "The Rotting Gardens"],
+        2 => ["The Obsidian Vaults", "The Molten Stair", "The Halls of Torment", "The Ember Forges"],
+        4 => ["The Frozen Catacombs", "The Rime Halls", "The Glacial Tombs", "The Howling Cold"],
+        5 => ["The Glittering Grotto", "The Crystal Caverns", "The Prism Deep", "The Shard Halls"],
+        _ => ["The Sanctum of GRAZZARK"; 4],
+    }
+}
+
+/// Lay out the themes for depths 1-9: three bands of 2-4 floors each, each
+/// band a different style.
+pub fn roll_themes(rng: &mut rand::rngs::StdRng) -> Vec<u8> {
+    use rand::seq::SliceRandom;
+    let mut pool = FLOOR_THEMES.to_vec();
+    pool.shuffle(rng);
+    let splits: [[usize; 3]; 7] = [[3, 3, 3], [2, 3, 4], [4, 3, 2], [3, 2, 4], [2, 4, 3], [4, 2, 3], [3, 4, 2]];
+    let split = splits.choose(rng).copied().unwrap_or([3, 3, 3]);
+    let mut v = Vec::with_capacity(9);
+    for (b, &len) in split.iter().enumerate() {
+        for _ in 0..len {
+            v.push(pool[b]);
+        }
+    }
+    v
+}
+
+/// The themes every run had before they were shuffled.
+pub fn classic_themes() -> Vec<u8> {
+    vec![0, 0, 0, 1, 1, 1, 2, 2, 2]
+}
+
+/// Name of a floor, from its depth and the run's theme layout.
+pub fn floor_name(themes: &[u8], depth: u32) -> &'static str {
+    if depth >= 10 || depth == 0 {
+        return theme_names(SANCTUM_STYLE)[0];
+    }
+    let i = (depth - 1) as usize;
+    let style = themes.get(i).copied().unwrap_or(0);
+    // Position of this floor within its band.
+    let mut k = 0;
+    while k < i && themes.get(i - k - 1) == Some(&style) {
+        k += 1;
+    }
+    theme_names(style)[k.min(3)]
+}
 
 // ---------------------------------------------------------------- held-weapon art
 

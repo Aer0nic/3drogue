@@ -418,8 +418,8 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     let h = c.h as i32;
     c.fill(0, 0, w, h, ' ', Rgb::WHITE, Rgb(8, 8, 6));
     c.center(1, "THE BESTIARY", Rgb(230, 210, 150));
-    let known = MONSTERS.iter().filter(|m| prof.kills_of(m.name) >= LORE_NAME).count();
-    let stars = MONSTERS.iter().filter(|m| prof.kills_of(m.name) >= LORE_MASTER).count();
+    let known = MONSTERS.iter().filter(|m| prof.kills_of(m.name) >= m.lore().name).count();
+    let stars = MONSTERS.iter().filter(|m| prof.kills_of(m.name) >= m.lore().master).count();
     c.center(2, &format!("{} of {} creatures known   {} mastered", known, MONSTERS.len(), stars), Rgb(160, 150, 120));
 
     let lw = 38.min(w / 2 - 2);
@@ -432,17 +432,18 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
         }
         let m = &MONSTERS[i];
         let k = prof.kills_of(m.name);
+        let lt = m.lore();
         let y = top + row as i32;
-        let star = if k >= LORE_MASTER { '*' } else { ' ' };
-        let name = if k >= LORE_NAME { m.name.to_string() } else { "???".to_string() };
+        let star = if k >= lt.master { '*' } else { ' ' };
+        let name = if k >= lt.name { m.name.to_string() } else { "???".to_string() };
         let name: String = name.chars().take((lw - 10).max(4) as usize).collect();
         let line = format!("{}{:<w$}{:>6}", star, name, k, w = (lw - 8).max(4) as usize);
         if i == sel {
             c.text_bg(1, y, &format!(" {}", line), Rgb::BLACK, Rgb(220, 200, 140));
         } else {
-            let col = if k >= LORE_MASTER {
+            let col = if k >= lt.master {
                 Rgb(255, 215, 90)
-            } else if k >= LORE_NAME {
+            } else if k >= lt.name {
                 m.color.lerp(Rgb::WHITE, 0.3)
             } else {
                 Rgb(80, 76, 70)
@@ -454,6 +455,7 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     // Detail panel.
     let m = &MONSTERS[sel];
     let k = prof.kills_of(m.name);
+    let lt = m.lore();
     let px = lw + 3;
     let pw = w - px - 2;
     if pw < 20 {
@@ -463,13 +465,13 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     let tx = px + 2;
     let tw = (pw - 4) as usize;
     let mut y = top;
-    if k < LORE_NAME {
+    if k < lt.name {
         c.text(tx, y, "An unknown horror.", Rgb(150, 140, 120));
         c.text(tx, y + 2, "Slay one to learn its name.", Rgb(120, 110, 100));
         return;
     }
-    let title_col = if k >= LORE_MASTER { Rgb(255, 215, 90).lerp(Rgb::WHITE, 0.3 + 0.3 * (t * 3.0).sin()) } else { m.color };
-    let star = if k >= LORE_MASTER { "* " } else { "" };
+    let title_col = if k >= lt.master { Rgb(255, 215, 90).lerp(Rgb::WHITE, 0.3 + 0.3 * (t * 3.0).sin()) } else { m.color };
+    let star = if k >= lt.master { "* " } else { "" };
     c.text(tx, y, &format!("{}{}", star, cap_first(m.name)), title_col);
     c.text(tx + pw - 18, y, &format!("{:>5} slain", k), Rgb(180, 170, 140));
     y += 2;
@@ -483,8 +485,8 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     }
     y += 1;
     let next = |n: u32| format!("({} more kills to learn more)", n.saturating_sub(k));
-    if k < LORE_BASIC {
-        c.text(tx, y, &next(LORE_BASIC), Rgb(120, 110, 100));
+    if k < lt.basic {
+        c.text(tx, y, &next(lt.basic), Rgb(120, 110, 100));
         return;
     }
     let hp_txt = if m.hp > 0 { m.hp.to_string() } else { "?".into() };
@@ -492,8 +494,8 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
     y += 1;
     c.text(tx, y, &format!("Kind: {}", faction_word(m.faction)), Rgb(190, 180, 150));
     y += 2;
-    if k < LORE_FULL {
-        c.text(tx, y, &next(LORE_FULL), Rgb(120, 110, 100));
+    if k < lt.desc {
+        c.text(tx, y, &next(lt.desc), Rgb(120, 110, 100));
         return;
     }
     let lore = MONSTER_LORE.get(sel).copied().unwrap_or("");
@@ -505,6 +507,12 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
         y += 1;
     }
     y += 1;
+    if k < lt.adv {
+        if y < h - 2 {
+            c.text(tx, y, &next(lt.adv), Rgb(120, 110, 100));
+        }
+        return;
+    }
     let depth = if m.boss {
         "depth 10, guarding the Amulet".to_string()
     } else if m.unique > 0 {
@@ -555,9 +563,9 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
         }
     }
     y += 1;
-    if k < LORE_MASTER {
+    if k < lt.master {
         if y < h - 2 {
-            c.text(tx, y, &format!("({} more kills to master it)", LORE_MASTER - k), Rgb(120, 110, 100));
+            c.text(tx, y, &format!("({} more kills to master it)", lt.master - k), Rgb(120, 110, 100));
         }
     } else if y < h - 2 {
         c.text(tx, y, "MASTERED: +1.5% crit chance and +2% crit damage against it.", Rgb(255, 215, 90));

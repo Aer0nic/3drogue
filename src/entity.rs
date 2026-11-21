@@ -75,6 +75,15 @@ pub struct Monster {
     pub charging: bool,
     /// World time at which its special ability can be used again.
     pub abil_cd: f64,
+    /// A necromancer's thrall: costs upkeep, can rise to champion and overlord.
+    #[serde(default)]
+    pub thrall: bool,
+    /// A short-lived minion crumbles at this world time (0 = never).
+    #[serde(default)]
+    pub expires: f64,
+    /// An overlord thrall's terrifying roar is ready again at this world time.
+    #[serde(default)]
+    pub roar_cd: f64,
     // presentation state
     pub rx: f32,
     pub ry: f32,
@@ -106,6 +115,9 @@ impl Monster {
             raged: false,
             charging: false,
             abil_cd: time + 300.0,
+            thrall: false,
+            expires: 0.0,
+            roar_cd: 0.0,
             rx: x as f32,
             ry: y as f32,
             flash: 0.0,

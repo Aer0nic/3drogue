@@ -927,6 +927,10 @@ mod tests {
                     if step % 90 == 0 {
                         g.p.vision = 10;
                     }
+                    if g.p.has_amulet && step % 60 == 0 {
+                        let c = game::Curse::ALL[(step / 60) % game::Curse::ALL.len()];
+                        g.start_curse(c, 30);
+                    }
                     let a = match rng.gen_range(0..14) {
                         0..=4 => Action::Move(rng.gen_range(0..8), rng.gen_bool(0.5)),
                         5 => Action::Turn(if rng.gen_bool(0.5) { 1 } else { -1 }),

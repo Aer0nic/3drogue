@@ -29,6 +29,8 @@ pub fn palette(style: u8) -> Palette {
         0 => Palette { wall: Rgb(160, 115, 85), floor: Rgb(125, 118, 105), ceil: Rgb(80, 72, 65), accent: Rgb(220, 160, 90) },
         1 => Palette { wall: Rgb(100, 128, 88), floor: Rgb(95, 108, 88), ceil: Rgb(55, 66, 55), accent: Rgb(130, 220, 120) },
         2 => Palette { wall: Rgb(88, 80, 108), floor: Rgb(92, 84, 100), ceil: Rgb(45, 38, 55), accent: Rgb(255, 110, 60) },
+        4 => Palette { wall: Rgb(150, 175, 200), floor: Rgb(120, 135, 150), ceil: Rgb(55, 65, 85), accent: Rgb(150, 220, 255) },
+        5 => Palette { wall: Rgb(85, 95, 110), floor: Rgb(80, 85, 95), ceil: Rgb(35, 40, 55), accent: Rgb(90, 240, 220) },
         _ => Palette { wall: Rgb(205, 195, 165), floor: Rgb(125, 92, 82), ceil: Rgb(65, 42, 42), accent: Rgb(180, 110, 255) },
     }
 }
@@ -102,8 +104,173 @@ pub fn light_at(g: &Game, x: f32, y: f32, t: f32) -> [f32; 3] {
     l
 }
 
+/// Per-frame context for wall texturing.
+struct WallCtx {
+    t: f32,
+    /// Sanctum faces: 0 none, 1 screaming, 2 panicked and dying (the Amulet is taken).
+    dread: u8,
+    /// How far the living dungeon has rotted the walls, 0..1.
+    corrupt: f32,
+}
+
+type Texel = (f32, Option<char>, Option<Rgb>);
+
+/// The living dungeon's heartbeat: a double thump, 0..1.
+fn heartbeat(t: f32) -> f32 {
+    let p = (t * 1.1).fract();
+    (1.0 - p * 7.0).max(0.0) + 0.6 * (1.0 - (p - 0.22).abs() * 9.0).max(0.0)
+}
+
+/// A face pressing out of the Sanctum's walls. Before the Amulet is taken they
+/// surface now and then in a silent scream; afterwards they stare in terror,
+/// and some hang slack and dead.
+fn wall_face(u: f32, v: f32, mx: i32, my: i32, wc: &WallCtx) -> Option<Texel> {
+    if hashf(mx * 3 + 11, my * 5 + 7) > 0.38 {
+        return None;
+    }
+    let seed = hashf(mx * 13 + 1, my * 7 + 3);
+    let t = wc.t;
+    let panic = wc.dread == 2;
+    let dead = panic && hashf(mx + 5, my * 3 + 9) < 0.35;
+    // How far the face has pushed out of the stone, 0..1.
+    let a = if panic {
+        1.0
+    } else {
+        let phase = (t * 0.09 + seed * 7.0).fract();
+        if phase > 0.32 {
+            return None;
+        }
+        (phase / 0.32 * PI).sin()
+    };
+    if a < 0.12 {
+        return None;
+    }
+    let tremble = if dead { 0.0 } else if panic { 0.025 } else { 0.01 };
+    let u = u + tremble * (t * 37.0 + seed * 20.0).sin();
+    let v = v + tremble * 0.5 * (t * 29.0 + seed * 11.0).cos();
+    let (du, dv) = ((u - 0.5) / 0.34, (v - 0.52) / 0.42);
+    let r = du * du + dv * dv;
+    if r > 1.0 {
+        return None;
+    }
+    let flesh = if dead { Rgb(135, 140, 115) } else { Rgb(222, 190, 165) };
+    let skin = Rgb(205, 195, 165).lerp(flesh, a);
+    if r > 0.82 {
+        return Some((0.45, Some(if du < 0.0 { '(' } else { ')' }), Some(skin)));
+    }
+    for ex in [0.37f32, 0.63] {
+        if dead {
+            let (eu, ev) = ((u - ex) / 0.075, (v - 0.40) / 0.065);
+            if eu * eu + ev * ev < 1.0 {
+                if (eu.abs() - ev.abs()).abs() < 0.4 {
+                    return Some((0.25, Some('x'), Some(Rgb(60, 50, 40))));
+                }
+                return Some((0.8, None, Some(skin)));
+            }
+        } else if panic {
+            // Wide with terror, pupils darting about.
+            let (eu, ev) = ((u - ex) / 0.09, (v - 0.40) / 0.08);
+            if eu * eu + ev * ev < 1.0 {
+                let look = (t * 2.3 + seed * 9.0).sin() * 0.5;
+                let (pu, pv) = (eu - look, ev);
+                if pu * pu + pv * pv < 0.09 {
+                    return Some((0.1, Some('@'), Some(Rgb(20, 10, 10))));
+                }
+                return Some((1.45, Some('O'), Some(Rgb(240, 232, 215))));
+            }
+        } else {
+            // Hollow sockets, squeezed shut in agony.
+            let (eu, ev) = ((u - ex) / 0.075, (v - 0.40) / 0.06);
+            if eu * eu + ev * ev < 1.0 {
+                return Some((0.0, Some(' '), None));
+            }
+            // Tears of blood.
+            if (u - ex).abs() < 0.02 && v > 0.45 && v < 0.45 + 0.22 * a {
+                return Some((0.7, Some('|'), Some(Rgb(150, 20, 20))));
+            }
+        }
+    }
+    if !dead {
+        let brow = if panic { (0.23f32, 0.28f32) } else { (0.27, 0.33) };
+        if v > brow.0 && v < brow.1 {
+            if u > 0.28 && u < 0.46 {
+                return Some((0.4, Some(if panic { '^' } else { '/' }), Some(skin)));
+            }
+            if u > 0.54 && u < 0.72 {
+                return Some((0.4, Some(if panic { '^' } else { '\\' }), Some(skin)));
+            }
+        }
+    }
+    if dead {
+        let (mu, mv) = ((u - 0.5) / 0.09, (v - 0.74) / 0.05);
+        if mu * mu + mv * mv < 1.0 {
+            return Some((0.08, Some('-'), Some(Rgb(40, 30, 30))));
+        }
+        if (u - 0.53).abs() < 0.015 && v > 0.78 && v < 0.9 {
+            return Some((0.6, Some('|'), Some(Rgb(110, 15, 15))));
+        }
+    } else if panic {
+        // A trembling, gibbering mouth.
+        let wave = 0.72 + 0.03 * (u * 30.0 + t * 18.0).sin();
+        if (u - 0.5).abs() < 0.14 && (v - wave).abs() < 0.035 {
+            return Some((0.15, Some('~'), Some(Rgb(60, 20, 20))));
+        }
+    } else {
+        // A silent scream that stretches wider as the face surfaces.
+        let (mu, mv) = ((u - 0.5) / (0.06 + 0.07 * a), (v - 0.7) / (0.05 + 0.13 * a));
+        let mr = mu * mu + mv * mv;
+        if mr < 0.65 {
+            return Some((0.0, Some(' '), None));
+        }
+        if mr < 1.0 {
+            return Some((0.35, Some(if mu < 0.0 { '(' } else { ')' }), Some(Rgb(120, 40, 40))));
+        }
+    }
+    let shade = 0.75 + 0.35 * (1.0 - r);
+    Some((shade * (0.7 + 0.3 * a), None, Some(skin)))
+}
+
+/// Flesh, veins and eyes swallowing the stonework as you near the surface.
+fn corrupt_tex(u: f32, v: f32, mx: i32, my: i32, wc: &WallCtx) -> Option<Texel> {
+    let c = wc.corrupt;
+    if c <= 0.0 {
+        return None;
+    }
+    let n = vnoise(u * 2.5 + mx as f32 * 2.5, v * 2.5 + my as f32 * 1.9);
+    let cover = c * 1.3 - hashf(mx * 7 + 3, my * 11 + 5) * 0.6;
+    if n > cover {
+        return None;
+    }
+    let hb = heartbeat(wc.t + (mx + my) as f32 * 0.03);
+    // A ragged margin where the flesh eats into the stone.
+    if n > cover - 0.05 {
+        return Some((0.6, Some('%'), Some(Rgb(95, 35, 35))));
+    }
+    // A lidless eye, watching.
+    if hashf(mx * 17 + 2, my * 19 + 4) < 0.3 * c {
+        let (eu, ev) = ((u - 0.5) / 0.14, (v - 0.45) / 0.09);
+        if eu * eu + ev * ev < 1.0 {
+            let seed = hashf(mx, my * 3);
+            if (wc.t * 0.35 + seed * 5.0).fract() < 0.06 {
+                return Some((0.4, Some('-'), Some(Rgb(120, 50, 50))));
+            }
+            let look = (wc.t * 0.8 + seed * 12.0).sin() * 0.45;
+            if (eu - look).abs() < 0.16 {
+                return Some((0.2, Some('|'), Some(Rgb(40, 0, 0))));
+            }
+            return Some((1.4, Some('O'), Some(Rgb(230, 205, 110))));
+        }
+    }
+    let vn = vnoise(u * 7.0 + mx as f32 * 7.0, v * 9.0 + my as f32 * 3.0);
+    if (vn - 0.5).abs() < 0.035 {
+        return Some((0.9 + 0.6 * hb, Some(if hash2(mx, my) % 2 == 0 { '~' } else { '-' }), Some(Rgb(220, 40, 50))));
+    }
+    let n2 = vnoise(u * 8.0 + mx as f32 * 5.0, v * 8.0);
+    Some((0.55 + 0.4 * n2 + 0.2 * hb, None, Some(Rgb(150, 58, 62))))
+}
+
 /// Wall texture: (brightness multiplier, forced character, colour override).
-fn wall_tex(style: u8, tile: Tile, u: f32, v: f32, mx: i32, my: i32) -> (f32, Option<char>, Option<Rgb>) {
+fn wall_tex(style: u8, tile: Tile, u: f32, v: f32, mx: i32, my: i32, wc: &WallCtx) -> Texel {
     if tile == Tile::DoorClosed {
         let fu = (u * 5.0).fract();
         if (0.14f32..0.22).contains(&v) || (0.78f32..0.86).contains(&v) {
@@ -117,6 +284,14 @@ fn wall_tex(style: u8, tile: Tile, u: f32, v: f32, mx: i32, my: i32) -> (f32, Op
         }
         let grain = 0.85 + 0.25 * vnoise(u * 5.0 + mx as f32 * 3.0, v * 30.0);
         return (grain, None, Some(Rgb(150, 100, 55)));
+    }
+    if style == 3 && wc.dread > 0 {
+        if let Some(f) = wall_face(u, v, mx, my, wc) {
+            return f;
+        }
+    }
+    if let Some(f) = corrupt_tex(u, v, mx, my, wc) {
+        return f;
     }
     match style {
         0 => {
@@ -159,6 +334,47 @@ fn wall_tex(style: u8, tile: Tile, u: f32, v: f32, mx: i32, my: i32) -> (f32, Op
                 return (1.6, Some(rune), Some(Rgb(255, 110, 50)));
             }
             (0.75 + 0.35 * h, None, None)
+        }
+        4 => {
+            // Frozen: cracked blue ice, icicles, twinkling frost.
+            let n = vnoise(u * 3.0 + mx as f32 * 3.0, v * 3.0 + my as f32 * 2.3);
+            let crack = (vnoise(u * 6.0 + mx as f32 * 6.0 + 40.0, v * 6.0 + my as f32 * 5.0) - 0.5).abs();
+            if crack < 0.025 {
+                return (1.15, Some(if hash2(mx, my) % 2 == 0 { '/' } else { '\\' }), Some(Rgb(230, 245, 255)));
+            }
+            let ic = (u * 9.0).fract();
+            let len = 0.06 + 0.14 * hashf((u * 9.0) as i32 + mx * 9, my * 3);
+            if v < len * (1.0 - (ic - 0.5).abs() * 2.0) {
+                return (1.1, Some('V'), Some(Rgb(200, 230, 255)));
+            }
+            let spark = hashf((u * 14.0) as i32 + mx * 31 + (wc.t * 1.5) as i32 * 7, (v * 20.0) as i32 + my * 17);
+            if spark > 0.988 {
+                return (1.4, Some('*'), Some(Rgb(225, 240, 255)));
+            }
+            (0.7 + 0.45 * n, None, None)
+        }
+        5 => {
+            // Crystal: dark rock with glowing crystal clusters.
+            let n = vnoise(u * 3.0 + mx as f32 * 3.0, v * 4.0 + my as f32 * 2.0);
+            let gu = u * 3.0;
+            let ci = gu.floor() as i32;
+            let fu = gu.fract();
+            let h = hashf(mx * 23 + ci, my * 29);
+            if h < 0.45 {
+                let height = 0.25 + 0.4 * hashf(mx * 5 + ci, my * 3 + 1);
+                let tip = 1.0 - height;
+                if v > tip {
+                    let half = (v - tip) / height * 0.45;
+                    let du = (fu - 0.5).abs();
+                    if du < half {
+                        let hue = if hashf(mx + ci, my * 7) < 0.5 { Rgb(90, 240, 220) } else { Rgb(220, 110, 255) };
+                        let glint = 0.5 + 0.5 * (wc.t * 1.7 + h * 30.0).sin();
+                        let ch = if du > half - 0.07 { if fu < 0.5 { '/' } else { '\\' } } else if du < 0.04 { '|' } else { ':' };
+                        return (0.95 + 0.45 * glint, Some(ch), Some(hue));
+                    }
+                }
+            }
+            (0.55 + 0.5 * n, None, None)
         }
         _ => {
             let r = (v * 4.0).floor();
@@ -262,7 +478,19 @@ pub fn render_game(c: &mut Canvas, g: &Game, t: f32) {
 
 pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t: f32) {
     let lv = &g.level;
-    let pal = palette(lv.style);
+    let corrupt = g.corruption();
+    let wc = WallCtx {
+        t,
+        dread: if lv.style == 3 && g.depth >= 10 { if g.p.has_amulet { 2 } else { 1 } } else { 0 },
+        corrupt,
+    };
+    let mut pal = palette(lv.style);
+    if corrupt > 0.0 {
+        pal.wall = pal.wall.lerp(Rgb(150, 70, 70), corrupt * 0.35);
+        pal.floor = pal.floor.lerp(Rgb(120, 60, 60), corrupt * 0.3);
+        pal.ceil = pal.ceil.lerp(Rgb(90, 30, 35), corrupt * 0.45);
+    }
+    let hb = heartbeat(t);
     let shake = g.fx.shake;
     let ang = g.cam.ang + (t * 61.0).sin() * shake * 0.025;
     let (dirx, diry) = (ang.cos(), ang.sin());
@@ -348,7 +576,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                     fg = tc.1;
                     bg = tc.2;
                 } else {
-                    let (mult, forced, tint) = wall_tex(lv.style, tile, u, v, mapx, mapy);
+                    let (mult, forced, tint) = wall_tex(lv.style, tile, u, v, mapx, mapy, &wc);
                     let base = tint.unwrap_or(pal.wall);
                     let emissive = forced.is_some() && mult > 1.3;
                     let lf = if emissive { [1.0, 1.0, 1.0] } else { wl };
@@ -404,6 +632,19 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                         base = Rgb(120, 85, 50);
                     }
                     _ => {}
+                }
+                if corrupt > 0.0 && ft == Tile::Floor {
+                    // Meat creeping across the flagstones, veins throbbing.
+                    let n = vnoise(fx * 1.3, fy * 1.3);
+                    if n < corrupt * 0.75 - 0.1 {
+                        base = Rgb(125, 48, 52);
+                        let vn = vnoise(fx * 4.0, fy * 4.0);
+                        if (vn - 0.5).abs() < 0.04 {
+                            forced = Some('~');
+                            base = Rgb(200, 40, 50);
+                            emit = Rgb(70, 0, 10).scale(hb);
+                        }
+                    }
                 }
                 if lv.inb(tx, ty) {
                     let bl = lv.blood[lv.idx(tx, ty)];
@@ -521,6 +762,27 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             glow: false,
             aura: aura_of(m),
             throb: m.overlord,
+            d2: d2(x, y),
+        });
+    }
+    // Figments look exactly like the real thing.
+    for f in &g.figments {
+        let def = &MONSTERS[f.kind];
+        let (x, y) = (f.rx + 0.5, f.ry + 0.5);
+        let bob = if def.float > 0.0 { (t * 6.0 + f.id as f32).sin() * 0.05 } else { 0.0 };
+        sprs.push(Spr {
+            x,
+            y,
+            art: def.art,
+            glyph: def.glyph,
+            color: def.color,
+            eye: def.eye,
+            size: def.size,
+            float: def.float + bob,
+            flash: 0.0,
+            glow: false,
+            aura: None,
+            throb: false,
             d2: d2(x, y),
         });
     }
@@ -982,6 +1244,14 @@ fn draw_minimap(c: &mut Canvas, g: &Game, x0: i32, y0: i32, w: i32, h: i32) {
             }
         }
     }
+    for f in &g.figments {
+        if lv.is_visible(f.x, f.y) {
+            let (i, j) = (f.x - px + w / 2, f.y - py + h / 2);
+            if i >= 0 && i < w && j >= 0 && j < h {
+                c.set(x0 + i, y0 + j, MONSTERS[f.kind].glyph, Rgb(255, 70, 50), bg);
+            }
+        }
+    }
     c.set(x0 + w / 2, y0 + h / 2, ARROWS[g.p.facing as usize], Rgb(255, 255, 120), Rgb(60, 50, 0));
 }
 
@@ -990,6 +1260,7 @@ fn draw_minimap(c: &mut Canvas, g: &Game, x0: i32, y0: i32, w: i32, h: i32) {
 pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t: f32) {
     let lv = &g.level;
     let pal = palette(lv.style);
+    let corrupt = g.corruption();
     let (ox, oy) = (g.p.x, g.p.y);
     let hw = vw / 2 - 1;
     let hh = vh / 2;
@@ -1016,8 +1287,13 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
             let (c1, c2, base, solid) = match tile {
                 Tile::Wall => {
                     let h = hash2(tx, ty);
-                    let ch = if h % 7 == 0 { '%' } else { '#' };
-                    (ch, '#', pal.wall, true)
+                    if corrupt > 0.0 && hashf(tx * 7 + 3, ty * 11 + 5) * 0.6 < corrupt * 1.3 - 0.45 {
+                        let beat = heartbeat(t + (tx + ty) as f32 * 0.03);
+                        (if h % 5 == 0 { 'o' } else { '%' }, '~', Rgb(150, 58, 62).lerp(Rgb(220, 40, 50), beat * 0.5), true)
+                    } else {
+                        let ch = if h % 7 == 0 { '%' } else { '#' };
+                        (ch, '#', pal.wall, true)
+                    }
                 }
                 Tile::Floor => {
                     let h = hashf(tx, ty);
@@ -1112,6 +1388,17 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
             } else if m.stun > 0 {
                 put(c, sx + 1, sy, '*', Rgb(255, 255, 120));
             }
+        }
+    }
+    for f in &g.figments {
+        if !lv.is_visible(f.x, f.y) {
+            continue;
+        }
+        let def = &MONSTERS[f.kind];
+        let (sx, sy) = to_screen(f.rx, f.ry);
+        if sx >= 0 && sx < vw && sy >= 0 && sy < vh {
+            let bg = c.get(vx + sx, vy + sy).bg;
+            c.set(vx + sx, vy + sy, def.glyph, def.color.lerp(Rgb::WHITE, 0.25), bg);
         }
     }
     // the player
@@ -1224,8 +1511,20 @@ fn draw_hud(c: &mut Canvas, g: &Game, y0: i32, w: i32, t: f32) {
     for x in 0..w {
         c.put(x, y0, '=', pal.accent.scale(0.35));
     }
-    let name = DEPTH_NAMES[((g.depth.max(1) - 1) % 10) as usize];
-    c.text(2, y0, &format!(" Depth {}: {} ", g.depth, name), pal.accent);
+    let name = g.floor_name();
+    let head = format!(" Depth {}: {} ", g.depth, name);
+    c.text(2, y0, &head, pal.accent);
+    // The living dungeon's torments.
+    let mut cx = 2 + head.chars().count() as i32 + 1;
+    for a in &g.curses {
+        let tag = format!(" {} {} ", a.kind.name(), a.turns);
+        if cx + tag.len() as i32 > w - 40 {
+            break;
+        }
+        let col = a.kind.color().lerp(Rgb::WHITE, 0.25 + 0.25 * (t * 4.0).sin());
+        c.text_bg(cx, y0, &tag, Rgb::BLACK, col);
+        cx += tag.len() as i32 + 1;
+    }
     let (mode, mcol) = if g.realtime {
         (" REAL-TIME ", Rgb(255, 80, 60).lerp(Rgb(255, 200, 120), 0.5 + 0.5 * (t * 5.0).sin()))
     } else {
@@ -1478,7 +1777,7 @@ pub fn draw_map(c: &mut Canvas, g: &Game) {
     let ox = (g.p.x - vw / sx / 2).clamp(0, (lv.w - vw / sx).max(0));
     let oy = (g.p.y - vh / 2).clamp(0, (lv.h - vh).max(0));
     c.frame(x0 - 1, y0 - 1, vw + 2, vh + 2, Rgb(70, 60, 80), bg);
-    let name = DEPTH_NAMES[((g.depth.max(1) - 1) % 10) as usize];
+    let name = g.floor_name();
     c.center(0, &format!("MAP: Depth {}, {}", g.depth, name), Rgb(220, 200, 150));
     for j in 0..vh {
         for i in 0..vw / sx {

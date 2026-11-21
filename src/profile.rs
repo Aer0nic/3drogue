@@ -2,7 +2,7 @@
 //! with them, unlocked classes and the Hall of the Dead history.
 //! Stored as JSON in ~/.local/share/grazzark/profile.json.
 
-use crate::data::{ClassDef, Skill, DIFFICULTIES, LEGACY_UPGRADES, LORE_MASTER, MONSTERS, UPGRADES};
+use crate::data::{ClassDef, Skill, DIFFICULTIES, LEGACY_UPGRADES, LORE_COMMON, MONSTERS, UPGRADES};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -120,7 +120,8 @@ impl Profile {
             let e = self.bestiary.entry(name.clone()).or_insert(0);
             let before = *e;
             *e += n;
-            if before < LORE_MASTER && *e >= LORE_MASTER {
+            let master = MONSTERS.iter().find(|m| m.name == name.as_str()).map_or(LORE_COMMON.master, |m| m.lore().master);
+            if before < master && *e >= master {
                 mastered.push(name.clone());
             }
         }
@@ -166,8 +167,11 @@ impl Profile {
         if r >= u.max {
             None
         } else {
-            // Each rank costs the base price times the square of the rank.
-            Some(u.cost * (r + 1) * (r + 1))
+            match u.ranks.get(r as usize) {
+                Some(&c) => Some(c),
+                // Each rank costs the base price times the square of the rank.
+                None => Some(u.cost * (r + 1) * (r + 1)),
+            }
         }
     }
 
@@ -234,7 +238,7 @@ impl Profile {
             scavenger: r("scavenger"),
             mastered: MONSTERS
                 .iter()
-                .filter(|m| self.kills_of(m.name) >= LORE_MASTER)
+                .filter(|m| self.kills_of(m.name) >= m.lore().master)
                 .map(|m| m.name.to_string())
                 .collect(),
         }
