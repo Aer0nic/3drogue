@@ -48,11 +48,24 @@ impl Term {
         self.ph = 0;
     }
 
-    fn color(&self, c: Rgb) -> Color {
+    /// The colour as the terminal will show it. In 256-colour mode the
+    /// palette index is stashed in the red channel, so cells whose colours
+    /// differ only by shades the palette can't show compare equal and are
+    /// not redrawn (torch flicker would otherwise repaint every cell).
+    #[inline]
+    fn key(&self, c: Rgb) -> Rgb {
         if self.truecolor {
-            Color::Rgb { r: c.0, g: c.1, b: c.2 }
+            c
         } else {
-            Color::AnsiValue(to256(c))
+            Rgb(to256(c), 0, 0)
+        }
+    }
+
+    fn color(&self, k: Rgb) -> Color {
+        if self.truecolor {
+            Color::Rgb { r: k.0, g: k.1, b: k.2 }
+        } else {
+            Color::AnsiValue(k.0)
         }
     }
 
@@ -75,7 +88,8 @@ impl Term {
                 if i + 1 == total {
                     continue;
                 }
-                let cell = c.cells[i];
+                let src = c.cells[i];
+                let cell = Cell { ch: src.ch, fg: self.key(src.fg), bg: self.key(src.bg) };
                 if self.prev[i] == cell {
                     continue;
                 }

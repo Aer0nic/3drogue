@@ -1046,6 +1046,32 @@ fn print_usage() {
     );
 }
 
+/// Only use 24-bit colour when the terminal says it supports it. `TERM=xterm`
+/// on its own proves nothing: old terminals (e.g. roxterm-gtk2 on VTE 0.28)
+/// read `ESC[38;2;R;G;Bm` as separate attributes (bold, blink, reverse...)
+/// and garble the screen, so the 256-colour palette is the safe default.
+fn detect_truecolor(term_env: &str) -> bool {
+    let var = |k: &str| std::env::var(k).unwrap_or_default();
+    let colorterm = var("COLORTERM").to_ascii_lowercase();
+    if colorterm == "truecolor" || colorterm == "24bit" {
+        return true;
+    }
+    if term_env.contains("direct") || term_env.contains("truecolor") {
+        return true;
+    }
+    // VTE has supported 24-bit colour since 0.36 (VTE_VERSION=3600).
+    if var("VTE_VERSION").parse::<u32>().map_or(false, |v| v >= 3600) {
+        return true;
+    }
+    // Terminals known to support it that don't always set COLORTERM.
+    let known = ["KITTY_WINDOW_ID", "ALACRITTY_SOCKET", "ALACRITTY_LOG", "WEZTERM_EXECUTABLE",
+        "KONSOLE_VERSION", "WT_SESSION"];
+    if known.iter().any(|k| std::env::var_os(k).is_some()) {
+        return true;
+    }
+    matches!(var("TERM_PROGRAM").as_str(), "iTerm.app" | "WezTerm" | "vscode" | "ghostty")
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -1065,7 +1091,7 @@ fn main() {
         false
     } else {
         // Windows 10+ consoles and Windows Terminal speak 24-bit colour.
-        cfg!(windows) || (term_env != "linux" && !term_env.is_empty())
+        cfg!(windows) || detect_truecolor(&term_env)
     };
 
     profile::migrate_legacy_in(&profile::base_dir());
