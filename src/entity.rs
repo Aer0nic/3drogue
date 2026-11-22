@@ -1,6 +1,6 @@
 //! Monsters, factions and the hostility table that drives monster infighting.
 
-use crate::data::{MonsterDef, MONSTERS};
+use crate::data::{DeathKind, MonsterDef, M_GUARDIAN, MONSTERS};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Faction {
@@ -177,6 +177,18 @@ impl Monster {
     /// Armour class, with any guard it has raised.
     pub fn ac(&self) -> i32 {
         self.def().ac + if self.guard > 0 { 4 } else { 0 }
+    }
+
+    /// Can nothing make it run? The undead are brainless and feel no fear;
+    /// the Prism Guardian and the floor uniques never yield; and the Warden
+    /// stands its ground unless at least three of its wards are broken.
+    pub fn fearless(&self) -> bool {
+        let d = self.def();
+        d.faction == Faction::Undead
+            || d.death == DeathKind::Undead
+            || self.kind == M_GUARDIAN
+            || d.unique > 0
+            || (d.boss && self.ward_weaken < 3)
     }
 
     pub fn is_unique(&self) -> bool {

@@ -1615,8 +1615,7 @@ impl Game {
         let near = |g: &Game, o: &Monster| {
             o.alive
                 && o.faction != Faction::Ally
-                && !o.def().boss
-                && !o.is_unique()
+                && !o.fearless()
                 && (cheb(o.x, o.y, mx, my) <= 8 || cheb(o.x, o.y, px, py) <= 8)
                 && (g.level.los(o.x, o.y, mx, my) || g.level.los(o.x, o.y, px, py))
         };
@@ -4002,7 +4001,7 @@ impl Game {
                 (
                     m.x,
                     m.y,
-                    m.alive && m.faction != Faction::Ally && !d.boss && !m.is_unique(),
+                    m.alive && m.faction != Faction::Ally && !m.fearless(),
                     d.sight as f32,
                 )
             };
@@ -4174,7 +4173,7 @@ impl Game {
         self.fx.shake = self.fx.shake.max(1.2);
         self.emit(Sfx::Amulet, px, py, 1.0);
         for m in self.level.monsters.iter_mut() {
-            if m.alive && m.faction != Faction::Ally && !m.def().boss && cheb(m.x, m.y, px, py) <= 5
+            if m.alive && m.faction != Faction::Ally && !m.fearless() && cheb(m.x, m.y, px, py) <= 5
             {
                 m.fear = m.fear.max(6);
                 m.target = None;
@@ -4688,7 +4687,7 @@ impl Game {
                 let mut fled = 0;
                 for mi in ids {
                     let m = &mut self.level.monsters[mi];
-                    if m.def().boss || m.def().unique > 0 {
+                    if m.fearless() {
                         continue;
                     }
                     m.fear = m.fear.max(4 + (mi as i32 % 3));
@@ -5671,6 +5670,9 @@ impl Game {
             return;
         }
 
+        if self.level.monsters[mi].fear > 0 && self.level.monsters[mi].fearless() {
+            self.level.monsters[mi].fear = 0;
+        }
         if self.level.monsters[mi].fear > 0 {
             self.level.monsters[mi].fear -= 1;
             self.monster_flee(mi);
@@ -9194,5 +9196,55 @@ mod tests {
         assert_eq!(w.state, WardState::Broken);
         assert_eq!(lv.tile(w.x, w.y), Tile::Floor, "only the remains are left");
         assert_eq!(g.wards_destroyed, 0, "they do not count as broken by you");
+    }
+
+    #[test]
+    fn some_things_know_no_fear() {
+        let unique = M_UNIQUE0; // the Rat King
+        let kinds = [
+            (M_ORC, true),
+            (M_GOBLIN, true),
+            (M_SKELETON, false),
+            (kind_of("zombie"), false),
+            (M_WRAITH, false),
+            (kind_of("lich"), false),
+            (M_GUARDIAN, false),
+            (unique, false),
+            (M_WARDEN, false),
+        ];
+        // Battle Cry.
+        for (k, scared) in kinds {
+            let mut g = arena();
+            g.p.mp = 100;
+            let mi = spawn(&mut g, k, 21, 8);
+            g.use_skill(Skill::BattleCry);
+            assert_eq!(g.level.monsters[mi].fear > 0, scared, "{} after a battle cry", MONSTERS[k].name);
+        }
+        // A champion's death scream.
+        for (k, scared) in kinds {
+            let mut g = arena();
+            let ci = spawn(&mut g, M_ORC, 22, 8);
+            g.make_champion(ci);
+            let wi = spawn(&mut g, k, 24, 8);
+            g.damage_monster(ci, 99_999, Src::Player);
+            assert_eq!(g.level.monsters[wi].fear > 0, scared, "{} after a champion dies", MONSTERS[k].name);
+        }
+        // The Warden only quails once three of its wards are broken.
+        for (broken, scared) in [(0, false), (2, false), (3, true), (4, true)] {
+            let mut g = arena();
+            g.p.mp = 100;
+            let wi = spawn(&mut g, M_WARDEN, 21, 8);
+            g.wards_destroyed = broken;
+            g.weaken_wardens();
+            g.use_skill(Skill::BattleCry);
+            assert_eq!(g.level.monsters[wi].fear > 0, scared, "Warden with {} wards broken", broken);
+        }
+        // Fear that somehow clings to the fearless is shrugged off at once.
+        let mut g = arena();
+        g.p.invis = 1000;
+        let si = spawn(&mut g, M_SKELETON, 30, 8);
+        g.level.monsters[si].fear = 10;
+        g.monster_act(si);
+        assert_eq!(g.level.monsters[si].fear, 0);
     }
 }
