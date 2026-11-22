@@ -23,6 +23,9 @@ pub const DIRS: [(i32, i32); 8] = [
     (-1, -1),
 ];
 
+/// A tile sound does not reach (see `Level::sound_field`).
+pub const SOUND_FAR: u16 = u16::MAX;
+
 pub fn cheb(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
     (x1 - x0).abs().max((y1 - y0).abs())
 }
@@ -421,6 +424,80 @@ impl Level {
         self.monsters
             .iter()
             .position(|m| m.alive && m.x == x && m.y == y)
+    }
+
+    /// Could something walk the straight line from (x0,y0) to (x1,y1) in one
+    /// rush? Every tile after the start must be open floor (a closed door or
+    /// gate stops it, even though you can see through a gate's bars), and no
+    /// step may cut a blocked corner.
+    pub fn clear_walk(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> bool {
+        let pts = line(x0, y0, x1, y1);
+        pts.windows(2).all(|w| {
+            let ((ax, ay), (bx, by)) = (w[0], w[1]);
+            self.tile(bx, by).walkable() && self.can_step(ax, ay, bx - ax, by - ay)
+        })
+    }
+
+    /// How sound spreads from (sx,sy): for each tile, how far the sound has
+    /// effectively travelled to get there, in half-tiles. Every step costs
+    /// two; bending around a corner costs more the sharper the turn; a closed
+    /// door muffles it like three more tiles of corridor. Walls are not passed
+    /// through, but each wall the sound strikes gets the cost of the floor
+    /// beside it plus a step (that is where it bounces). Tiles the sound never
+    /// reaches within `limit` hold `SOUND_FAR`.
+    pub fn sound_field(&self, sx: i32, sy: i32, limit: u16) -> Vec<u16> {
+        let n = (self.w * self.h) as usize;
+        let mut best = vec![SOUND_FAR; n];
+        if !self.inb(sx, sy) {
+            return best;
+        }
+        // States are (tile, the direction the sound was moving in); 8 = none yet.
+        let mut d = vec![SOUND_FAR; n * 9];
+        let mut heap = BinaryHeap::new();
+        let si = self.idx(sx, sy);
+        d[si * 9 + 8] = 0;
+        best[si] = 0;
+        heap.push(Reverse((0u16, si, 8usize)));
+        while let Some(Reverse((cd, i, dir))) = heap.pop() {
+            if cd > d[i * 9 + dir] {
+                continue;
+            }
+            let x = (i as i32) % self.w;
+            let y = (i as i32) / self.w;
+            for (k, &(dx, dy)) in DIRS.iter().enumerate() {
+                let (nx, ny) = (x + dx, y + dy);
+                if !self.inb(nx, ny) || !self.can_step(x, y, dx, dy) {
+                    continue;
+                }
+                let ni = self.idx(nx, ny);
+                let t = self.tile(nx, ny);
+                let turn = if dir == 8 {
+                    0
+                } else {
+                    let a = (k as i32 - dir as i32).rem_euclid(8);
+                    a.min(8 - a)
+                };
+                let bend = [0u16, 1, 3, 5, 5][turn as usize];
+                let nd = cd.saturating_add(2 + bend);
+                if !(t.walkable() || t.is_closed_door()) {
+                    // The sound strikes this wall and rings back.
+                    if t.opaque() && nd < best[ni] {
+                        best[ni] = nd;
+                    }
+                    continue;
+                }
+                let nd = if t.is_closed_door() { nd.saturating_add(6) } else { nd };
+                if nd > limit || nd >= d[ni * 9 + k] {
+                    continue;
+                }
+                d[ni * 9 + k] = nd;
+                if nd < best[ni] {
+                    best[ni] = nd;
+                }
+                heap.push(Reverse((nd, ni, k)));
+            }
+        }
+        best
     }
 
     pub fn los(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> bool {

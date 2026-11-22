@@ -17,6 +17,16 @@ cargo run --release
 Options: `--no-audio`, `--256` (for terminals without 24-bit colour),
 `--truecolor`. You need a terminal of at least 80x24; bigger looks better.
 
+**Graphics detail** (`--detail=auto|high|low|minimal`, or *Detail* in the Esc
+menu; saved per profile). The 3D view is ray cast on all your CPU cores. In
+*Auto* the game times every frame and drops a level if the machine (or the
+terminal) can't keep up, then climbs back when there's headroom. *Minimal* is
+bare bones for very slow computers: half-resolution casting, plain floor and
+ceiling lighting, no particles, rounded colours so the terminal redraws less,
+and 20 frames a second. The game draws text, so the graphics card is used by
+your terminal emulator, not the game: a GPU-accelerated terminal (kitty,
+Alacritty, WezTerm, Ghostty) helps most at large sizes.
+
 ## Controls
 
 | First-person | | Overhead view (Shift+M) | |
@@ -28,8 +38,8 @@ Options: `--no-audio`, `--256` (for terminals without 24-bit colour),
 | Z / C | diagonal step | | |
 
 Space/F attack (or shoot) · 1-2 class skills · 3-4 class skills bought at the Soul Altar ·
-G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs ·
-`.` wait/search · **Shift+R toggles turn-based / real-time** · Shift+M switches first-person / overhead view · Tab (or M) full map · L message log (last 100 turns) · T relight your torch ·
+G pick up · I inventory (backtick `` ` `` sorts it by type) · P drink a healing potion · `>` `<` Enter use stairs ·
+`.` wait/search · **Shift+R toggles turn-based / real-time** · Shift+M switches first-person / overhead view · Shift+C toggles Last Rites · Shift+Q listens intently (Keen Hearing) · Tab (or M) full map · L message log (last 100 turns) · T relight your torch ·
 `-`/`+` volume · `?` help · Esc menu
 
 ## Features
@@ -70,7 +80,11 @@ G pick up · I inventory · P drink a healing potion · `>` `<` Enter use stairs
   which to load when it starts. "Change Profile" and "New Profile" are on the
   title menu.
 - **Persistent progress**: every run earns soul points. Spend them at the Soul Altar on stat upgrades, boons that
-  change how a run plays (Bloodlust, Soul Anchor, Blood Magic, Cartographer,
+  change how a run plays (Bloodlust, Soul Anchor, Blood Magic, Cartographer, Glinting Eye (items on the minimap),
+  Last Rites (burn or shatter your kills so they never rise), Appraiser's Eye
+  (better gear marked in your pack), Eager Gulp (drink Might and Vigor on the spot),
+  Potion Belt (stack potions of a kind in one pack slot), Keen Hearing (hear further;
+  then listen with Shift+Q to see where hidden sounds come from),
   Deep Pockets and more), class unlocks, and two extra skills for each class.
   The Hall of the Dead records your past runs.
 - **Difficulties**: Normal, Hard, Difficult and Chaotic. Escaping with the

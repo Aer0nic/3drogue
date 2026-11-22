@@ -12,6 +12,7 @@ mod entity;
 mod fx;
 mod game;
 mod launch;
+mod perf;
 mod map;
 mod profile;
 mod render;
@@ -21,7 +22,9 @@ mod term;
 use audio::{Audio, MusicMode, Sfx, Spatial};
 use canvas::Canvas;
 use color::Rgb;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode,
+};
 use data::{CLASSES, DIFFICULTIES, MONSTERS, UPGRADES};
 use game::{cap, Action, DeathCause, Game, Outcome, GREY};
 use profile::{Profile, RunRecord};
@@ -153,10 +156,24 @@ struct App {
     name_err: String,
     /// A profile has been chosen this session (so Esc can go back to the title).
     loaded: bool,
+    /// Title screen testing code: letters typed while holding left Shift and
+    /// right Ctrl, and which of those keys are held right now (only known on
+    /// terminals that report each key exactly).
+    cheat_buf: String,
+    held_lshift: bool,
+    held_rctrl: bool,
+    exact_keys: bool,
+    /// A line shown on the title screen for a few seconds.
+    title_note: String,
+    title_note_t: f32,
+    /// Picks the graphics detail level.
+    gov: perf::Governor,
+    /// Detail was given on the command line, so the profile's choice is ignored.
+    detail_from_cli: bool,
 }
 
 impl App {
-    fn new(profile: Profile, audio: Audio, w: usize, h: usize) -> App {
+    fn new(profile: Profile, audio: Audio, w: usize, h: usize, gov: perf::Governor, detail_from_cli: bool) -> App {
         App {
             screen: Screen::Title,
             sel: if game::has_save() { 0 } else { 1 },
@@ -189,6 +206,14 @@ impl App {
             name_buf: String::new(),
             name_err: String::new(),
             loaded: false,
+            gov,
+            detail_from_cli,
+            cheat_buf: String::new(),
+            held_lshift: false,
+            held_rctrl: false,
+            exact_keys: false,
+            title_note: String::new(),
+            title_note_t: 0.0,
         }
     }
 
@@ -235,6 +260,9 @@ impl App {
         if let Some(v) = self.profile.volume {
             self.audio.set_volume(v);
         }
+        if let (Some(d), false) = (self.profile.detail, self.detail_from_cli) {
+            self.gov.set(perf::Setting::from_u8(d));
+        }
         self.has_save = game::has_save();
         self.sel = if self.has_save { 0 } else { 1 };
         self.loaded = true;
@@ -246,8 +274,44 @@ impl App {
         self.audio.play(Sfx::Menu, &Spatial::center(0.5));
     }
 
+    /// Testing code on the title screen: hold left Shift and right Ctrl and
+    /// type "stewardess" for 99999 soul points. Returns true if the key was
+    /// taken as part of the code. Terminals that report keys exactly must show
+    /// the very keys held; others can only say that Ctrl is down.
+    fn title_cheat(&mut self, k: &KeyEvent) -> bool {
+        const WORD: &str = "stewardess";
+        let KeyCode::Char(ch) = k.code else {
+            self.cheat_buf.clear();
+            return false;
+        };
+        let held = if self.exact_keys {
+            self.held_lshift && self.held_rctrl
+        } else {
+            k.modifiers.contains(KeyModifiers::CONTROL)
+        };
+        // Only letters of the word are taken, so Ctrl+C and the rest still work.
+        if !held || !WORD.contains(ch.to_ascii_lowercase()) {
+            self.cheat_buf.clear();
+            return false;
+        }
+        if type_code(&mut self.cheat_buf, ch, WORD) {
+            self.profile.points = self.profile.points.saturating_add(99_999);
+            self.profile.save();
+            self.title_note = format!(
+                "The Soul Altar trembles. +99999 soul points ({} in all).",
+                self.profile.points
+            );
+            self.title_note_t = 4.0;
+            self.audio.play(Sfx::LevelUp, &Spatial::center(0.7));
+        }
+        true
+    }
+
     fn on_key(&mut self, k: KeyEvent) {
         let code = k.code;
+        if self.screen == Screen::Title && self.loaded && self.title_cheat(&k) {
+            return;
+        }
         if k.modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
             self.save_and_quit();
             return;
@@ -467,16 +531,17 @@ impl App {
             Overlay::Inventory => {
                 match k.code {
                     Esc | Tab => self.overlay = Overlay::None,
+                    // Backtick: sort the pack by type.
+                    Char('`') => g.sort_inv(),
+                    // Letters pick a slot; a stack of potions uses or drops one.
                     Char(c) if c.is_ascii_lowercase() => {
-                        let i = (c as u8 - b'a') as usize;
-                        if i < g.p.inv.len() {
+                        if let Some(i) = g.slot_item((c as u8 - b'a') as usize) {
                             self.overlay = Overlay::None;
                             g.do_action(Action::Use(i));
                         }
                     }
                     Char(c) if c.is_ascii_uppercase() => {
-                        let i = (c.to_ascii_lowercase() as u8 - b'a') as usize;
-                        if i < g.p.inv.len() {
+                        if let Some(i) = g.slot_item((c.to_ascii_lowercase() as u8 - b'a') as usize) {
                             self.overlay = Overlay::None;
                             g.do_action(Action::Drop(i));
                         }
@@ -491,10 +556,18 @@ impl App {
                     Up | Char('w') | Char('k') => self.pause_sel = (self.pause_sel + n - 1) % n,
                     Down | Char('s') | Char('j') => self.pause_sel = (self.pause_sel + 1) % n,
                     Esc => self.overlay = Overlay::None,
+                    Left | Right | Char('a') | Char('d') | Enter | Char(' ')
+                        if self.pause_sel == 2 =>
+                    {
+                        let dir = if matches!(k.code, Left | Char('a')) { -1 } else { 1 };
+                        let s = self.gov.setting.cycle(dir);
+                        self.gov.set(s);
+                        self.profile.detail = Some(s.to_u8());
+                    }
                     Enter | Char(' ') => match self.pause_sel {
                         0 => self.overlay = Overlay::None,
                         1 => self.overlay = Overlay::Help,
-                        2 => {
+                        3 => {
                             self.overlay = Overlay::None;
                             g.abandon();
                         }
@@ -607,6 +680,16 @@ impl App {
             }
             Char('g') | Char(',') if g.items_here().len() > 1 => {
                 self.overlay = Overlay::Pickup;
+                return;
+            }
+            // Shift+Q: listen intently (Keen Hearing).
+            Char('Q') => {
+                g.do_action(Action::Listen);
+                return;
+            }
+            // Shift+C: Last Rites on or off.
+            Char('C') => {
+                g.toggle_rites();
                 return;
             }
             // Shift+R, so it is hard to switch by accident.
@@ -744,6 +827,7 @@ impl App {
 
     fn update(&mut self, dt: f32, w: usize, h: usize) {
         self.t += dt;
+        self.title_note_t = (self.title_note_t - dt).max(0.0);
         match self.screen {
             Screen::Title => {
                 let fh = (h / 3).max(6);
@@ -781,8 +865,8 @@ impl App {
 
             let evs: Vec<game::SoundEv> = g.sounds.drain(..).collect();
             for ev in evs {
-                if let Some(sp) = g.spatial(ev.x, ev.y, ev.vol) {
-                    self.audio.play(ev.sfx, &sp);
+                if let Some(sp) = g.spatial_for(ev.sfx, ev.x, ev.y, ev.vol) {
+                    self.audio.play_after(ev.sfx, &sp, ev.delay);
                 }
             }
 
@@ -814,6 +898,7 @@ impl App {
                 inten += 0.15;
             }
             self.audio.set_intensity(inten);
+            self.audio.set_amulet(g.p.has_amulet);
 
             if g.over.is_some() {
                 self.over_timer += dt;
@@ -937,14 +1022,13 @@ impl App {
     fn draw(&self, c: &mut Canvas) {
         c.clear();
         match self.screen {
-            Screen::Title => screens::draw_title(
-                c,
-                &self.fire,
-                self.t,
-                self.sel,
-                &self.profile,
-                self.has_save,
-            ),
+            Screen::Title => {
+                screens::draw_title(c, &self.fire, self.t, self.sel, &self.profile, self.has_save);
+                if self.title_note_t > 0.0 {
+                    let k = self.title_note_t.min(1.0);
+                    c.center(c.h as i32 - 2, &self.title_note, Rgb(255, 230, 150).scale(k));
+                }
+            }
             Screen::ClassSel => {
                 screens::draw_class_select(c, self.class_sel, &self.profile, self.t)
             }
@@ -1001,7 +1085,7 @@ impl App {
                         Overlay::Inventory => render::draw_inventory(c, g),
                         Overlay::Pause => {
                             c.darken(0.5);
-                            render::draw_pause(c, self.pause_sel);
+                            render::draw_pause(c, self.pause_sel, &self.gov.label());
                         }
                         Overlay::Help => render::draw_help(c),
                         Overlay::Map => render::draw_map(c, g),
@@ -1032,13 +1116,39 @@ impl App {
     }
 }
 
+/// Feed one typed letter into a secret word being entered. Returns true
+/// when the word is complete (and starts over).
+fn type_code(buf: &mut String, ch: char, word: &str) -> bool {
+    let ch = ch.to_ascii_lowercase();
+    buf.push(ch);
+    if !word.starts_with(buf.as_str()) {
+        // Start again, keeping this letter if it begins the word.
+        buf.clear();
+        if word.starts_with(ch) {
+            buf.push(ch);
+        }
+    }
+    if buf == word {
+        buf.clear();
+        return true;
+    }
+    false
+}
+
 fn print_usage() {
     println!("GRAZZARK - a first-person ASCII roguelike");
     println!();
-    println!("USAGE: grazzark [--no-audio] [--256] [--truecolor]");
+    println!("USAGE: grazzark [--no-audio] [--256] [--truecolor] [--detail=LEVEL]");
     println!("  --no-audio    run silently");
     println!("  --256         use 256-colour mode (for terminals without true colour)");
     println!("  --truecolor   force 24-bit colour");
+    println!("  --detail=auto|high|low|minimal");
+    println!("                graphics detail (default auto: measures frame times and");
+    println!("                lowers detail if the machine can't keep up; minimal is");
+    println!("                bare bones for very slow CPUs). Also in the pause menu.");
+    let sys = perf::System::detect();
+    println!();
+    println!("This machine: {} CPU threads, the 3D view uses {}.", sys.cores, sys.render_threads());
     println!();
     println!(
         "Profiles (soul points, upgrades, history): {}",
@@ -1121,11 +1231,18 @@ fn main() {
         }
     };
     let (w, h) = Term::size();
-    let mut app = App::new(profile, audio, w, h);
+    let cli_detail = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--detail="))
+        .and_then(perf::Setting::parse);
+    let gov = perf::Governor::new(&perf::System::detect(), cli_detail.unwrap_or(perf::Setting::Auto));
+    let mut app = App::new(profile, audio, w, h, gov, cli_detail.is_some());
     app.choose_profile_at_start();
     let mut canvas = Canvas::new(w, h);
-    let frame = Duration::from_millis(33);
     let mut last = Instant::now();
+    // Exact key reporting (left vs right Shift/Ctrl) is only switched on while
+    // the title screen is up, so play keeps the terminal's usual keys.
+    let exact_ok = Term::exact_keys_supported();
 
     loop {
         let now = Instant::now();
@@ -1134,6 +1251,15 @@ fn main() {
 
         while event::poll(Duration::ZERO).unwrap_or(false) {
             match event::read() {
+                // Modifier keys on their own only matter to the title code.
+                Ok(Event::Key(KeyEvent { code: KeyCode::Modifier(m), kind, .. })) => {
+                    let down = kind != KeyEventKind::Release;
+                    match m {
+                        ModifierKeyCode::LeftShift => app.held_lshift = down,
+                        ModifierKeyCode::RightControl => app.held_rctrl = down,
+                        _ => {}
+                    }
+                }
                 Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => app.on_key(k),
                 Ok(Event::Resize(..)) => term.invalidate(),
                 _ => {}
@@ -1146,6 +1272,14 @@ fn main() {
             break;
         }
 
+        let want_exact = exact_ok && app.screen == Screen::Title;
+        if want_exact != app.exact_keys {
+            Term::set_exact_keys(want_exact);
+            app.exact_keys = want_exact;
+            app.held_lshift = false;
+            app.held_rctrl = false;
+            app.cheat_buf.clear();
+        }
         let (w, h) = Term::size();
         canvas.resize(w, h);
         if w < 80 || h < 24 {
@@ -1164,10 +1298,14 @@ fn main() {
             app.update(dt, w, h);
             app.draw(&mut canvas);
         }
+        term.coarse = perf::detail() == perf::Detail::Minimal;
         let _ = term.present(&canvas);
         app.prev = canvas.clone();
 
         let el = now.elapsed();
+        let busy = app.screen == Screen::Game && app.game.is_some();
+        app.gov.record(el, dt, busy);
+        let frame = perf::detail().frame_time();
         if el < frame {
             let _ = event::poll(frame - el);
         }
@@ -1219,6 +1357,11 @@ mod tests {
                 bonus.laststand = 3;
                 bonus.fleet = 2;
                 bonus.scavenger = 2;
+                bonus.glint = true;
+                bonus.belt = 2;
+                bonus.appraise = true;
+                bonus.gulp = true;
+                bonus.pyre = 5;
                 bonus.mastered = vec!["giant rat".into(), "orc".into()];
                 let mut g = Game::new(class, bonus, ((_run + class) % 4) as u8);
                 // Every floor gets its unique, and the hero wears a rotating
@@ -1360,6 +1503,17 @@ mod tests {
     }
 
     #[test]
+    fn the_title_code_is_typed_in_full() {
+        let mut buf = String::new();
+        let typed = |buf: &mut String, s: &str| s.chars().map(|c| type_code(buf, c, "stewardess")).last().unwrap();
+        assert!(typed(&mut buf, "STEWARDESS"), "case does not matter (Shift is held)");
+        assert!(!typed(&mut buf, "stewardes"));
+        assert!(typed(&mut buf, "s"));
+        assert!(typed(&mut buf, "stewsstewardess"), "a slip starts it over");
+        assert!(!typed(&mut buf, "stewardesx"));
+    }
+
+    #[test]
     fn menu_screens_render() {
         let mut prof = Profile::default();
         prof.points = 1234;
@@ -1461,7 +1615,7 @@ mod tests {
         };
         let voices = [
             Squeak, Screech, Yap, Rattle, Moan, Hiss, Growl, Snarl, Roar, Wail, Chant, Cackle,
-            Demon, Human,
+            Demon, Human, Gurgle, Chitter, Grind, Crackle, Chime, Spore,
         ];
         let moods = [Mood::Alert, Mood::Attack, Mood::Hurt, Mood::Die, Mood::Idle];
         let mut all = vec![
@@ -1499,6 +1653,21 @@ mod tests {
             for m in moods {
                 all.push(Sfx::Voice(v, m));
             }
+        }
+        use crate::data::Material;
+        for m in [
+            Material::Flesh,
+            Material::Ooze,
+            Material::Bone,
+            Material::Shell,
+            Material::Stone,
+            Material::Crystal,
+            Material::Armor,
+            Material::Spirit,
+            Material::Flame,
+            Material::Wall,
+        ] {
+            all.push(Sfx::Impact(m));
         }
         let mut rng = rand::thread_rng();
         for s in all {

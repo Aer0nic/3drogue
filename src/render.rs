@@ -2,7 +2,7 @@
 //! floor/ceiling casting, coloured dynamic lighting and scaled ASCII sprites;
 //! the overhead map; the HUD and in-game overlays.
 
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, Cell};
 use crate::color::{hash2, hashf, vnoise, Rgb};
 use crate::data::*;
 use crate::entity::{Faction, Monster};
@@ -1315,6 +1315,9 @@ struct Spr {
     aura: Option<Rgb>,
     /// Overlords throb with a heavy, pulsing outline.
     throb: bool,
+    /// Asleep, or yet to notice you: Zs drift up from its head. The value
+    /// offsets the animation so sleepers don't snore in unison.
+    sleep: Option<f32>,
     d2: f32,
 }
 
@@ -1388,10 +1391,58 @@ pub fn render_game(c: &mut Canvas, g: &Game, t: f32) {
             let mh = 11.min(vh / 3);
             draw_minimap(c, g, w - mw - 1, vy + 1, mw, mh);
         }
+        draw_sound_arrows(c, g, 0, vy, w, vh, t);
     }
     post_effects(c, g, 0, vy, w, vh, t);
     draw_topbar(c, g, w, t);
     draw_hud(c, g, h - HUD_H, w, t);
+}
+
+/// Keen Hearing in first person: a blue arrow at the edge of the view for
+/// each sound you picked out, pointing the way it reaches you, with a rough
+/// guess at how many tiles off it is.
+fn draw_sound_arrows(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t: f32) {
+    if vw < 20 || vh < 8 {
+        return;
+    }
+    let (dirx, diry) = (g.cam.ang.cos(), g.cam.ang.sin());
+    let half = (FOV / 2.0).tan();
+    let (plx, ply) = (-diry * half, dirx * half);
+    let inv = 1.0 / (plx * diry - dirx * ply);
+    for pg in &g.pings {
+        let life = (1.0 - pg.age / Ping::LIFE).clamp(0.0, 1.0);
+        let blink = 0.75 + 0.25 * (t * 6.0 + (pg.x + pg.y) as f32).sin();
+        let col = Rgb(90, 160, 255).scale((0.3 + 0.7 * life) * blink);
+        let (rx, ry) = (pg.ax - g.cam.x, pg.ay - g.cam.y);
+        let tx = inv * (diry * rx - dirx * ry);
+        let ty = inv * (-ply * rx + plx * ry);
+        let label = format!("~{}", pg.dist);
+        let (x, y, arrow) = if ty > 0.0 && (tx / ty).abs() <= 1.0 {
+            // Ahead: along the top edge, above where it is.
+            let col_x = ((vw as f32 / 2.0) * (1.0 + tx / ty)) as i32;
+            (col_x.clamp(1, vw - 5), 1, '^')
+        } else if ty < 0.0 && tx.abs() < -ty * 0.4 {
+            // Right behind you: along the bottom edge.
+            (vw / 2 - 1, vh - 2, 'v')
+        } else {
+            // To one side: on that edge, higher if ahead, lower if behind.
+            let a = (ty / (tx.abs() + ty.abs())).clamp(-1.0, 1.0);
+            let row = ((vh as f32 / 2.0) * (1.0 - a * 0.8)) as i32;
+            if tx < 0.0 {
+                (1, row.clamp(1, vh - 2), '<')
+            } else {
+                (vw - 5, row.clamp(1, vh - 2), '>')
+            }
+        };
+        let bg = Rgb(10, 20, 50).scale(0.5 + 0.5 * life);
+        if arrow == '>' {
+            c.text_bg(vx + x, vy + y, &format!("{:>3}", label), col, bg);
+            c.set(vx + x + 3, vy + y, arrow, col.lerp(Rgb::WHITE, 0.3), bg);
+        } else {
+            c.set(vx + x, vy + y, arrow, col.lerp(Rgb::WHITE, 0.3), bg);
+            c.text_bg(vx + x + 1, vy + y, &label, col, bg);
+        }
+    }
 }
 
 /// One frame of the camera swoop between views. Heading to overhead, the
@@ -1449,6 +1500,381 @@ fn draw_view_swoop(
 
 // ================================================================ first person
 
+
+const DARK: Cell = Cell { ch: ' ', fg: Rgb::BLACK, bg: Rgb::BLACK };
+
+/// Everything one column of the first-person view needs to know.
+struct Fp<'a> {
+    g: &'a Game,
+    wc: WallCtx,
+    pal: &'a Palette,
+    hb: f32,
+    corrupt: f32,
+    dirx: f32,
+    diry: f32,
+    plx: f32,
+    ply: f32,
+    proj: f32,
+    horizon: f32,
+    camx0: f32,
+    camy0: f32,
+    traps: &'a [(i32, i32)],
+    pulse: f32,
+    vw: i32,
+    t: f32,
+    /// Bare-bones detail: flat lighting and no texture noise on floors and ceilings.
+    minimal: bool,
+}
+
+/// Cast the ray for screen column `col` and shade its walls, floor and
+/// ceiling into `out` (one cell per row). Returns the wall distance for the
+/// sprite depth buffer, and any gate the ray looked through.
+fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
+    let Fp {
+        g,
+        ref wc,
+        pal,
+        hb,
+        corrupt,
+        dirx,
+        diry,
+        plx,
+        ply,
+        proj,
+        horizon,
+        camx0,
+        camy0,
+        traps,
+        pulse,
+        vw,
+        t,
+        minimal,
+    } = *f;
+    let lv = &g.level;
+    let vh = out.len() as i32;
+
+    let camx = 2.0 * (col as f32 + 0.5) / vw as f32 - 1.0;
+    let rdx = dirx + plx * camx;
+    let rdy = diry + ply * camx;
+    let rlen = (rdx * rdx + rdy * rdy).sqrt();
+    let mut mapx = camx0.floor() as i32;
+    let mut mapy = camy0.floor() as i32;
+    let ddx = if rdx.abs() < 1e-9 {
+        1e30
+    } else {
+        (1.0 / rdx).abs()
+    };
+    let ddy = if rdy.abs() < 1e-9 {
+        1e30
+    } else {
+        (1.0 / rdy).abs()
+    };
+    let (stepx, mut sdx) = if rdx < 0.0 {
+        (-1, (camx0 - mapx as f32) * ddx)
+    } else {
+        (1, (mapx as f32 + 1.0 - camx0) * ddx)
+    };
+    let (stepy, mut sdy) = if rdy < 0.0 {
+        (-1, (camy0 - mapy as f32) * ddy)
+    } else {
+        (1, (mapy as f32 + 1.0 - camy0) * ddy)
+    };
+    let mut side = 0;
+    let mut hit = false;
+    let mut gate: Option<GateHit> = None;
+    for _ in 0..96 {
+        if sdx < sdy {
+            sdx += ddx;
+            mapx += stepx;
+            side = 0;
+        } else {
+            sdy += ddy;
+            mapy += stepy;
+            side = 1;
+        }
+        let tl = lv.tile(mapx, mapy);
+        let anim = if tl == Tile::DoorOpen {
+            g.fx.door_at(mapx, mapy)
+        } else {
+            None
+        };
+        if (tl == Tile::GateClosed || anim.is_some()) && gate.is_none() {
+            // Remember the gate, and look on through its bars.
+            let gp = (if side == 0 { sdx - ddx } else { sdy - ddy }).max(0.02);
+            let mut gu = if side == 0 {
+                camy0 + gp * rdy
+            } else {
+                camx0 + gp * rdx
+            };
+            gu -= gu.floor();
+            if (side == 0 && rdx < 0.0) || (side == 1 && rdy > 0.0) {
+                gu = 1.0 - gu;
+            }
+            let ghx = camx0 + rdx * gp - rdx / rlen * 0.05;
+            let ghy = camy0 + rdy * gp - rdy / rlen * 0.05;
+            gate = Some(GateHit {
+                perp: gp,
+                u: gu,
+                light: light_at(g, ghx, ghy, t),
+                side_f: if side == 1 { 0.78 } else { 1.0 },
+                mx: mapx,
+                my: mapy,
+                anim,
+            });
+        }
+        if tl.opaque() {
+            hit = true;
+            break;
+        }
+    }
+    
+    let perp = (if side == 0 { sdx - ddx } else { sdy - ddy }).max(0.02);
+    let zb = if hit { perp } else { 1e9 };
+    let tile = lv.tile(mapx, mapy);
+    let mut u = if side == 0 {
+        camy0 + perp * rdy
+    } else {
+        camx0 + perp * rdx
+    };
+    u -= u.floor();
+    if (side == 0 && rdx < 0.0) || (side == 1 && rdy > 0.0) {
+        u = 1.0 - u;
+    }
+    let hx = camx0 + rdx * perp - rdx / rlen * 0.05;
+    let hy = camy0 + rdy * perp - rdy / rlen * 0.05;
+    let wl = light_at(g, hx, hy, t);
+    let lh = proj / perp;
+    let top = horizon - lh * 0.5;
+    let bot = horizon + lh * 0.5;
+    let face = if side == 0 {
+        (mapx - stepx, mapy)
+    } else {
+        (mapx, mapy - stepy)
+    };
+    let torch = lv
+        .torches
+        .iter()
+        .find(|tr| tr.x == mapx && tr.y == mapy && tr.fx == face.0 && tr.fy == face.1);
+    let side_f = if side == 1 { 0.78 } else { 1.0 };
+
+    for row in 0..vh {
+        let yf = row as f32 + 0.5;
+        // Iron bars of a gate in front of everything else in this column.
+        if let Some(gh) = gate {
+            let glh = proj / gh.perp;
+            let gtop = horizon - glh * 0.5;
+            if yf >= gtop && yf <= gtop + glh {
+                if let Some((mult, forced, tint)) =
+                    overlay_tex(lv.style, &gh, (yf - gtop) / glh, wc)
+                {
+                    let emissive = mult > 1.1;
+                    let lf = if emissive { [1.0, 1.0, 1.0] } else { gh.light };
+                    let bri = (lum(lf) * mult * gh.side_f).clamp(0.0, 1.3);
+                    if bri >= 0.025 {
+                        let c0 = tint
+                            .unwrap_or(pal.wall)
+                            .lit(lf)
+                            .scale(mult * gh.side_f * 1.1);
+                        out[row as usize] = Cell { ch: forced.unwrap_or('|'), fg: c0, bg: c0.scale(0.3) };
+                    } else {
+                        out[row as usize] = DARK;
+                    }
+                    continue;
+                }
+            }
+        }
+        let ch: char;
+        let fg: Rgb;
+        let bg: Rgb;
+        if hit && yf >= top && yf <= bot {
+            let v = (yf - top) / lh;
+            let mut torch_cell = None;
+            if let Some(tr) = torch {
+                if (0.38f32..0.62).contains(&u) {
+                    if (0.2f32..0.36).contains(&v) {
+                        let k = hash2((t * 12.0) as i32 + col, row) % 6;
+                        let fc = ['^', '*', '&', '%', '(', ')'][k as usize];
+                        let heat = 1.0 - (v - 0.2) / 0.16;
+                        let base = Rgb(
+                            (255.0 * tr.color[0].min(1.0)) as u8,
+                            (230.0 * tr.color[1].min(1.0)) as u8,
+                            (180.0 * tr.color[2].min(1.0)) as u8,
+                        );
+                        let col_f = base.lerp(Rgb(255, 255, 200), heat * 0.6);
+                        torch_cell = Some((fc, col_f, col_f.scale(0.35)));
+                    } else if (0.36f32..0.52).contains(&v) {
+                        torch_cell = Some(('|', Rgb(120, 80, 40), Rgb(30, 20, 10)));
+                    }
+                }
+            }
+            if let Some(tc) = torch_cell {
+                ch = tc.0;
+                fg = tc.1;
+                bg = tc.2;
+            } else {
+                let (mult, forced, tint) = wall_tex(lv.style, tile, u, v, mapx, mapy, wc);
+                let base = tint.unwrap_or(pal.wall);
+                let emissive = forced.is_some() && mult > 1.3;
+                let lf = if emissive { [1.0, 1.0, 1.0] } else { wl };
+                let bri = (lum(lf) * mult * side_f).clamp(0.0, 1.3);
+                if bri < 0.025 {
+                    ch = ' ';
+                    fg = Rgb::BLACK;
+                    bg = Rgb::BLACK;
+                } else {
+                    let c0 = base.lit(lf).scale(mult * side_f * 1.1);
+                    ch = forced
+                        .unwrap_or(WALL_RAMP[(bri.sqrt() / 1.15 * 8.99).min(8.0) as usize]);
+                    fg = c0;
+                    bg = c0.scale(0.33);
+                }
+            }
+        } else if yf > horizon {
+            let rd = 0.5 * proj / (yf - horizon).max(0.01);
+            let fx = camx0 + rdx * rd;
+            let fy = camy0 + rdy * rd;
+            let tx = fx.floor() as i32;
+            let ty = fy.floor() as i32;
+            let ft = lv.tile(tx, ty);
+            let l = if minimal { light_flat(g, fx, fy) } else { light_at(g, fx, fy, t) };
+            let u2 = fx - tx as f32;
+            let v2 = fy - ty as f32;
+            let mut base = pal.floor;
+            let mut mult;
+            let mut forced: Option<char> = None;
+            let mut emit = Rgb::BLACK;
+            let su = (u2 * 2.0).fract();
+            let sv = (v2 * 2.0).fract();
+            if su < 0.07 || sv < 0.07 {
+                mult = 0.45;
+            } else {
+                mult =
+                    0.82 + 0.3 * hashf(tx * 2 + (u2 * 2.0) as i32, ty * 2 + (v2 * 2.0) as i32);
+            }
+            match ft {
+                Tile::StairsDown => {
+                    let r = (u2 - 0.5).abs().max((v2 - 0.5).abs()) * 2.0;
+                    let k = (r * 4.0).floor();
+                    mult = 0.15 + 0.2 * k;
+                    forced = Some(if (r * 4.0).fract() < 0.25 { '_' } else { '=' });
+                    emit = Rgb(70, 20, 50).scale(0.5 + 0.5 * pulse);
+                }
+                Tile::StairsUp => {
+                    let r = (u2 - 0.5).abs().max((v2 - 0.5).abs()) * 2.0;
+                    let k = (r * 4.0).floor();
+                    mult = 1.25 - 0.18 * k;
+                    forced = Some(if (r * 4.0).fract() < 0.25 { '_' } else { '=' });
+                    emit = Rgb(20, 45, 80).scale(0.5 + 0.5 * pulse);
+                }
+                Tile::DoorOpen => {
+                    base = Rgb(120, 85, 50);
+                }
+                _ => {}
+            }
+            if lv.cloud_at(tx, ty) {
+                // A drifting, glowing haze of spores.
+                let k = hash2((fx * 3.0 + t * 1.5) as i32, (fy * 3.0 - t) as i32) % 4;
+                forced = Some([':', '*', '.', 'o'][k as usize]);
+                base = Rgb(220, 150, 210);
+                emit = Rgb(70, 30, 60).scale(0.6 + 0.4 * pulse);
+                mult = mult.max(0.9);
+            }
+            if !minimal && corrupt > 0.0 && ft == Tile::Floor {
+                // Meat creeping across the flagstones, veins throbbing.
+                let n = vnoise(fx * 1.3, fy * 1.3);
+                if n < corrupt * 0.75 - 0.1 {
+                    base = Rgb(125, 48, 52);
+                    let vn = vnoise(fx * 4.0, fy * 4.0);
+                    if (vn - 0.5).abs() < 0.04 {
+                        forced = Some('~');
+                        base = Rgb(200, 40, 50);
+                        emit = Rgb(70, 0, 10).scale(hb);
+                    }
+                }
+            }
+            if !minimal && lv.inb(tx, ty) {
+                let bl = lv.blood[lv.idx(tx, ty)];
+                if bl > 0.0
+                    && hashf((fx * 5.0).floor() as i32, (fy * 5.0).floor() as i32) < bl * 0.3
+                {
+                    base = Rgb(130, 12, 12);
+                    forced = Some(if hashf(tx * 3, ty * 5) < 0.5 {
+                        '%'
+                    } else {
+                        '~'
+                    });
+                }
+            }
+            if traps.contains(&(tx, ty)) && (u2 - 0.5).abs() < 0.22 && (v2 - 0.5).abs() < 0.22 {
+                forced = Some('^');
+                emit = Rgb(150, 30, 20);
+                mult = 1.0;
+            }
+            let bri = (lum(l) * mult).clamp(0.0, 1.3);
+            if bri < 0.02 && emit == Rgb::BLACK {
+                ch = ' ';
+                fg = Rgb::BLACK;
+                bg = Rgb::BLACK;
+            } else {
+                let c0 = base.lit(l).scale(mult).add(emit);
+                ch = forced.unwrap_or(FLOOR_RAMP[((bri / 1.3) * 5.99).min(5.0) as usize]);
+                fg = c0;
+                bg = c0.scale(0.28);
+            }
+        } else {
+            let rd = 0.5 * proj / (horizon - yf).max(0.01);
+            let fx = camx0 + rdx * rd;
+            let fy = camy0 + rdy * rd;
+            let l0 = if minimal { light_flat(g, fx, fy) } else { light_at(g, fx, fy, t) };
+            let l = [l0[0] * 0.55, l0[1] * 0.55, l0[2] * 0.55];
+            let beam = (fx.fract() < 0.06) || (fy.fract() < 0.06);
+            let mult = if beam {
+                0.5
+            } else {
+                0.85 + 0.25 * hashf(fx.floor() as i32, fy.floor() as i32)
+            };
+            let bri = (lum(l) * mult).clamp(0.0, 1.0);
+            if bri < 0.02 {
+                ch = ' ';
+                fg = Rgb::BLACK;
+                bg = Rgb::BLACK;
+            } else {
+                let c0 = pal.ceil.lit(l).scale(mult * 1.2);
+                ch = if beam {
+                    '='
+                } else {
+                    CEIL_RAMP[(bri * 4.99).min(4.0) as usize]
+                };
+                fg = c0;
+                bg = c0.scale(0.25);
+            }
+        }
+        out[row as usize] = Cell { ch, fg, bg };
+    }
+    (zb, gate)
+}
+
+/// Lighting for bare-bones detail: the level's light at the nearest tile and
+/// a steady torch, without interpolation, flicker or spell lights.
+fn light_flat(g: &Game, x: f32, y: f32) -> [f32; 3] {
+    let lv = &g.level;
+    if g.p.torch_out {
+        return [0.0; 3];
+    }
+    let (ix, iy) = (x as i32, y as i32);
+    let mut l = if lv.inb(ix, iy) { lv.light[lv.idx(ix, iy)] } else { [0.0; 3] };
+    let d2 = (x - g.cam.x).powi(2) + (y - g.cam.y).powi(2);
+    let s2 = (g.sight() as f32).powi(2);
+    if s2 > 0.0 {
+        let torch = 1.25 / (1.0 + d2 * 7.5 / s2);
+        let tc = if g.p.invis > 0 { [0.45, 0.5, 0.8] } else { [1.0, 0.8, 0.55] };
+        for k in 0..3 {
+            l[k] += tc[k] * torch;
+        }
+    }
+    l
+}
+
 pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t: f32) {
     let lv = &g.level;
     let corrupt = g.corruption();
@@ -1491,306 +1917,64 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
         .collect();
     let pulse = 0.5 + 0.5 * (t * 2.5).sin();
 
-    for col in 0..vw {
-        let camx = 2.0 * (col as f32 + 0.5) / vw as f32 - 1.0;
-        let rdx = dirx + plx * camx;
-        let rdy = diry + ply * camx;
-        let rlen = (rdx * rdx + rdy * rdy).sqrt();
-        let mut mapx = camx0.floor() as i32;
-        let mut mapy = camy0.floor() as i32;
-        let ddx = if rdx.abs() < 1e-9 {
-            1e30
-        } else {
-            (1.0 / rdx).abs()
-        };
-        let ddy = if rdy.abs() < 1e-9 {
-            1e30
-        } else {
-            (1.0 / rdy).abs()
-        };
-        let (stepx, mut sdx) = if rdx < 0.0 {
-            (-1, (camx0 - mapx as f32) * ddx)
-        } else {
-            (1, (mapx as f32 + 1.0 - camx0) * ddx)
-        };
-        let (stepy, mut sdy) = if rdy < 0.0 {
-            (-1, (camy0 - mapy as f32) * ddy)
-        } else {
-            (1, (mapy as f32 + 1.0 - camy0) * ddy)
-        };
-        let mut side = 0;
-        let mut hit = false;
-        let mut gate: Option<GateHit> = None;
-        for _ in 0..96 {
-            if sdx < sdy {
-                sdx += ddx;
-                mapx += stepx;
-                side = 0;
-            } else {
-                sdy += ddy;
-                mapy += stepy;
-                side = 1;
-            }
-            let tl = lv.tile(mapx, mapy);
-            let anim = if tl == Tile::DoorOpen {
-                g.fx.door_at(mapx, mapy)
-            } else {
-                None
-            };
-            if (tl == Tile::GateClosed || anim.is_some()) && gate.is_none() {
-                // Remember the gate, and look on through its bars.
-                let gp = (if side == 0 { sdx - ddx } else { sdy - ddy }).max(0.02);
-                let mut gu = if side == 0 {
-                    camy0 + gp * rdy
-                } else {
-                    camx0 + gp * rdx
-                };
-                gu -= gu.floor();
-                if (side == 0 && rdx < 0.0) || (side == 1 && rdy > 0.0) {
-                    gu = 1.0 - gu;
+    // ---------- walls, floor and ceiling, one ray per column (or per pair
+    // of columns at lower detail), spread over the CPU cores.
+    let detail = crate::perf::detail();
+    let step = detail.col_step() as usize;
+    let fp = Fp {
+        g,
+        wc,
+        pal: &pal,
+        hb,
+        corrupt,
+        dirx,
+        diry,
+        plx,
+        ply,
+        proj,
+        horizon,
+        camx0,
+        camy0,
+        traps: &traps,
+        pulse,
+        vw,
+        t,
+        minimal: detail == crate::perf::Detail::Minimal,
+    };
+    let vwu = vw.max(0) as usize;
+    let vhu = vh.max(0) as usize;
+    let ncast = vwu.div_ceil(step);
+    if vhu > 0 && ncast > 0 {
+        let mut buf = vec![DARK; ncast * vhu];
+        let mut res: Vec<(f32, Option<GateHit>)> = vec![(1e9, None); ncast];
+        let threads = crate::perf::threads().min(ncast);
+        if threads > 1 && ncast * vhu >= 5000 {
+            let per = ncast.div_ceil(threads);
+            let fp = &fp;
+            std::thread::scope(|s| {
+                for (k, (bc, rc)) in buf.chunks_mut(per * vhu).zip(res.chunks_mut(per)).enumerate() {
+                    s.spawn(move || {
+                        for (j, (o, r)) in bc.chunks_mut(vhu).zip(rc.iter_mut()).enumerate() {
+                            *r = cast_column(fp, ((k * per + j) * step) as i32, o);
+                        }
+                    });
                 }
-                let ghx = camx0 + rdx * gp - rdx / rlen * 0.05;
-                let ghy = camy0 + rdy * gp - rdy / rlen * 0.05;
-                gate = Some(GateHit {
-                    perp: gp,
-                    u: gu,
-                    light: light_at(g, ghx, ghy, t),
-                    side_f: if side == 1 { 0.78 } else { 1.0 },
-                    mx: mapx,
-                    my: mapy,
-                    anim,
-                });
-            }
-            if tl.opaque() {
-                hit = true;
-                break;
+            });
+        } else {
+            for (i, (o, r)) in buf.chunks_mut(vhu).zip(res.iter_mut()).enumerate() {
+                *r = cast_column(&fp, (i * step) as i32, o);
             }
         }
-        gates[col as usize] = gate;
-        let perp = (if side == 0 { sdx - ddx } else { sdy - ddy }).max(0.02);
-        zbuf[col as usize] = if hit { perp } else { 1e9 };
-        let tile = lv.tile(mapx, mapy);
-        let mut u = if side == 0 {
-            camy0 + perp * rdy
-        } else {
-            camx0 + perp * rdx
-        };
-        u -= u.floor();
-        if (side == 0 && rdx < 0.0) || (side == 1 && rdy > 0.0) {
-            u = 1.0 - u;
-        }
-        let hx = camx0 + rdx * perp - rdx / rlen * 0.05;
-        let hy = camy0 + rdy * perp - rdy / rlen * 0.05;
-        let wl = light_at(g, hx, hy, t);
-        let lh = proj / perp;
-        let top = horizon - lh * 0.5;
-        let bot = horizon + lh * 0.5;
-        let face = if side == 0 {
-            (mapx - stepx, mapy)
-        } else {
-            (mapx, mapy - stepy)
-        };
-        let torch = lv
-            .torches
-            .iter()
-            .find(|tr| tr.x == mapx && tr.y == mapy && tr.fx == face.0 && tr.fy == face.1);
-        let side_f = if side == 1 { 0.78 } else { 1.0 };
-
-        for row in 0..vh {
-            let yf = row as f32 + 0.5;
-            // Iron bars of a gate in front of everything else in this column.
-            if let Some(gh) = gate {
-                let glh = proj / gh.perp;
-                let gtop = horizon - glh * 0.5;
-                if yf >= gtop && yf <= gtop + glh {
-                    if let Some((mult, forced, tint)) =
-                        overlay_tex(lv.style, &gh, (yf - gtop) / glh, &wc)
-                    {
-                        let emissive = mult > 1.1;
-                        let lf = if emissive { [1.0, 1.0, 1.0] } else { gh.light };
-                        let bri = (lum(lf) * mult * gh.side_f).clamp(0.0, 1.3);
-                        if bri >= 0.025 {
-                            let c0 = tint
-                                .unwrap_or(pal.wall)
-                                .lit(lf)
-                                .scale(mult * gh.side_f * 1.1);
-                            c.set(vx + col, vy + row, forced.unwrap_or('|'), c0, c0.scale(0.3));
-                        } else {
-                            c.set(vx + col, vy + row, ' ', Rgb::BLACK, Rgb::BLACK);
-                        }
-                        continue;
-                    }
-                }
+        for col in 0..vwu {
+            let i = col / step;
+            zbuf[col] = res[i].0;
+            gates[col] = res[i].1;
+            for (row, cell) in buf[i * vhu..(i + 1) * vhu].iter().enumerate() {
+                c.set(vx + col as i32, vy + row as i32, cell.ch, cell.fg, cell.bg);
             }
-            let ch: char;
-            let fg: Rgb;
-            let bg: Rgb;
-            if hit && yf >= top && yf <= bot {
-                let v = (yf - top) / lh;
-                let mut torch_cell = None;
-                if let Some(tr) = torch {
-                    if (0.38f32..0.62).contains(&u) {
-                        if (0.2f32..0.36).contains(&v) {
-                            let k = hash2((t * 12.0) as i32 + col, row) % 6;
-                            let fc = ['^', '*', '&', '%', '(', ')'][k as usize];
-                            let heat = 1.0 - (v - 0.2) / 0.16;
-                            let base = Rgb(
-                                (255.0 * tr.color[0].min(1.0)) as u8,
-                                (230.0 * tr.color[1].min(1.0)) as u8,
-                                (180.0 * tr.color[2].min(1.0)) as u8,
-                            );
-                            let col_f = base.lerp(Rgb(255, 255, 200), heat * 0.6);
-                            torch_cell = Some((fc, col_f, col_f.scale(0.35)));
-                        } else if (0.36f32..0.52).contains(&v) {
-                            torch_cell = Some(('|', Rgb(120, 80, 40), Rgb(30, 20, 10)));
-                        }
-                    }
-                }
-                if let Some(tc) = torch_cell {
-                    ch = tc.0;
-                    fg = tc.1;
-                    bg = tc.2;
-                } else {
-                    let (mult, forced, tint) = wall_tex(lv.style, tile, u, v, mapx, mapy, &wc);
-                    let base = tint.unwrap_or(pal.wall);
-                    let emissive = forced.is_some() && mult > 1.3;
-                    let lf = if emissive { [1.0, 1.0, 1.0] } else { wl };
-                    let bri = (lum(lf) * mult * side_f).clamp(0.0, 1.3);
-                    if bri < 0.025 {
-                        ch = ' ';
-                        fg = Rgb::BLACK;
-                        bg = Rgb::BLACK;
-                    } else {
-                        let c0 = base.lit(lf).scale(mult * side_f * 1.1);
-                        ch = forced
-                            .unwrap_or(WALL_RAMP[(bri.sqrt() / 1.15 * 8.99).min(8.0) as usize]);
-                        fg = c0;
-                        bg = c0.scale(0.33);
-                    }
-                }
-            } else if yf > horizon {
-                let rd = 0.5 * proj / (yf - horizon).max(0.01);
-                let fx = camx0 + rdx * rd;
-                let fy = camy0 + rdy * rd;
-                let tx = fx.floor() as i32;
-                let ty = fy.floor() as i32;
-                let ft = lv.tile(tx, ty);
-                let l = light_at(g, fx, fy, t);
-                let u2 = fx - tx as f32;
-                let v2 = fy - ty as f32;
-                let mut base = pal.floor;
-                let mut mult;
-                let mut forced: Option<char> = None;
-                let mut emit = Rgb::BLACK;
-                let su = (u2 * 2.0).fract();
-                let sv = (v2 * 2.0).fract();
-                if su < 0.07 || sv < 0.07 {
-                    mult = 0.45;
-                } else {
-                    mult =
-                        0.82 + 0.3 * hashf(tx * 2 + (u2 * 2.0) as i32, ty * 2 + (v2 * 2.0) as i32);
-                }
-                match ft {
-                    Tile::StairsDown => {
-                        let r = (u2 - 0.5).abs().max((v2 - 0.5).abs()) * 2.0;
-                        let k = (r * 4.0).floor();
-                        mult = 0.15 + 0.2 * k;
-                        forced = Some(if (r * 4.0).fract() < 0.25 { '_' } else { '=' });
-                        emit = Rgb(70, 20, 50).scale(0.5 + 0.5 * pulse);
-                    }
-                    Tile::StairsUp => {
-                        let r = (u2 - 0.5).abs().max((v2 - 0.5).abs()) * 2.0;
-                        let k = (r * 4.0).floor();
-                        mult = 1.25 - 0.18 * k;
-                        forced = Some(if (r * 4.0).fract() < 0.25 { '_' } else { '=' });
-                        emit = Rgb(20, 45, 80).scale(0.5 + 0.5 * pulse);
-                    }
-                    Tile::DoorOpen => {
-                        base = Rgb(120, 85, 50);
-                    }
-                    _ => {}
-                }
-                if lv.cloud_at(tx, ty) {
-                    // A drifting, glowing haze of spores.
-                    let k = hash2((fx * 3.0 + t * 1.5) as i32, (fy * 3.0 - t) as i32) % 4;
-                    forced = Some([':', '*', '.', 'o'][k as usize]);
-                    base = Rgb(220, 150, 210);
-                    emit = Rgb(70, 30, 60).scale(0.6 + 0.4 * pulse);
-                    mult = mult.max(0.9);
-                }
-                if corrupt > 0.0 && ft == Tile::Floor {
-                    // Meat creeping across the flagstones, veins throbbing.
-                    let n = vnoise(fx * 1.3, fy * 1.3);
-                    if n < corrupt * 0.75 - 0.1 {
-                        base = Rgb(125, 48, 52);
-                        let vn = vnoise(fx * 4.0, fy * 4.0);
-                        if (vn - 0.5).abs() < 0.04 {
-                            forced = Some('~');
-                            base = Rgb(200, 40, 50);
-                            emit = Rgb(70, 0, 10).scale(hb);
-                        }
-                    }
-                }
-                if lv.inb(tx, ty) {
-                    let bl = lv.blood[lv.idx(tx, ty)];
-                    if bl > 0.0
-                        && hashf((fx * 5.0).floor() as i32, (fy * 5.0).floor() as i32) < bl * 0.3
-                    {
-                        base = Rgb(130, 12, 12);
-                        forced = Some(if hashf(tx * 3, ty * 5) < 0.5 {
-                            '%'
-                        } else {
-                            '~'
-                        });
-                    }
-                }
-                if traps.contains(&(tx, ty)) && (u2 - 0.5).abs() < 0.22 && (v2 - 0.5).abs() < 0.22 {
-                    forced = Some('^');
-                    emit = Rgb(150, 30, 20);
-                    mult = 1.0;
-                }
-                let bri = (lum(l) * mult).clamp(0.0, 1.3);
-                if bri < 0.02 && emit == Rgb::BLACK {
-                    ch = ' ';
-                    fg = Rgb::BLACK;
-                    bg = Rgb::BLACK;
-                } else {
-                    let c0 = base.lit(l).scale(mult).add(emit);
-                    ch = forced.unwrap_or(FLOOR_RAMP[((bri / 1.3) * 5.99).min(5.0) as usize]);
-                    fg = c0;
-                    bg = c0.scale(0.28);
-                }
-            } else {
-                let rd = 0.5 * proj / (horizon - yf).max(0.01);
-                let fx = camx0 + rdx * rd;
-                let fy = camy0 + rdy * rd;
-                let l0 = light_at(g, fx, fy, t);
-                let l = [l0[0] * 0.55, l0[1] * 0.55, l0[2] * 0.55];
-                let beam = (fx.fract() < 0.06) || (fy.fract() < 0.06);
-                let mult = if beam {
-                    0.5
-                } else {
-                    0.85 + 0.25 * hashf(fx.floor() as i32, fy.floor() as i32)
-                };
-                let bri = (lum(l) * mult).clamp(0.0, 1.0);
-                if bri < 0.02 {
-                    ch = ' ';
-                    fg = Rgb::BLACK;
-                    bg = Rgb::BLACK;
-                } else {
-                    let c0 = pal.ceil.lit(l).scale(mult * 1.2);
-                    ch = if beam {
-                        '='
-                    } else {
-                        CEIL_RAMP[(bri * 4.99).min(4.0) as usize]
-                    };
-                    fg = c0;
-                    bg = c0.scale(0.25);
-                }
-            }
-            c.set(vx + col, vy + row, ch, fg, bg);
         }
     }
+    let wc = fp.wc;
 
     // ---------- sprites
     let mut sprs: Vec<Spr> = Vec::new();
@@ -1816,6 +2000,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             glow: false,
             aura: None,
             throb: false,
+            sleep: None,
             d2: d2(x, y),
         });
     }
@@ -1836,6 +2021,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             glow: amulet || special,
             aura: if special { Some(it.item.color()) } else { None },
             throb: false,
+            sleep: None,
             d2: d2(x, y),
         });
     }
@@ -1872,6 +2058,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             glow: false,
             aura: aura_of(m),
             throb: m.overlord,
+            sleep: (!m.awake).then_some(m.id as f32 * 0.37),
             d2: d2(x, y),
         });
     }
@@ -1892,6 +2079,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                 glow: false,
                 aura: None,
                 throb: false,
+                sleep: None,
                 d2: d2(x, y),
             });
         } else {
@@ -1913,6 +2101,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                     None
                 },
                 throb: shield,
+                sleep: None,
                 d2: d2(x, y),
             });
         }
@@ -1939,6 +2128,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             glow: false,
             aura: None,
             throb: false,
+            sleep: None,
             d2: d2(x, y),
         });
     }
@@ -2116,6 +2306,36 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
         }
     }
 
+    // ---------- sleepers: Zs drifting up from the heads of monsters that are
+    // asleep or have not noticed you. Only where you can see the sleeper.
+    for s in &sprs {
+        let Some(ph) = s.sleep else { continue };
+        let (tx, ty) = project(s.x, s.y);
+        if ty <= 0.2 || ty > 14.0 {
+            continue;
+        }
+        if lum(light_at(g, s.x, s.y, t)) < 0.07 {
+            continue;
+        }
+        let scx = (vw as f32 / 2.0) * (1.0 + tx / ty);
+        let scale = proj / ty;
+        let top = horizon + scale * 0.5 - s.float * scale - s.size * scale;
+        let head_w = (s.size * scale * 0.35).max(1.0);
+        // Three Zs climb up and to the right, growing and fading as they go.
+        for k in 0..3 {
+            let p = (t * 0.55 + ph + k as f32 / 3.0).fract();
+            let rise = 1.0 + p * (2.0 + scale * 0.25).min(5.0);
+            let col = (scx + head_w * 0.5 + p * 2.5) as i32;
+            let row = (top - rise) as i32;
+            if col < 0 || col >= vw || row < 0 || row >= vh || ty >= zbuf[col as usize] {
+                continue;
+            }
+            let ch = if p < 0.4 { 'z' } else { 'Z' };
+            let fade = (1.0 - p).powf(0.7) * (1.0 - (ty / 14.0).powi(2)).max(0.2);
+            c.put(vx + col, vy + row, ch, Rgb(170, 190, 255).scale(0.35 + 0.65 * fade));
+        }
+    }
+
     // ---------- Monster Vision: a marker and a name for every creature nearby,
     // seen straight through the walls.
     if g.p.vision > 0 {
@@ -2161,7 +2381,9 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
     }
 
     // ---------- particles, projectiles, combat text
-    for p in &g.fx.parts {
+    // (particles are pure decoration, so bare-bones detail skips them)
+    let parts: &[_] = if fp.minimal { &[] } else { &g.fx.parts };
+    for p in parts {
         let (tx, ty) = project(p.x, p.y);
         if ty <= 0.2 {
             continue;
@@ -2590,6 +2812,17 @@ fn draw_minimap(c: &mut Canvas, g: &Game, x0: i32, y0: i32, w: i32, h: i32) {
             c.set(x0 + i, y0 + j, ch, col.scale(k), bg);
         }
     }
+    // Glinting Eye: items in sight, as the full map shows them.
+    if g.bonus.glint {
+        for it in &lv.items {
+            if lv.is_visible(it.x, it.y) {
+                let (i, j) = (it.x - px + w / 2, it.y - py + h / 2);
+                if i >= 0 && i < w && j >= 0 && j < h {
+                    c.set(x0 + i, y0 + j, it.item.glyph(), it.item.color(), bg);
+                }
+            }
+        }
+    }
     for m in &lv.monsters {
         if map_shows(g, m) {
             let (i, j) = (m.x - px + w / 2, m.y - py + h / 2);
@@ -2840,8 +3073,15 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
                 c.get(vx + sx, vy + sy).bg
             };
             c.set(vx + sx, vy + sy, def.glyph, col, bg);
-            if !m.awake && ((t * 1.5 + m.id as f32) as i32) % 3 == 0 {
-                put(c, sx + 1, sy, 'z', Rgb(120, 120, 200));
+            if !m.awake {
+                // A z beside it that rises into a Z above, then starts again.
+                let p = (t * 0.55 + m.id as f32 * 0.37).fract();
+                let col = Rgb(170, 190, 255).scale(1.0 - 0.6 * p);
+                if p < 0.5 {
+                    put(c, sx + 1, sy, 'z', col);
+                } else {
+                    put(c, sx + 2, sy - 1, 'Z', col);
+                }
             } else if m.stun > 0 {
                 put(c, sx + 1, sy, '*', Rgb(255, 255, 120));
             }
@@ -2877,6 +3117,43 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
             );
         }
     }
+    // Keen Hearing: sound waves rippling out from what you heard, washing
+    // along the corridors and flaring where they strike the walls.
+    for pg in &g.pings {
+        let life = 1.0 - pg.age / Ping::LIFE;
+        // Distances are in half-tiles, muffling included: a wave seems to
+        // hang at a door or a sharp corner before it carries on, dimmer.
+        let speed = 9.0;
+        let reach = pg.reach as f32 / 2.0;
+        let period = reach / speed + 0.7;
+        // A ring every period; two rings in flight at once.
+        for ring in 0..2 {
+            let r = ((pg.age + ring as f32 * period * 0.5) % period) * speed;
+            for &(x, y, d2) in &pg.wave {
+                let d = d2 as f32 / 2.0;
+                let off = (d - r).abs();
+                if off > 0.75 {
+                    continue;
+                }
+                let (sx, sy) = to_screen(x as f32, y as f32);
+                if sx < 0 || sx + 1 >= vw || sy < 0 || sy >= vh {
+                    continue;
+                }
+                let k = (1.0 - off / 0.75) * life * (1.0 - d / (reach + 1.0)).max(0.15);
+                if lv.tile(x, y).opaque() {
+                    // The wave strikes stone and bounces back.
+                    let col = Rgb(150, 200, 255).scale(0.35 + 0.65 * k);
+                    c.set(vx + sx, vy + sy, '#', col, Rgb(20, 40, 90).scale(0.4 + 0.6 * k));
+                    c.set(vx + sx + 1, vy + sy, '#', col, Rgb(20, 40, 90).scale(0.4 + 0.6 * k));
+                } else {
+                    let col = Rgb(90, 150, 255).scale(0.3 + 0.7 * k);
+                    let ch = if d2 == 0 { '*' } else { '~' };
+                    put(c, sx, sy, ch, col);
+                    put(c, sx + 1, sy, if d2 == 0 { ' ' } else { '~' }, col.scale(0.7));
+                }
+            }
+        }
+    }
     // the player
     let (psx, psy) = (hw, hh);
     let pcol = if g.p.invis > 0 {
@@ -2893,7 +3170,13 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
             Rgb(255, 220, 90),
         );
     }
+    // Only what happens where you can see it: a fight beyond the walls is
+    // something you hear, not something you watch.
+    let seen = |x: f32, y: f32| lv.is_visible(x.floor() as i32, y.floor() as i32);
     for p in &g.fx.parts {
+        if !seen(p.x, p.y) {
+            continue;
+        }
         let (sx, sy) = to_screen(p.x - 0.5, p.y - 0.5 - p.z * 0.6);
         let fade = (p.life / p.max).clamp(0.0, 1.0);
         put(c, sx, sy, p.ch, p.color.scale(0.35 + 0.65 * fade));
@@ -2905,12 +3188,18 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
                 break;
             }
             let (bx, by) = b.pos_at(tt);
+            if !seen(bx, by) {
+                continue;
+            }
             let (sx, sy) = to_screen(bx - 0.5, by - 0.5);
             let ch = if k == 0 { b.ch } else { '.' };
             put(c, sx, sy, ch, b.color.scale(1.0 - k as f32 * 0.22));
         }
     }
     for ft in &g.fx.texts {
+        if !seen(ft.x, ft.y) {
+            continue;
+        }
         let (sx, sy) = to_screen(ft.x - 0.5, ft.y - 0.5 - ft.z * 1.5);
         let a = ft.life.clamp(0.0, 1.0);
         for (i, chr) in ft.text.chars().enumerate() {
@@ -2926,7 +3215,7 @@ fn post_effects(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t:
         c.tint_region(vx, vy, vw, vh, g.fx.flash, (g.fx.flash_amt * 0.6).min(0.7));
     }
     let frac = g.p.hp as f32 / g.p.max_hp.max(1) as f32;
-    if frac < 0.3 && g.over.is_none() {
+    if frac < 0.3 && g.over.is_none() && crate::perf::detail() != crate::perf::Detail::Minimal {
         let pulse = (0.5 + 0.5 * (t * 4.0).sin()) * (0.3 - frac) / 0.3;
         let edge = 4;
         for y in vy..vy + vh {
@@ -3248,14 +3537,16 @@ fn draw_hud(c: &mut Canvas, g: &Game, y0: i32, w: i32, t: f32) {
 // ================================================================ overlays
 
 pub fn draw_inventory(c: &mut Canvas, g: &Game) {
-    let w = 60.min(c.w as i32 - 4);
+    // Wider with Appraiser's Eye, to fit what better gear would add.
+    let w = if g.bonus.appraise { 76 } else { 60 }.min(c.w as i32 - 4);
     let worn = g.equipped_uniques();
     let worn_rows = if worn.is_empty() {
         0
     } else {
         worn.len() as i32 + 2
     };
-    let h = (g.p.inv.len() as i32 + 7 + worn_rows)
+    let slots = g.inv_slots();
+    let h = (slots.len() as i32 + 7 + worn_rows)
         .max(10)
         .min(c.h as i32 - 2);
     let x0 = (c.w as i32 - w) / 2;
@@ -3265,7 +3556,8 @@ pub fn draw_inventory(c: &mut Canvas, g: &Game) {
     if g.p.inv.is_empty() {
         c.text(x0 + 3, y0 + 2, "Your pack is empty.", Rgb(150, 150, 150));
     }
-    for (i, it) in g.p.inv.iter().enumerate() {
+    for (i, &(first, count)) in slots.iter().enumerate() {
+        let it = &g.p.inv[first];
         let y = y0 + 2 + i as i32;
         if y >= y0 + h - 3 {
             break;
@@ -3295,7 +3587,24 @@ pub fn draw_inventory(c: &mut Canvas, g: &Game) {
         } else {
             Rgb(220, 220, 220)
         };
-        c.text(x0 + 8, y, &format!("{}{}", it.name(), extra), name_col);
+        let stack = if count > 1 { format!(" x{}", count) } else { String::new() };
+        let line = format!("{}{}{}", it.name(), stack, extra);
+        c.text(x0 + 8, y, &line, name_col);
+        // Appraiser's Eye: a green ^ and what it adds over your own gear.
+        if g.bonus.appraise {
+            if let Some((a, b)) = g.upgrade_over_worn(it) {
+                let green = Rgb(90, 230, 90);
+                c.text(x0 + 2, y, "^", green);
+                let gain = match it {
+                    Item::Weapon(_) => format!("  ({:+} min / {:+} max dmg)", a, b),
+                    _ => format!("  ({:+} AC)", a),
+                };
+                let gx = x0 + 8 + line.chars().count() as i32;
+                let room = (x0 + w - 1 - gx).max(0) as usize;
+                let gain: String = gain.chars().take(room).collect();
+                c.text(gx, y, &gain, green);
+            }
+        }
     }
     if !worn.is_empty() {
         let mut y = y0 + h - 3 - worn.len() as i32;
@@ -3313,7 +3622,10 @@ pub fn draw_inventory(c: &mut Canvas, g: &Game) {
     c.text(
         x0 + 2,
         y0 + h - 2,
-        "a-r: use/equip   SHIFT+letter: drop   Esc: close",
+        &format!(
+            "a-r: use/equip   SHIFT+letter: drop   `: sort   [{} free]",
+            g.free_slots()
+        ),
         Rgb(150, 140, 120),
     );
 }
@@ -3336,6 +3648,8 @@ pub const HELP_LINES: &[&str] = &[
     "  I           inventory                  P        quaff healing potion",
     "  Shift+R     toggle TURN-BASED / REAL-TIME combat",
     "  Shift+M     switch between first-person and overhead play",
+    "  Shift+C     Last Rites on / off (a Soul Altar boon)",
+    "  Shift+Q     listen intently (Keen Hearing, a Soul Altar boon)",
     "  Tab or M    show the full map of the floor",
     "  L           message log (last 100 turns)  T  relight a blown-out torch",
     "  - / +       volume                     Esc      menu",
@@ -3373,22 +3687,31 @@ pub fn draw_help(c: &mut Canvas) {
     }
 }
 
-pub const PAUSE_ITEMS: [&str; 4] = [
+pub const PAUSE_ITEMS: [&str; 5] = [
     "Resume",
     "How to play",
+    "Detail",
     "Abandon run (earn soul points)",
     "Save and quit to desktop",
 ];
 
-pub fn draw_pause(c: &mut Canvas, sel: usize) {
+/// `detail` is the current detail setting, shown beside its menu item.
+pub fn draw_pause(c: &mut Canvas, sel: usize, detail: &str) {
     let w = 40;
-    let h = 9;
+    let h = 10;
     let x0 = (c.w as i32 - w) / 2;
     let y0 = (c.h as i32 - h) / 2;
     c.frame(x0, y0, w, h, Rgb(200, 120, 90), Rgb(16, 8, 8));
     c.text(x0 + 2, y0, " PAUSED ", Rgb(255, 180, 140));
     for (i, it) in PAUSE_ITEMS.iter().enumerate() {
         let y = y0 + 2 + i as i32;
+        let label;
+        let it = if *it == "Detail" {
+            label = format!("Detail: < {} >", detail);
+            label.as_str()
+        } else {
+            it
+        };
         if i == sel {
             c.text_bg(
                 x0 + 2,
@@ -3686,7 +4009,7 @@ pub fn draw_pickup(c: &mut Canvas, g: &Game) {
         let name: String = it.name().chars().take((w - 10).max(0) as usize).collect();
         c.text(x0 + 8, y, &name, col);
     }
-    let free = g.inv_cap().saturating_sub(g.p.inv.len());
+    let free = g.free_slots();
     c.text(
         x0 + 2,
         y0 + h - 2,

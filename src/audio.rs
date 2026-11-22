@@ -3,7 +3,7 @@
 //! sounds are filtered, panned, echoed and reverberated according to how the
 //! sound travels through the dungeon (see `Game::spatial`).
 
-use crate::data::VoiceKind;
+use crate::data::{Material, VoiceKind};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rand::Rng;
 use std::f32::consts::{PI, TAU};
@@ -38,7 +38,10 @@ pub enum Sfx {
     Fireball,
     Explosion,
     Frost,
+    /// A bowstring released and an arrow whistling away.
     Arrow,
+    /// A blow or an arrow landing on something made of this.
+    Impact(Material),
     Bolt,
     Heal,
     LevelUp,
@@ -162,10 +165,19 @@ impl Audio {
     }
 
     pub fn play(&self, sfx: Sfx, sp: &Spatial) {
+        self.play_after(sfx, sp, 0.0);
+    }
+
+    /// Play a sound `delay` seconds from now (an arrow still in flight).
+    pub fn play_after(&self, sfx: Sfx, sp: &Spatial, delay: f32) {
         let Some(m) = &self.mixer else { return };
         let mut rng = rand::thread_rng();
         let mono = synth(sfx, self.sr, &mut rng);
-        let st = spatialize(&mono, sp, self.sr);
+        let mut st = spatialize(&mono, sp, self.sr);
+        if delay > 0.0 {
+            let pad = (delay.min(2.0) * self.sr) as usize * 2;
+            st.splice(0..0, std::iter::repeat(0.0).take(pad));
+        }
         if let Ok(mut mx) = m.lock() {
             if mx.voices.len() > 40 {
                 mx.voices.remove(0);
@@ -179,6 +191,19 @@ impl Audio {
             if let Ok(mut mx) = m.lock() {
                 mx.music.mode = mode;
                 mx.music.depth = depth;
+                if mode != MusicMode::Dungeon {
+                    mx.music.amulet = false;
+                }
+            }
+        }
+    }
+
+    /// The Amulet is in your hands: the score turns frantic, and grows more
+    /// hopeful with every floor you climb.
+    pub fn set_amulet(&self, on: bool) {
+        if let Some(m) = &self.mixer {
+            if let Ok(mut mx) = m.lock() {
+                mx.music.amulet = on;
             }
         }
     }
@@ -542,9 +567,228 @@ fn monster_voice<R: Rng>(kind: VoiceKind, mood: Mood, sr: f32, rng: &mut R) -> V
             let p = VP { pitch: rr(rng, 120.0, 170.0) * pm, dur: rr(rng, 0.3, 0.5) * dm, glide: if die { -0.5 } else { 0.1 }, vib: 0.03, vib_rate: 6.0, noise: 0.3, formant: 700.0, formant2: 1500.0, rough: 0.3, q: 0.35 };
             vocal(&p, sr, rng)
         }
+        VoiceKind::Gurgle => {
+            // Bubbles: each a sine that swoops upward as it pops, over a
+            // low slosh of jelly. Dying, it sags into one long falling gloop.
+            let count = if die { 8 } else { rng.gen_range(3..7) };
+            let mut a = repeat_calls(rng, sr, count, (0.01, 0.09), |rng| {
+                let f0 = rr(rng, 110.0, 230.0) * pm;
+                tone(sr, rr(rng, 0.05, 0.12) * dm.min(1.2), f0, f0 * rr(rng, 1.8, 3.2), 0.04)
+            });
+            if die {
+                let g = tone(sr, 0.7, 260.0, 55.0, 0.3);
+                let at = a.len();
+                mix_into(&mut a, &g, at, 0.9);
+            }
+            let dur = a.len() as f32 / sr;
+            let slosh = filtered_noise(sr, rng, dur, 520.0 * pm, 160.0, 0.9, 0.05, 0);
+            mix_into(&mut a, &slosh, 0, 1.6);
+            a
+        }
+        VoiceKind::Chitter => {
+            // Bursts of hard, high clicks with a dry rasp under them.
+            let bursts = if die { 4 } else { rng.gen_range(2..4) };
+            let mut a = repeat_calls(rng, sr, bursts, (0.03, 0.08), |rng| {
+                let n = rng.gen_range(7..13);
+                let len = rr(rng, 0.08, 0.14) * dm.min(1.3);
+                clicks(sr, rng, n, len, 2800.0 * pm, 6500.0)
+            });
+            let dur = a.len() as f32 / sr;
+            let rasp = filtered_noise(sr, rng, dur, 3800.0 * pm, 3000.0, 0.5, 0.01, 1);
+            mix_into(&mut a, &rasp, 0, 0.35);
+            if die {
+                // Legs twitching to a stop.
+                let n = 10;
+                let t = clicks(sr, rng, n, 0.5, 1500.0, 3500.0);
+                let at = a.len();
+                mix_into(&mut a, &t, at, 0.5);
+            }
+            a
+        }
+        VoiceKind::Grind => {
+            // Stick-slip scraping: band noise jerked on and off, a low groan
+            // of shifting mass, and grit falling out of the joints.
+            let dur = rr(rng, 0.7, 1.0) * dm;
+            let mut a = filtered_noise(sr, rng, dur, 380.0 * pm, 170.0 * pm, 0.6, 0.06, 1);
+            let mut slip = 1.0f32;
+            for (i, x) in a.iter_mut().enumerate() {
+                if i % (sr as usize / 40) == 0 {
+                    slip = rr(rng, 0.15, 1.0);
+                }
+                *x *= slip;
+            }
+            let b = tone(sr, dur, 62.0 * pm, 44.0 * pm, dur * 0.6);
+            mix_into(&mut a, &b, 0, 0.4);
+            let grit = clicks(sr, rng, if die { 60 } else { 18 }, dur * if die { 1.4 } else { 1.0 }, 700.0, 2600.0);
+            mix_into(&mut a, &grit, 0, if die { 0.8 } else { 0.35 });
+            distort(&mut a, 1.8);
+            a
+        }
+        VoiceKind::Crackle => {
+            // A whoosh of flame flaring up (or guttering out), full of pops.
+            let dur = rr(rng, 0.6, 0.9) * dm;
+            let (f0, f1) = if die { (1400.0, 180.0) } else { (300.0 * pm, 1300.0 * pm) };
+            let mut a = filtered_noise(sr, rng, dur, f0, f1, 0.8, if die { 0.01 } else { dur * 0.4 }, 1);
+            let roar = filtered_noise(sr, rng, dur, 140.0, 90.0, 0.7, 0.05, 0);
+            mix_into(&mut a, &roar, 0, 0.8);
+            let n = rng.gen_range(8..16);
+            let pops = clicks(sr, rng, n, dur, 1800.0, 5500.0);
+            mix_into(&mut a, &pops, 0, 0.5);
+            a
+        }
+        VoiceKind::Chime => {
+            // Glassy struck tones: a rising arpeggio when roused, a sour
+            // cluster when struck, a shatter of falling shards when broken.
+            let glass: &[(f32, f32)] = &[(1.0, 1.0), (2.76, 0.5), (5.4, 0.3), (8.93, 0.15)];
+            let base = rr(rng, 620.0, 760.0) * pm;
+            let notes: Vec<f32> = match mood {
+                Mood::Hurt => vec![1.0, 1.06, 1.12],
+                Mood::Die => vec![2.0, 1.68, 1.5, 1.26, 1.0, 0.84],
+                Mood::Attack => vec![1.0, 1.5],
+                _ => vec![1.0, 1.26, 1.5],
+            };
+            let step = if mood == Mood::Hurt { 0.0 } else { 0.09 };
+            let mut a = Vec::new();
+            for (i, r) in notes.iter().enumerate() {
+                let b = bell(sr, base * r, 0.9 * dm.min(1.2), glass, 0.35);
+                mix_into(&mut a, &b, (i as f32 * step * sr) as usize, 1.0 - i as f32 * 0.08);
+            }
+            if die {
+                let shards = clicks(sr, rng, 50, 0.6, 3500.0, 6500.0);
+                mix_into(&mut a, &shards, 0, 0.7);
+            }
+            a
+        }
+        VoiceKind::Spore => {
+            // Soft, dull puffs of spores and the creak of fibrous flesh.
+            let count = if die { 5 } else { rng.gen_range(2..4) };
+            let mut a = repeat_calls(rng, sr, count, (0.05, 0.15), |rng| {
+                let len = rr(rng, 0.1, 0.18);
+                filtered_noise(sr, rng, len, 900.0 * pm, 250.0, 0.9, 0.01, 0)
+            });
+            let p = VP { pitch: rr(rng, 38.0, 55.0) * pm, dur: rr(rng, 0.4, 0.6) * dm, glide: if die { -0.4 } else { 0.1 }, vib: 0.0, vib_rate: 1.0, noise: 0.15, formant: 320.0, formant2: 700.0, rough: 1.0, q: 0.4 };
+            let creak = vocal(&p, sr, rng);
+            mix_into(&mut a, &creak, 0, 0.35);
+            a
+        }
     };
     normalize(&mut out, if mood == Mood::Idle { 0.5 } else { 0.85 });
     out
+}
+
+// ================================================================ impacts
+
+/// The sound of a blow or an arrow landing on `m`.
+fn impact<R: Rng>(m: Material, sr: f32, rng: &mut R) -> Vec<f32> {
+    let mut a = match m {
+        Material::Flesh | Material::Ooze => {
+            let ooze = m == Material::Ooze;
+            // The smack: a soft, low body thump.
+            let mut a = tone(sr, 0.16, rr(rng, 95.0, 130.0), 55.0, if ooze { 0.07 } else { 0.04 });
+            // The squelch: muffled noise whose filter quivers open and shut.
+            let dur = if ooze { 0.38 } else { 0.24 };
+            let n = (dur * sr) as usize;
+            let mut f = Svf::new();
+            let mut wob = 1.0f32;
+            for i in 0..n {
+                if i % (sr as usize / 90) == 0 {
+                    wob = rr(rng, 0.4, 1.6);
+                }
+                let x = i as f32 / n as f32;
+                let fc = (900.0 - 600.0 * x) * wob;
+                let (_, b, _) = f.process(nz(rng), fc, 0.35, sr);
+                let env = (i as f32 / (0.004 * sr)).min(1.0) * (1.0 - x).powf(1.6);
+                let v = b * env * if ooze { 1.4 } else { 1.0 };
+                if i < a.len() {
+                    a[i] += v;
+                } else {
+                    a.push(v);
+                }
+            }
+            // A wet suck as the blade or arrow pulls free.
+            let suck = tone(sr, 0.09, 220.0, if ooze { 520.0 } else { 380.0 }, 0.03);
+            mix_into(&mut a, &suck, (0.06 * sr) as usize, if ooze { 0.5 } else { 0.25 });
+            if ooze {
+                for k in 0..3 {
+                    let f0 = rr(rng, 140.0, 260.0);
+                    let b = tone(sr, 0.08, f0, f0 * 2.4, 0.03);
+                    mix_into(&mut a, &b, ((0.1 + 0.07 * k as f32) * sr) as usize, 0.35);
+                }
+            }
+            a
+        }
+        Material::Bone => {
+            // A dull, hollow knock and a dry crack, then a rattle of loose bones.
+            let mut a = tone(sr, 0.14, rr(rng, 170.0, 210.0), 110.0, 0.035);
+            let crack = filtered_noise(sr, rng, 0.04, 2400.0, 1200.0, 0.5, 0.0005, 1);
+            mix_into(&mut a, &crack, 0, 0.7);
+            let rattle = clicks(sr, rng, 5, 0.12, 1200.0, 2800.0);
+            mix_into(&mut a, &rattle, (0.02 * sr) as usize, 0.3);
+            a
+        }
+        Material::Shell => {
+            // Chitin giving way: a brittle crunch over a small thump.
+            let mut a = tone(sr, 0.1, 150.0, 90.0, 0.03);
+            let crunch = clicks(sr, rng, 22, 0.07, 1500.0, 4500.0);
+            mix_into(&mut a, &crunch, 0, 1.0);
+            let body = filtered_noise(sr, rng, 0.08, 1600.0, 700.0, 0.5, 0.001, 1);
+            mix_into(&mut a, &body, 0, 0.5);
+            a
+        }
+        Material::Stone | Material::Wall => {
+            let wall = m == Material::Wall;
+            // A heavy, dead thud: no ring at all, only mass and grit.
+            let mut a = tone(sr, 0.2, rr(rng, 70.0, 90.0), 45.0, 0.06);
+            let body = filtered_noise(sr, rng, 0.12, 700.0, 200.0, 0.8, 0.001, 0);
+            mix_into(&mut a, &body, 0, 0.9);
+            let grit = clicks(sr, rng, if wall { 4 } else { 10 }, 0.15, 900.0, 2600.0);
+            mix_into(&mut a, &grit, (0.01 * sr) as usize, 0.35);
+            if wall {
+                // The arrow shaft quivering where it struck.
+                let q = bell(sr, rr(rng, 260.0, 320.0), 0.25, &[(1.0, 1.0), (2.7, 0.3)], 0.06);
+                mix_into(&mut a, &q, 0, 0.3);
+            }
+            a
+        }
+        Material::Crystal => {
+            // A bright glassy ring with a shimmer of high partials and a tink.
+            let glass: &[(f32, f32)] = &[(1.0, 1.0), (2.76, 0.55), (5.4, 0.35), (8.93, 0.2)];
+            let f = rr(rng, 1300.0, 1900.0);
+            let mut a = bell(sr, f, 0.9, glass, 0.3);
+            let b = bell(sr, f * 1.5, 0.6, glass, 0.18);
+            mix_into(&mut a, &b, (0.012 * sr) as usize, 0.4);
+            let tink = clicks(sr, rng, 4, 0.05, 4500.0, 6500.0);
+            mix_into(&mut a, &tink, 0, 0.5);
+            a
+        }
+        Material::Armor => {
+            // A muffled iron thunk: struck mail over a body, not a bell.
+            let mut a = tone(sr, 0.15, 130.0, 80.0, 0.045);
+            let iron = bell(sr, rr(rng, 260.0, 340.0), 0.15, &[(1.0, 1.0), (2.41, 0.4), (3.93, 0.2)], 0.025);
+            mix_into(&mut a, &iron, 0, 0.45);
+            let mail = clicks(sr, rng, 8, 0.06, 2000.0, 4000.0);
+            mix_into(&mut a, &mail, 0, 0.25);
+            a
+        }
+        Material::Spirit => {
+            // A hollow rush through cold mist, and a faint low moan of air.
+            let mut a = filtered_noise(sr, rng, 0.35, 2200.0, 500.0, 0.3, 0.02, 1);
+            let low = tone(sr, 0.35, 90.0, 70.0, 0.15);
+            mix_into(&mut a, &low, 0, 0.4);
+            a
+        }
+        Material::Flame => {
+            // A sizzling puff: hiss over a soft whump of air.
+            let mut a = filtered_noise(sr, rng, 0.3, 4500.0, 3000.0, 0.6, 0.005, 2);
+            let whump = filtered_noise(sr, rng, 0.2, 400.0, 150.0, 0.8, 0.005, 0);
+            mix_into(&mut a, &whump, 0, 1.0);
+            let pops = clicks(sr, rng, 6, 0.25, 2000.0, 5000.0);
+            mix_into(&mut a, &pops, 0, 0.4);
+            a
+        }
+    };
+    normalize(&mut a, if m == Material::Wall { 0.55 } else { 0.9 });
+    a
 }
 
 // ================================================================ effects
@@ -702,12 +946,19 @@ fn synth<R: Rng>(sfx: Sfx, sr: f32, rng: &mut R) -> Vec<f32> {
             a
         }
         Sfx::Arrow => {
-            let mut a = tone(sr, 0.18, 190.0, 175.0, 0.06);
-            let b = filtered_noise(sr, rng, 0.15, 2500.0, 1500.0, 0.6, 0.01, 1);
-            mix_into(&mut a, &b, (0.02 * sr) as usize, 0.7);
+            // The string: a taut, low pluck that dies fast, with a little
+            // buzz of harmonics and the slap of the string on the bracer.
+            let f = rr(rng, 95.0, 125.0);
+            let mut a = bell(sr, f, 0.22, &[(1.0, 1.0), (2.0, 0.45), (3.0, 0.25), (4.0, 0.12)], 0.05);
+            let slap = filtered_noise(sr, rng, 0.03, 1800.0, 900.0, 0.6, 0.0005, 1);
+            mix_into(&mut a, &slap, 0, 0.6);
+            // The arrow: a thin whistle of air falling away as it flies off.
+            let fly = filtered_noise(sr, rng, 0.42, 5200.0, 1700.0, 0.25, 0.015, 1);
+            mix_into(&mut a, &fly, (0.015 * sr) as usize, 0.55);
             normalize(&mut a, 0.6);
             a
         }
+        Sfx::Impact(m) => impact(m, sr, rng),
         Sfx::Bolt => {
             let p = VP { pitch: rr(rng, 1200.0, 1500.0), dur: 0.35, glide: -0.85, vib: 0.08, vib_rate: 25.0, noise: 0.1, formant: 1500.0, formant2: 3000.0, rough: 0.0, q: 0.4 };
             let mut a = vocal(&p, sr, rng);
@@ -959,6 +1210,16 @@ struct Music {
     wind_ph: f32,
     str_ph: f32,
     gain: f32,
+    /// Carrying the Amulet back up.
+    amulet: bool,
+    /// Smoothed 0..1 of how deep and bleak the music is.
+    dark: f32,
+    /// Smoothed 0..1 of how hopeful the climb sounds.
+    hope: f32,
+    /// Smoothed 0..1 of the Amulet's frantic edge.
+    panic: f32,
+    /// Next soft heartbeat while carrying the Amulet.
+    next_pulse: u64,
 }
 
 const AEOLIAN: [i32; 7] = [0, 2, 3, 5, 7, 8, 10];
@@ -966,7 +1227,8 @@ const HARMONIC: [i32; 7] = [0, 2, 3, 5, 7, 8, 11];
 const PHRYGIAN: [i32; 7] = [0, 1, 3, 5, 7, 8, 10];
 const LOCRIAN: [i32; 7] = [0, 1, 3, 5, 6, 8, 10];
 const MAJOR: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
-const DEPTH_ROOT: [i32; 10] = [0, -2, 3, -4, 1, -5, 2, -3, -1, -6];
+/// Minor with a raised sixth: dark, but with light coming through.
+const DORIAN: [i32; 7] = [0, 2, 3, 5, 7, 9, 10];
 
 impl Music {
     fn new(sr: f32) -> Music {
@@ -997,6 +1259,27 @@ impl Music {
             wind_ph: 0.0,
             str_ph: 0.0,
             gain: 0.0,
+            amulet: false,
+            dark: 0.0,
+            hope: 0.0,
+            panic: 0.0,
+            next_pulse: 0,
+        }
+    }
+
+    /// Where the music is heading: (dark, hope, panic), each 0..1. Darkness
+    /// grows with depth. With the Amulet the music is frantic, and hope grows
+    /// with each floor climbed back toward the surface.
+    fn moods(&self) -> (f32, f32, f32) {
+        if self.mode != MusicMode::Dungeon {
+            return (0.0, 0.0, 0.0);
+        }
+        let deep = (self.depth.clamp(1, 10) - 1) as f32 / 9.0;
+        if self.amulet {
+            let hope = 1.0 - deep;
+            (deep * 0.85, hope, 1.0 - 0.35 * hope)
+        } else {
+            (deep, 0.0, 0.0)
         }
     }
 
@@ -1014,6 +1297,13 @@ impl Music {
             MusicMode::Victory => &MAJOR,
             MusicMode::Title => &AEOLIAN,
             MusicMode::Death => &PHRYGIAN,
+            // The way back up: the further you climb, the brighter the mode.
+            MusicMode::Dungeon if self.amulet => match self.depth {
+                1..=2 => &DORIAN,
+                3..=5 => &AEOLIAN,
+                6..=8 => &PHRYGIAN,
+                _ => &LOCRIAN,
+            },
             MusicMode::Dungeon => match self.depth {
                 1..=3 => &AEOLIAN,
                 4..=6 => &HARMONIC,
@@ -1028,7 +1318,9 @@ impl Music {
             MusicMode::Title => -2,
             MusicMode::Death => -5,
             MusicMode::Victory => 3,
-            MusicMode::Dungeon => DEPTH_ROOT[((self.depth.max(1) - 1) % 10) as usize],
+            // A semitone lower for every floor down: depth 10 sits nine
+            // semitones under the first floor.
+            MusicMode::Dungeon => -(self.depth.clamp(1, 10) as i32 - 1),
         };
         110.0 * 2f32.powf(semi as f32 / 12.0)
     }
@@ -1039,8 +1331,9 @@ impl Music {
         let sc = self.scale();
         let semi = sc[(self.deg % 7) as usize] + 12 * (self.deg / 7);
         let f = self.root() * 2f32.powf(semi as f32 / 12.0) * 2.0;
-        let pluck = self.rand() < 0.35;
-        let dec_time = if pluck { 0.6 } else { 2.2 };
+        let dark = self.dark;
+        let pluck = self.rand() < 0.35 * (1.0 - 0.6 * dark) + 0.3 * self.panic;
+        let dec_time = if pluck { 0.6 } else { 2.2 + 1.8 * dark };
         let pan = (self.rand() - 0.5) * 1.2;
         self.notes.push(Note {
             f,
@@ -1051,7 +1344,15 @@ impl Music {
             pan,
             ratio: if pluck { 2.0 } else { 2.76 },
         });
-        if self.mode == MusicMode::Victory && self.rand() < 0.5 {
+        // The deep: now and then a second note grinds against the first, a
+        // semitone or a tritone away.
+        if self.rand() < 0.35 * dark {
+            let rub = if self.rand() < 0.5 { 1.0595 } else { 1.4142 };
+            self.notes.push(Note { f: f * rub, ph: 0.0, ph2: 0.0, amp: 0.035, dec: (-1.0 / (self.sr * dec_time)).exp(), pan: -pan, ratio: 2.76 });
+        }
+        // The climb: the consonant third that the victory music uses.
+        let hope_third = self.mode == MusicMode::Dungeon && self.rand() < 0.45 * self.hope;
+        if (self.mode == MusicMode::Victory && self.rand() < 0.5) || hope_third {
             // add a third above for consonance
             let semi3 = sc[((self.deg + 2) % 7) as usize] + 12 * ((self.deg + 2) / 7);
             let f3 = self.root() * 2f32.powf(semi3 as f32 / 12.0) * 2.0;
@@ -1062,7 +1363,10 @@ impl Music {
             MusicMode::Death => 2.0,
             MusicMode::Victory => 0.35,
             MusicMode::Title => 1.2,
-            MusicMode::Dungeon => 1.0 - 0.5 * self.intensity,
+            // Deeper, the notes thin out into silence; the Amulet hurries them.
+            MusicMode::Dungeon => {
+                (1.0 - 0.5 * self.intensity) * (1.0 + 0.9 * dark) * (1.0 - 0.45 * self.panic)
+            }
         };
         self.next_note = self.t + (self.sr * base * mul) as u64;
     }
@@ -1076,8 +1380,22 @@ impl Music {
             _ => 0.1,
         };
         let fifth = if self.mode == MusicMode::Dungeon && self.depth >= 10 { 1.4142 } else { 1.4983 };
+        let (dk, hp, pn) = self.moods();
         for i in 0..frames {
             self.t += 1;
+            // Ease into each floor's mood over a few seconds.
+            let ease = 1.0 / (sr * 4.0);
+            self.dark += (dk - self.dark) * ease;
+            self.hope += (hp - self.hope) * ease;
+            self.panic += (pn - self.panic) * ease;
+            // Carrying the Amulet: a soft, quickened heartbeat under it all.
+            if dungeon && self.panic > 0.05 && self.t >= self.next_pulse {
+                let bpm = 84.0 + 20.0 * self.panic + 30.0 * self.intensity;
+                self.next_pulse = self.t + (sr * 60.0 / bpm) as u64;
+                let a = 0.16 * self.panic;
+                self.drums.push(Drum { ph: 0.0, amp: a, t: 0.0, kind: 0 });
+                self.drums.push(Drum { ph: 0.0, amp: a * 0.6, t: -0.16, kind: 0 });
+            }
             self.gain = (self.gain + 1.0 / (sr * 3.0)).min(1.0);
             self.intensity += (self.target - self.intensity) * (1.0 / (sr * 1.5));
             if self.t >= self.next_note {
@@ -1101,14 +1419,18 @@ impl Music {
                 self.lfo_ph -= TAU;
             }
             let lfo = self.lfo_ph.sin();
-            let freqs = [root * 0.5, root * 0.5 * fifth, root * 0.5 * 1.003];
+            // The third voice drifts further out of tune the deeper you are,
+            // so the drone beats and wavers.
+            let freqs = [root * 0.5, root * 0.5 * fifth, root * 0.5 * (1.003 + 0.014 * self.dark)];
             let mut d = 0.0;
             for k in 0..3 {
                 self.drone_ph[k] += freqs[k] / sr;
                 self.drone_ph[k] -= self.drone_ph[k].floor();
                 d += 2.0 * self.drone_ph[k] - 1.0;
             }
-            let cutoff = 160.0 + 220.0 * (lfo * 0.5 + 0.5) + self.intensity * 500.0;
+            let cutoff = (160.0 + 220.0 * (lfo * 0.5 + 0.5)) * (1.0 - 0.35 * self.dark)
+                + self.intensity * 500.0
+                + 120.0 * self.hope;
             let a = 1.0 - (-TAU * cutoff / sr).exp();
             self.lp1 += a * (d - self.lp1);
             self.lp2 += a * (self.lp1 - self.lp2);
@@ -1134,17 +1456,26 @@ impl Music {
 
             // tension strings
             let mut strings = 0.0;
-            if dungeon && self.intensity > 0.4 {
+            // Tension strings: in a fight, and always (if softly) with the
+            // Amulet, trembling faster.
+            let str_amt = ((self.intensity - 0.4) / 0.6).max(0.0).max(0.45 * self.panic);
+            if dungeon && str_amt > 0.0 {
                 self.str_ph += root * 2.0 * 1.0595 / sr;
                 self.str_ph -= self.str_ph.floor();
-                let trem = 0.5 + 0.5 * (TAU * 7.0 * self.t as f32 / sr).sin();
-                strings = (2.0 * self.str_ph - 1.0) * 0.02 * ((self.intensity - 0.4) / 0.6) * trem;
+                let rate = 7.0 + 4.0 * self.panic;
+                let trem = 0.5 + 0.5 * (TAU * rate * self.t as f32 / sr).sin();
+                strings = (2.0 * self.str_ph - 1.0) * 0.02 * str_amt.min(1.0) * trem;
             }
 
             // drums
             let mut dsum = 0.0;
             let mut noise_v = 0.0;
             for dr in self.drums.iter_mut() {
+                if dr.t < 0.0 {
+                    // Not struck yet (the second beat of a heartbeat).
+                    dr.t += 1.0 / sr;
+                    continue;
+                }
                 if dr.kind == 0 {
                     let f = 40.0 + 80.0 * (-dr.t * 30.0).exp();
                     dr.ph += f / sr;
@@ -1167,8 +1498,10 @@ impl Music {
             // ping-pong delay on the bells
             let dlv = self.dl[self.dpos];
             let drv = self.dr[self.dpos];
-            self.dl[self.dpos] = nl * 0.5 + drv * 0.45;
-            self.dr[self.dpos] = nr * 0.5 + dlv * 0.45;
+            // The deep echoes on and on.
+            let fb = 0.45 + 0.2 * self.dark;
+            self.dl[self.dpos] = nl * 0.5 + drv * fb;
+            self.dr[self.dpos] = nr * 0.5 + dlv * fb;
             self.dpos = (self.dpos + 1) % self.dl.len();
 
             // wind
@@ -1178,12 +1511,13 @@ impl Music {
                 if self.wind_ph > TAU {
                     self.wind_ph -= TAU;
                 }
-                let wc = 250.0 + 200.0 * self.wind_ph.sin();
+                let wc = (250.0 + 200.0 * self.wind_ph.sin()) * (1.0 - 0.4 * self.dark);
                 let wa = 1.0 - (-TAU * wc / sr).exp();
                 let w = self.rand() * 2.0 - 1.0;
                 self.wind_lp += wa * (w - self.wind_lp);
                 self.wind_lp2 += wa * (self.wind_lp - self.wind_lp2);
-                wind = self.wind_lp2 * 0.09 * (0.6 + 0.4 * (self.wind_ph * 0.5).sin());
+                let howl = 1.0 + 1.3 * self.dark - 0.4 * self.hope;
+                wind = self.wind_lp2 * 0.09 * howl * (0.6 + 0.4 * (self.wind_ph * 0.5).sin());
             }
 
             let l = drone + nl + dlv * 0.6 + strings + dsum + wind;
@@ -1197,4 +1531,52 @@ impl Music {
 #[cfg(test)]
 pub fn synth_for_test<R: Rng>(sfx: Sfx, sr: f32, rng: &mut R) -> Vec<f32> {
     synth(sfx, sr, rng)
+}
+
+#[cfg(test)]
+mod music_tests {
+    use super::*;
+
+    fn at(depth: u32, amulet: bool) -> Music {
+        let mut m = Music::new(44100.0);
+        m.mode = MusicMode::Dungeon;
+        m.depth = depth;
+        m.amulet = amulet;
+        m
+    }
+
+    #[test]
+    fn music_sinks_and_darkens_with_depth() {
+        let roots: Vec<f32> = (1..=10).map(|d| at(d, false).root()).collect();
+        assert!(roots.windows(2).all(|w| w[1] < w[0]), "pitch drops every floor");
+        assert!((roots[0] / roots[9] - 2f32.powf(9.0 / 12.0)).abs() < 1e-3);
+        let (d1, _, _) = at(1, false).moods();
+        let (d10, h10, p10) = at(10, false).moods();
+        assert!(d10 > d1);
+        assert_eq!((h10, p10), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_amulet_makes_it_frantic_then_hopeful() {
+        let (_, h10, p10) = at(10, true).moods();
+        let (_, h5, _) = at(5, true).moods();
+        let (d1, h1, p1) = at(1, true).moods();
+        assert!(p10 > 0.9 && p1 > 0.5, "frantic all the way up");
+        assert!(h1 > h5 && h5 > h10, "more hope with each floor climbed");
+        assert!(d1 < 0.01);
+        assert!(std::ptr::eq(at(1, true).scale(), &DORIAN));
+        assert!(std::ptr::eq(at(10, true).scale(), &LOCRIAN));
+    }
+
+    #[test]
+    fn music_stays_finite_in_every_mood() {
+        for (depth, amulet) in [(1, false), (10, false), (10, true), (1, true)] {
+            let mut m = at(depth, amulet);
+            m.target = 0.9;
+            let mut buf = vec![0.0f32; 44100 * 2 * 6];
+            m.render(&mut buf, 44100 * 6);
+            assert!(buf.iter().all(|x| x.is_finite() && x.abs() < 4.0), "depth {} amulet {}", depth, amulet);
+            assert!(m.dark >= 0.0 && m.hope >= 0.0 && m.panic >= 0.0);
+        }
+    }
 }

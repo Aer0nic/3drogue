@@ -64,6 +64,33 @@ pub enum Action {
     Relight,
     /// Raise the corpse at this spot (chosen from the raise menu).
     RaiseAt(i32, i32),
+    /// Keen Hearing: hold still and listen for what moves nearby (Shift+Q).
+    Listen,
+}
+
+/// A sound picked out by listening intently (Keen Hearing).
+#[derive(Clone, Debug)]
+pub struct Ping {
+    /// Where the sound was made.
+    pub x: i32,
+    pub y: i32,
+    /// Where it reaches you from: the last corner it came around.
+    pub ax: f32,
+    pub ay: f32,
+    /// Your rough guess at how far off it is, in tiles.
+    pub dist: i32,
+    /// Seconds since you heard it.
+    pub age: f32,
+    /// How the sound spreads: every tile it reaches and how far it travelled
+    /// to get there. Walls it strikes are included, one step past the floor.
+    pub wave: Vec<(i32, i32, u16)>,
+    /// How far the wave spreads before it fades.
+    pub reach: u16,
+}
+
+impl Ping {
+    /// How long a ping stays on screen, in seconds.
+    pub const LIFE: f32 = 7.0;
 }
 
 /// A corpse the necromancer could raise, as offered in the raise menu.
@@ -131,6 +158,8 @@ pub struct SoundEv {
     pub x: f32,
     pub y: f32,
     pub vol: f32,
+    /// Seconds before it is heard (an arrow still in flight).
+    pub delay: f32,
 }
 
 /// Smoothly interpolated camera following the grid-locked player.
@@ -316,6 +345,9 @@ pub struct Player {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Game {
+    /// Last Rites switched off for now (Shift+C), e.g. to keep bodies to raise.
+    #[serde(default)]
+    pub rites_off: bool,
     #[serde(skip, default = "fresh_rng")]
     pub rng: StdRng,
     pub depth: u32,
@@ -336,6 +368,10 @@ pub struct Game {
     pub fx: Fx,
     #[serde(skip)]
     pub dmap: Vec<i32>,
+    /// How far sound travels to reach you from each tile, in half-tiles
+    /// (corners and doors muffle it); see `Level::sound_field`.
+    #[serde(skip)]
+    pub smap: Vec<u16>,
     pub next_id: u32,
     #[serde(skip)]
     pub over: Option<Outcome>,
@@ -347,6 +383,19 @@ pub struct Game {
     pub queued: Option<Action>,
     pub combat_heat: f32,
     pub room_size: f32,
+    /// How far sound carries around you, in tiles: the longest clear run in
+    /// any of the eight directions (a long hallway, or across a big hall).
+    #[serde(skip)]
+    pub echo_len: f32,
+    /// Keen Hearing: when you can next listen intently.
+    #[serde(default)]
+    pub listen_ready: f64,
+    /// Sounds you picked out by listening.
+    #[serde(skip)]
+    pub pings: Vec<Ping>,
+    /// Seconds an arrow takes to reach what the next strike hits.
+    #[serde(skip)]
+    strike_delay: f32,
     last_fight_msg: u64,
     /// Chance that each floor's unique monster walks its halls, rolled at the start of the run.
     pub unique_chance: [f32; 10],
@@ -1104,6 +1153,7 @@ impl Game {
             para_guard: 0.0,
         };
         let mut g = Game {
+            rites_off: false,
             rng,
             depth: 1,
             level,
@@ -1119,6 +1169,7 @@ impl Game {
             sounds: Vec::new(),
             fx: Fx::new(),
             dmap: Vec::new(),
+            smap: Vec::new(),
             next_id,
             over: None,
             kills: 0,
@@ -1133,6 +1184,10 @@ impl Game {
             queued: None,
             combat_heat: 0.0,
             room_size: 0.4,
+            echo_len: 0.0,
+            listen_ready: 0.0,
+            pings: Vec::new(),
+            strike_delay: 0.0,
             last_fight_msg: 0,
             unique_chance,
             found_uniques: Vec::new(),
@@ -1226,9 +1281,58 @@ impl Game {
     pub fn diff(&self) -> &'static DiffDef {
         &DIFFICULTIES[(self.difficulty as usize).min(DIFFICULTIES.len() - 1)]
     }
-    /// How many items your pack holds.
+    /// How many slots your pack has.
     pub fn inv_cap(&self) -> usize {
         MAX_INV + 3 * self.bonus.pockets.max(0) as usize
+    }
+
+    /// How many potions of one kind share a slot (Potion Belt).
+    pub fn stack_size(&self) -> usize {
+        1 + self.bonus.belt.max(0) as usize
+    }
+
+    /// The pack as its slots: (index in `p.inv` of the slot's first item,
+    /// how many items are in it). Potions of a kind fill a slot up to the
+    /// stack size before starting another; everything else takes a slot of
+    /// its own. Slots are in the order their first item appears.
+    pub fn inv_slots(&self) -> Vec<(usize, usize)> {
+        slots_of(&self.p.inv, self.stack_size())
+    }
+
+    /// Pack slots still free.
+    pub fn free_slots(&self) -> usize {
+        self.inv_cap().saturating_sub(self.inv_slots().len())
+    }
+
+    /// Is there room in the pack for `it` (a free slot, or a potion slot
+    /// with room on the belt)?
+    pub fn can_carry(&self, it: &Item) -> bool {
+        let mut inv = self.p.inv.clone();
+        inv.push(*it);
+        slots_of(&inv, self.stack_size()).len() <= self.inv_cap()
+    }
+
+    /// The item in pack slot `s` (as lettered in the inventory screen), as an
+    /// index into `p.inv`.
+    pub fn slot_item(&self, s: usize) -> Option<usize> {
+        self.inv_slots().get(s).map(|&(i, _)| i)
+    }
+
+    /// Sort the pack by type: weapons, armour, rings and amulets, potions,
+    /// scrolls. Takes no time.
+    pub fn sort_inv(&mut self) {
+        fn key(it: &Item) -> (u8, u8) {
+            match it {
+                Item::Weapon(_) => (0, 0),
+                Item::Armor(_) => (1, 0),
+                Item::Trinket(_) => (2, 0),
+                Item::Potion(p) => (3, *p as u8),
+                Item::Scroll(s) => (4, *s as u8),
+                Item::Amulet => (5, 0),
+            }
+        }
+        self.p.inv.sort_by_key(key);
+        self.msg("You sort your pack by type.", GREY);
     }
     /// Below a quarter of your health (Last Stand).
     pub fn last_stand(&self) -> bool {
@@ -1412,11 +1516,17 @@ impl Game {
     }
 
     pub fn emit(&mut self, sfx: Sfx, x: i32, y: i32, vol: f32) {
+        self.emit_after(sfx, x, y, vol, 0.0);
+    }
+
+    /// A sound heard `delay` seconds from now.
+    pub fn emit_after(&mut self, sfx: Sfx, x: i32, y: i32, vol: f32, delay: f32) {
         self.sounds.push(SoundEv {
             sfx,
             x: x as f32 + 0.5,
             y: y as f32 + 0.5,
             vol,
+            delay,
         });
     }
 
@@ -1448,6 +1558,10 @@ impl Game {
         let (px, py) = (self.p.x, self.p.y);
         self.level.compute_fov(px, py, s);
         self.dmap = self.level.dijkstra(px, py);
+        // Sound paths are the same either way, so one map from you serves
+        // every sound on the floor.
+        let lim = (self.hear_radius() as u16 + 8) * 2;
+        self.smap = self.level.sound_field(px, py, lim);
         let mut open = 0;
         let mut tot = 0;
         for dy in -4..=4 {
@@ -1459,6 +1573,15 @@ impl Game {
             }
         }
         self.room_size = open as f32 / tot as f32;
+        let mut longest = 0;
+        for &(dx, dy) in DIRS.iter() {
+            let mut n = 0;
+            while n < 24 && !self.level.tile(px + dx * (n + 1), py + dy * (n + 1)).opaque() {
+                n += 1;
+            }
+            longest = longest.max(n);
+        }
+        self.echo_len = longest as f32;
         self.check_closet();
         self.check_features();
         self.check_ward();
@@ -1775,7 +1898,7 @@ impl Game {
                 self.fx.light(wx, wy, [1.0, 1.8, 2.4], 5.0, 1.2);
                 self.fx.shake = self.fx.shake.max(1.0);
                 self.emit(Sfx::Explosion, w.x, w.y, 0.8);
-                self.emit(Sfx::Voice(VoiceKind::Chant, Mood::Alert), gx, gy, 1.0);
+                self.emit(Sfx::Voice(VoiceKind::Chime, Mood::Alert), gx, gy, 1.0);
                 self.msg("The prism flares blinding white, and a PRISM GUARDIAN tears itself out of the light!", Rgb(170, 240, 255));
                 self.msg(
                     "Walls of crystal slam down across every way out of the room!",
@@ -2726,6 +2849,78 @@ impl Game {
         self.view_anim = Some((0.0, self.overhead));
     }
 
+    /// Shift+C: switch Last Rites on or off, once it has been bought.
+    pub fn toggle_rites(&mut self) {
+        if self.bonus.pyre <= 0 {
+            self.msg("You have not learned the Last Rites (Soul Altar).", Rgb(150, 150, 150));
+            return;
+        }
+        self.rites_off = !self.rites_off;
+        if self.rites_off {
+            self.msg("Last Rites OFF: the dead are left as they fall. (Shift+C)", Rgb(150, 150, 170));
+        } else {
+            self.msg(
+                format!(
+                    "Last Rites ON: {}% chance to burn or shatter the bodies of your kills. (Shift+C)",
+                    5 * self.bonus.pyre
+                ),
+                Rgb(255, 170, 90),
+            );
+        }
+    }
+
+    /// Last Rites: the corpse just left at (x,y) by a monster of `kind` is
+    /// burned with the torch, or a skeleton kicked to shards, so it never
+    /// rises again and cannot be raised. Returns true if it was destroyed.
+    fn last_rites(&mut self, kind: usize, x: i32, y: i32) -> bool {
+        if self.bonus.pyre <= 0 || self.rites_off {
+            return false;
+        }
+        let def = &MONSTERS[kind];
+        let undead = def.death == DeathKind::Undead;
+        // No flame to set a body alight with; bones can still be kicked apart.
+        if !undead && self.p.torch_out {
+            return false;
+        }
+        if self.rng.gen::<f32>() >= 0.05 * self.bonus.pyre.min(5) as f32 {
+            return false;
+        }
+        let Some(ci) = self
+            .level
+            .corpses
+            .iter()
+            .rposition(|c| c.kind == kind && c.x == x && c.y == y)
+        else {
+            return false;
+        };
+        self.level.corpses.remove(ci);
+        let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+        let seen = self.level.is_visible(x, y);
+        if undead {
+            self.fx.bones(fx, fy);
+            self.fx.burst(fx, fy, 0.2, 18, Rgb(225, 220, 200), &[',', '.', '\'', '`'], 1.4, 0.8, 0.8, false);
+            self.emit(Sfx::Bones, x, y, 0.9);
+            if seen {
+                self.msg(
+                    format!("You kick the {}'s bones to shards. It will not rise again.", def.name),
+                    Rgb(225, 215, 190),
+                );
+            }
+        } else {
+            self.fx.burst(fx, fy, 0.3, 26, Rgb(255, 140, 40), &['^', '*', '&', '\''], 0.5, 1.6, -0.6, true);
+            self.fx.burst(fx, fy, 0.6, 12, Rgb(70, 65, 65), &['~', 'o', '.'], 0.3, 2.2, -0.4, false);
+            self.fx.light(fx, fy, [1.4, 0.7, 0.25], 2.5, 1.2);
+            self.emit(Sfx::Fireball, x, y, 0.6);
+            if seen {
+                self.msg(
+                    format!("You put your torch to the {}'s body. It burns to ash.", def.name),
+                    Rgb(255, 170, 90),
+                );
+            }
+        }
+        true
+    }
+
     pub fn toggle_realtime(&mut self) {
         self.realtime = !self.realtime;
         self.queued = None;
@@ -2928,6 +3123,10 @@ impl Game {
     /// Per-frame update: effects, camera, and the real-time clock.
     pub fn update(&mut self, dt: f32, paused: bool) {
         self.fx.update(dt);
+        for p in self.pings.iter_mut() {
+            p.age += dt;
+        }
+        self.pings.retain(|p| p.age < Ping::LIFE);
         if let Some((e, to)) = self.view_anim {
             let e = e + dt;
             self.view_anim = if e >= VIEW_SWOOP { None } else { Some((e, to)) };
@@ -3049,6 +3248,7 @@ impl Game {
             Action::Use(i) => self.use_item(i),
             Action::Drop(i) => self.drop_item(i),
             Action::Relight => self.relight(),
+            Action::Listen => self.listen(),
             Action::RaiseAt(x, y) => {
                 self.raise_menu.clear();
                 self.raise_pick = Some((x, y));
@@ -3176,6 +3376,7 @@ impl Game {
         }
         let chance = if self.p.class == C_ROGUE { 0.35 } else { 0.12 };
         self.search_traps(chance);
+        self.gulp_potions();
         let here: Vec<String> = self
             .level
             .items
@@ -3351,9 +3552,19 @@ impl Game {
             end,
         );
         self.emit(Sfx::Arrow, px, py, 0.7);
+        let flight = (((hx - px).pow(2) + (hy - py).pow(2)) as f32).sqrt() / 22.0;
         if let Some(mi) = mi {
             let custom = if w.range > 0 { None } else { Some((2, 6)) };
+            self.strike_delay = flight;
             self.player_strike(mi, 1.0, 0, custom);
+            self.strike_delay = 0.0;
+        } else {
+            // The trace stops on the last open tile; a wall beyond it means
+            // the arrow struck stone rather than flying out of range.
+            let (dx, dy) = DIRS[dir as usize];
+            if self.level.tile(hx + dx, hy + dy).opaque() {
+                self.emit_after(Sfx::Impact(Material::Wall), hx, hy, 0.6, flight);
+            }
         }
         self.noise(px, py, 4);
         self.combat_heat = 1.0;
@@ -3443,12 +3654,8 @@ impl Game {
                 let heal = (dmg / 5).max(1);
                 self.p.hp = (self.p.hp + heal).min(self.p.max_hp);
             }
-            let sfx = if def.death == DeathKind::Undead || def.ac >= 5 {
-                Sfx::Clang
-            } else {
-                Sfx::Hit
-            };
-            self.emit(sfx, mx, my, 0.9);
+            let delay = self.strike_delay;
+            self.emit_after(Sfx::Impact(def.material()), mx, my, 0.9, delay);
             self.fx.text(fx, fy, 0.9, dmg.to_string(), col);
             if crit || backstab {
                 self.fx.shake = self.fx.shake.max(0.4);
@@ -3460,7 +3667,8 @@ impl Game {
             }
         } else {
             self.msg(format!("You miss the {}.", name), GREY);
-            self.emit(Sfx::Miss, mx, my, 0.5);
+            let delay = self.strike_delay;
+            self.emit_after(Sfx::Miss, mx, my, 0.5, delay);
             self.fx.text(fx, fy, 0.9, "miss".to_string(), GREY);
         }
         let m = &mut self.level.monsters[mi];
@@ -3745,6 +3953,9 @@ impl Game {
                 if self.has(UPower::Soulfeast) {
                     self.p.hp = (self.p.hp + 3).min(self.p.max_hp);
                     self.p.mp = (self.p.mp + 2).min(self.p.max_mp);
+                }
+                if !def.boss && !unique {
+                    self.last_rites(kind, x, y);
                 }
             }
         }
@@ -5099,7 +5310,8 @@ impl Game {
             let here = self.items_here();
             // Pick from the back so earlier indices stay valid; stop when full.
             let Some(&ii) = here.iter().rev().find(|&&i| {
-                self.level.items[i].item == Item::Amulet || self.p.inv.len() < self.inv_cap()
+                let it = self.level.items[i].item;
+                it == Item::Amulet || self.can_carry(&it)
             }) else {
                 break;
             };
@@ -5151,7 +5363,7 @@ impl Game {
             self.combat_heat = 1.0;
             return Some(100.0);
         }
-        if self.p.inv.len() >= self.inv_cap() {
+        if !self.can_carry(&item) {
             self.msg("Your pack is full.", GREY);
             return None;
         }
@@ -5192,6 +5404,95 @@ impl Game {
         ((amt as f32) * (1.0 + 0.25 * self.bonus.alchemy as f32)).round() as i32
     }
 
+    /// The effect of drinking a potion of kind `k`.
+    fn drink(&mut self, k: Potion) {
+        let (px, py) = (self.p.x, self.p.y);
+        let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+        match k {
+            Potion::Healing => {
+                let amt = 12 + self.depth as i32 * 2 + self.p.max_hp / 4;
+                let amt = self.potency(amt);
+                self.p.hp = (self.p.hp + amt).min(self.p.max_hp);
+                self.p.poison = 0;
+                self.msg(
+                    format!("You feel much better (+{} HP).", amt),
+                    Rgb(255, 120, 120),
+                );
+            }
+            Potion::Mana => {
+                let amt = self.potency(10 + self.p.max_mp / 2);
+                self.p.mp = (self.p.mp + amt).min(self.p.max_mp);
+                self.msg(
+                    format!("Arcane energy surges through you (+{} MP).", amt),
+                    Rgb(120, 150, 255),
+                );
+            }
+            Potion::Might => {
+                let n = if self.bonus.alchemy >= 3 { 2 } else { 1 };
+                self.p.extra_dmg += n;
+                self.msg(
+                    format!("Your muscles swell with power! (+{} damage)", n),
+                    Rgb(255, 170, 60),
+                );
+            }
+            Potion::Vigor => {
+                let n = self.potency(5);
+                self.p.max_hp += n;
+                self.p.hp += n;
+                self.msg(
+                    format!("You feel hardier! (+{} max HP)", n),
+                    Rgb(120, 255, 120),
+                );
+            }
+            Potion::Cure => {
+                self.p.poison = 0;
+                let n = self.potency(5);
+                self.p.hp = (self.p.hp + n).min(self.p.max_hp);
+                self.msg("The poison is purged from your blood.", Rgb(200, 255, 200));
+            }
+        }
+        self.fx.heal(fx, fy);
+        self.emit(Sfx::Heal, px, py, 0.6);
+    }
+
+    /// Eager Gulp: drink any Potions of Might or Vigor lying where you stand.
+    fn gulp_potions(&mut self) {
+        if !self.bonus.gulp {
+            return;
+        }
+        let (px, py) = (self.p.x, self.p.y);
+        while let Some(i) = self.level.items.iter().position(|it| {
+            it.x == px
+                && it.y == py
+                && matches!(it.item, Item::Potion(Potion::Might) | Item::Potion(Potion::Vigor))
+        }) {
+            let Item::Potion(k) = self.level.items.remove(i).item else {
+                unreachable!()
+            };
+            self.msg(format!("You snatch up the {} and gulp it down.", Item::Potion(k).name()), Rgb(220, 210, 120));
+            self.drink(k);
+        }
+    }
+
+    /// Appraiser's Eye: how much better `it` is than what you wear, as
+    /// (min damage, max damage) for a weapon or (AC, 0) for armour. None if it
+    /// is not gear, or is no better.
+    pub fn upgrade_over_worn(&self, it: &Item) -> Option<(i32, i32)> {
+        match it {
+            Item::Weapon(gr) => {
+                let (n, w) = (&WEAPONS[gr.def], &WEAPONS[self.p.wpn.def]);
+                let dmin = (n.dmg.0 + gr.bonus) - (w.dmg.0 + self.p.wpn.bonus);
+                let dmax = (n.dmg.1 + gr.bonus) - (w.dmg.1 + self.p.wpn.bonus);
+                (dmin + dmax > 0).then_some((dmin, dmax))
+            }
+            Item::Armor(gr) => {
+                let d = (ARMORS[gr.def].ac + gr.bonus) - (ARMORS[self.p.arm.def].ac + self.p.arm.bonus);
+                (d > 0).then_some((d, 0))
+            }
+            _ => None,
+        }
+    }
+
     pub fn use_item(&mut self, i: usize) -> Option<f64> {
         if i >= self.p.inv.len() {
             return None;
@@ -5209,51 +5510,7 @@ impl Game {
         match it {
             Item::Potion(k) => {
                 self.p.inv.remove(i);
-                match k {
-                    Potion::Healing => {
-                        let amt = 12 + self.depth as i32 * 2 + self.p.max_hp / 4;
-                        let amt = self.potency(amt);
-                        self.p.hp = (self.p.hp + amt).min(self.p.max_hp);
-                        self.p.poison = 0;
-                        self.msg(
-                            format!("You feel much better (+{} HP).", amt),
-                            Rgb(255, 120, 120),
-                        );
-                    }
-                    Potion::Mana => {
-                        let amt = self.potency(10 + self.p.max_mp / 2);
-                        self.p.mp = (self.p.mp + amt).min(self.p.max_mp);
-                        self.msg(
-                            format!("Arcane energy surges through you (+{} MP).", amt),
-                            Rgb(120, 150, 255),
-                        );
-                    }
-                    Potion::Might => {
-                        let n = if self.bonus.alchemy >= 3 { 2 } else { 1 };
-                        self.p.extra_dmg += n;
-                        self.msg(
-                            format!("Your muscles swell with power! (+{} damage)", n),
-                            Rgb(255, 170, 60),
-                        );
-                    }
-                    Potion::Vigor => {
-                        let n = self.potency(5);
-                        self.p.max_hp += n;
-                        self.p.hp += n;
-                        self.msg(
-                            format!("You feel hardier! (+{} max HP)", n),
-                            Rgb(120, 255, 120),
-                        );
-                    }
-                    Potion::Cure => {
-                        self.p.poison = 0;
-                        let n = self.potency(5);
-                        self.p.hp = (self.p.hp + n).min(self.p.max_hp);
-                        self.msg("The poison is purged from your blood.", Rgb(200, 255, 200));
-                    }
-                }
-                self.fx.heal(fx, fy);
-                self.emit(Sfx::Heal, px, py, 0.6);
+                self.drink(k);
                 Some(100.0)
             }
             Item::Scroll(s) => {
@@ -5995,7 +6252,11 @@ impl Game {
                     if !ok_range || !self.level.los(mx, my, tx, ty) || !self.rng.gen_bool(0.35) {
                         continue;
                     }
-                    // Land on the free tile next to the target that is closest to us.
+                    // Land on the free tile next to the target that is closest
+                    // to us. Seeing the prey is not enough: the way there must
+                    // be open, so a closed door or gate (whose bars you can
+                    // see through) has to be opened first.
+                    let ghost = self.level.monsters[mi].def().ghost;
                     let mut best: Option<(i32, i32, i32)> = None;
                     for &(dx, dy) in DIRS.iter() {
                         let (nx, ny) = (tx + dx, ty + dy);
@@ -6003,6 +6264,7 @@ impl Game {
                             && self.level.monster_at(nx, ny).is_none()
                             && !(nx == self.p.x && ny == self.p.y)
                             && self.level.can_step(nx, ny, -dx, -dy)
+                            && (ghost || self.level.clear_walk(mx, my, nx, ny))
                         {
                             let sc = cheb(nx, ny, mx, my);
                             if best.map_or(true, |b| sc < b.2) {
@@ -7099,7 +7361,8 @@ impl Game {
                             Rgb(200, 170, 140),
                         );
                     }
-                    self.emit(Sfx::Hit, ox, oy, 0.8);
+                    let mat = self.level.monsters[oi].def().material();
+                    self.emit(Sfx::Impact(mat), ox, oy, 0.8);
                     if self.rng.gen_bool(0.4) {
                         self.emit(Sfx::Voice(def.voice, Mood::Attack), mx, my, 0.8);
                     }
@@ -7119,11 +7382,21 @@ impl Game {
                     self.msg(format!("{} misses {}.", cap(&aname), oname), GREY);
                 }
                 if !(vis || ovis) && self.turns > self.last_fight_msg + 20 {
-                    self.last_fight_msg = self.turns;
-                    self.msg(
-                        "You hear the sounds of a fight somewhere nearby.",
-                        Rgb(180, 160, 140),
-                    );
+                    // Out of sight you only hear it: no names, no place, only
+                    // a rough direction, and only if it is close enough.
+                    if let Some(d) = self.heard_from(mx, my) {
+                        self.last_fight_msg = self.turns;
+                        let (ax, ay) = self.sound_corner(mx, my);
+                        let how = if d * 3 > self.hear_radius() * 2 { "faint " } else { "" };
+                        self.msg(
+                            format!(
+                                "You hear the {}sounds of a fight {}.",
+                                how,
+                                compass(ax - self.p.x as f32 - 0.5, ay - self.p.y as f32 - 0.5)
+                            ),
+                            Rgb(180, 160, 140),
+                        );
+                    }
                 }
                 self.noise(mx, my, 6);
             }
@@ -7227,10 +7500,20 @@ impl Game {
             (ty - my).signum() as f32 * 0.5,
             0.6,
         );
+        let phys = r.element == Element::Phys;
+        let flight = (((hx - mx).pow(2) + (hy - my).pow(2)) as f32).sqrt() / 14.0;
+        let (sx, sy) = ((tx - mx).signum(), (ty - my).signum());
+        if phys && hit.is_none() && self.level.tile(hx + sx, hy + sy).opaque() {
+            self.emit_after(Sfx::Impact(Material::Wall), hx, hy, 0.5, flight);
+        }
         match hit {
             Some(Target::Player) => {
                 let roll = self.rng.gen_range(1..=20);
                 if roll == 20 || (roll != 1 && roll + def.hit >= 10 + self.player_ac()) {
+                    if phys {
+                        let mat = if self.player_ac() >= 7 { Material::Armor } else { Material::Flesh };
+                        self.emit_after(Sfx::Impact(mat), hx, hy, 0.9, flight);
+                    }
                     let dmg = self.mon_damage(mi, r.dmg);
                     self.msg(format!("You are struck for {}!", dmg), Rgb(255, 90, 90));
                     let cause = if r.element == Element::Phys {
@@ -7248,6 +7531,10 @@ impl Game {
                     if self.rng.gen_bool(0.75) {
                         let dmg = self.mon_damage(mi, r.dmg);
                         let (ox, oy) = (self.level.monsters[oi].x, self.level.monsters[oi].y);
+                        if phys {
+                            let mat = self.level.monsters[oi].def().material();
+                            self.emit_after(Sfx::Impact(mat), ox, oy, 0.8, flight);
+                        }
                         self.fx.text(
                             ox as f32 + 0.5,
                             oy as f32 + 0.5,
@@ -7368,6 +7655,181 @@ impl Game {
         })
     }
 
+    /// `spatial`, plus what this sound does in the space around you:
+    /// footsteps ring back off the far end of a long hallway or a big hall.
+    pub fn spatial_for(&self, sfx: Sfx, sx: f32, sy: f32, vol: f32) -> Option<Spatial> {
+        let mut sp = self.spatial(sx, sy, vol)?;
+        if sfx == Sfx::Step {
+            // Slap-back off the far wall: there and back, ~1.5 m a tile.
+            let k = ((self.echo_len - 3.0) / 12.0).clamp(0.0, 1.0);
+            let open = self.room_size;
+            if k > 0.0 {
+                let d = (2.0 * self.echo_len * 1.5 / 343.0).clamp(0.03, 0.22);
+                let g = 0.15 + 0.35 * k;
+                sp.echoes.push((d, g, -sp.pan * 0.5 - 0.3));
+                sp.echoes.push((d * 2.0, g * 0.55, sp.pan * 0.5 + 0.3));
+                sp.echoes.push((d * 3.0, g * 0.3, -0.2));
+            }
+            sp.reverb = (sp.reverb + 0.25 * k + 0.2 * open).min(0.95);
+            sp.room = (sp.room + 0.4 * k).min(1.0);
+        }
+        Some(sp)
+    }
+
+    /// How far, along the corridors, you can hear a fight or a footstep.
+    /// Doors muffle sound (they count as three tiles).
+    pub fn hear_radius(&self) -> i32 {
+        12 + if self.bonus.hearing >= 1 { 6 } else { 0 }
+    }
+
+    /// How far a sound at (x,y) effectively travels to reach you, in tiles,
+    /// if you can hear it. Corners and doors muffle it (see `sound_field`).
+    pub fn heard_from(&self, x: i32, y: i32) -> Option<i32> {
+        if !self.level.inb(x, y) || self.smap.is_empty() {
+            return None;
+        }
+        let d = self.smap[self.level.idx(x, y)];
+        if d == SOUND_FAR {
+            return None;
+        }
+        let tiles = (d as i32 + 1) / 2;
+        (tiles <= self.hear_radius()).then_some(tiles)
+    }
+
+    /// Where a sound at (x,y) seems to come from: itself if you can see it,
+    /// otherwise the last corner it bends around on its way to you.
+    pub fn sound_corner(&self, x: i32, y: i32) -> (f32, f32) {
+        let (px, py) = (self.p.x, self.p.y);
+        let (mut cx, mut cy) = (x, y);
+        let walkable = |x: i32, y: i32| {
+            let t = self.level.tile(x, y);
+            t.walkable() || t.is_closed_door()
+        };
+        if self.level.inb(x, y) && !self.smap.is_empty() && self.smap[self.level.idx(x, y)] != SOUND_FAR {
+            for _ in 0..64 {
+                if self.level.los(px, py, cx, cy) {
+                    break;
+                }
+                let mut best = self.smap[self.level.idx(cx, cy)];
+                let mut next = None;
+                for &(dx, dy) in DIRS.iter() {
+                    let (nx, ny) = (cx + dx, cy + dy);
+                    if self.level.inb(nx, ny)
+                        && walkable(nx, ny)
+                        && self.level.can_step(cx, cy, dx, dy)
+                        && self.smap[self.level.idx(nx, ny)] < best
+                    {
+                        best = self.smap[self.level.idx(nx, ny)];
+                        next = Some((nx, ny));
+                    }
+                }
+                match next {
+                    Some(n) => (cx, cy) = n,
+                    None => break,
+                }
+            }
+        }
+        (cx as f32 + 0.5, cy as f32 + 0.5)
+    }
+
+    /// Keen Hearing rank 2: hold still for a turn and listen. Everything that
+    /// stirs within earshot (and anything snoring close by) is picked out:
+    /// where its sound comes from, and roughly how far.
+    fn listen(&mut self) -> Option<f64> {
+        if self.bonus.hearing < 2 {
+            self.msg("You strain your ears, but hear nothing useful. (Keen Hearing, Soul Altar)", GREY);
+            return None;
+        }
+        if self.time < self.listen_ready {
+            let left = ((self.listen_ready - self.time) / 100.0).ceil() as i32;
+            self.msg(format!("Your ears are still ringing ({} more turns).", left), GREY);
+            return None;
+        }
+        self.listen_ready = self.time + 1000.0;
+        let r = self.hear_radius();
+        let mut heard = Vec::new();
+        for m in self.level.monsters.iter() {
+            if !m.alive || m.faction == Faction::Ally || self.level.is_visible(m.x, m.y) {
+                continue;
+            }
+            let Some(d) = self.heard_from(m.x, m.y) else { continue };
+            // The sleeping make little noise: only a snore from close by.
+            if !m.awake && d > r / 2 {
+                continue;
+            }
+            heard.push((m.x, m.y, d));
+        }
+        self.pings.clear();
+        for (x, y, d) in heard {
+            let (ax, ay) = self.sound_corner(x, y);
+            let guess = (d + self.rng.gen_range(-1..=1)).max(1);
+            let (wave, reach) = self.sound_wave(x, y);
+            self.pings.push(Ping { x, y, ax, ay, dist: guess, age: 0.0, wave, reach });
+        }
+        let n = self.pings.len();
+        let col = Rgb(120, 170, 255);
+        if n == 0 {
+            self.msg("You hold your breath and listen... Silence.", col);
+        } else {
+            self.msg(
+                format!(
+                    "You hold your breath and listen... {} {} nearby.",
+                    n,
+                    if n == 1 { "sound" } else { "sounds" }
+                ),
+                col,
+            );
+        }
+        Some(100.0)
+    }
+
+    /// How a sound made at (x,y) reaches you, for drawing: it fills the space
+    /// around where it was made, rings off those walls, and the part of it
+    /// that finds a way toward you runs down the corridors to where you stand.
+    /// Each tile carries how far (in half-tiles, muffling included) the sound
+    /// has come to get there. Returns the tiles and the furthest of them.
+    fn sound_wave(&self, x: i32, y: i32) -> (Vec<(i32, i32, u16)>, u16) {
+        let lv = &self.level;
+        let total = self.smap[lv.idx(x, y)];
+        let field = lv.sound_field(x, y, total.saturating_add(12));
+        // Allowed detour: the whole room it starts in, narrowing to the way to you.
+        let slack = 10u16;
+        let mut out = Vec::new();
+        let mut reach = 0;
+        for ty in 0..lv.h {
+            for tx in 0..lv.w {
+                let i = lv.idx(tx, ty);
+                let (a, b) = (field[i], self.smap[i]);
+                if a == SOUND_FAR {
+                    continue;
+                }
+                let near_source = a <= 12;
+                let on_the_way = b != SOUND_FAR && a as u32 + b as u32 <= total as u32 + slack as u32;
+                // Walls only show where the sound strikes them on its way.
+                let wall = lv.tile(tx, ty).opaque();
+                let wall_ok = wall
+                    && DIRS.iter().any(|&(dx, dy)| {
+                        let j = (tx + dx, ty + dy);
+                        lv.inb(j.0, j.1) && {
+                            let k = lv.idx(j.0, j.1);
+                            field[k] != SOUND_FAR
+                                && !lv.tile(j.0, j.1).opaque()
+                                && (field[k] <= 12
+                                    || (self.smap[k] != SOUND_FAR
+                                        && field[k] as u32 + self.smap[k] as u32 <= total as u32 + slack as u32))
+                        }
+                    });
+                if (wall && wall_ok) || (!wall && (near_source || on_the_way)) {
+                    out.push((tx, ty, a));
+                    if a > reach && a != SOUND_FAR {
+                        reach = a;
+                    }
+                }
+            }
+        }
+        (out, reach)
+    }
+
     /// A random ambient event somewhere in the level.
     pub fn ambient_event(&mut self) {
         if self.over.is_some() {
@@ -7418,6 +7880,34 @@ impl Game {
         };
         self.emit(sfx, x, y, vol);
     }
+}
+
+/// A rough compass direction for an offset on the map (north is up).
+pub fn compass(dx: f32, dy: f32) -> &'static str {
+    if dx.abs() < 0.5 && dy.abs() < 0.5 {
+        return "right beside you";
+    }
+    let a = dy.atan2(dx); // 0 = east, +y is south
+    let k = ((a / (PI / 4.0)).round() as i32).rem_euclid(8);
+    ["to the east", "to the south-east", "to the south", "to the south-west", "to the west", "to the north-west", "to the north", "to the north-east"][k as usize]
+}
+
+/// Group a pack into slots; see `Game::inv_slots`.
+pub fn slots_of(inv: &[Item], stack: usize) -> Vec<(usize, usize)> {
+    let mut slots: Vec<(usize, usize)> = Vec::new();
+    for (i, it) in inv.iter().enumerate() {
+        if matches!(it, Item::Potion(_)) {
+            if let Some(s) = slots
+                .iter_mut()
+                .find(|s| inv[s.0] == *it && s.1 < stack)
+            {
+                s.1 += 1;
+                continue;
+            }
+        }
+        slots.push((i, 1));
+    }
+    slots
 }
 
 #[cfg(test)]
@@ -8062,6 +8552,277 @@ mod tests {
         assert_eq!(prof.record_kills(&slain), vec![warden.name.to_string()]);
         assert!(prof.bonuses().mastered.contains(&warden.name.to_string()));
         assert_eq!(MONSTERS[M_GOBLIN].lore().master, 200);
+    }
+
+    #[test]
+    fn potion_belt_stacks_potions_in_one_slot() {
+        let mut prof = crate::profile::Profile::default();
+        let i = UPGRADES.iter().position(|u| u.id == "belt").unwrap();
+        assert_eq!(prof.next_cost(i), Some(150));
+        prof.upgrades.insert("belt".into(), 1);
+        assert_eq!(prof.next_cost(i), Some(300));
+        prof.upgrades.insert("belt".into(), 2);
+        assert_eq!(prof.next_cost(i), None);
+        assert_eq!(prof.bonuses().belt, 2);
+
+        let heal = Item::Potion(Potion::Healing);
+        let mana = Item::Potion(Potion::Mana);
+        let scroll = Item::Scroll(Scroll::Vision);
+        let mut g = game();
+        g.p.inv = vec![heal, scroll, heal, mana, heal];
+        // No belt: one potion a slot.
+        assert_eq!(g.inv_slots().len(), 5);
+        g.bonus.belt = 1;
+        assert_eq!(g.inv_slots(), vec![(0, 2), (1, 1), (3, 1), (4, 1)]);
+        g.bonus.belt = 2;
+        assert_eq!(g.inv_slots(), vec![(0, 3), (1, 1), (3, 1)]);
+        assert_eq!(g.slot_item(2), Some(3));
+        assert_eq!(g.slot_item(3), None);
+
+        // A full pack still takes a potion that fits on a stack.
+        g.bonus.belt = 1;
+        g.p.inv = vec![scroll; g.inv_cap() - 1];
+        g.p.inv.push(heal);
+        assert_eq!(g.free_slots(), 0);
+        assert!(g.can_carry(&heal));
+        assert!(!g.can_carry(&mana));
+        assert!(!g.can_carry(&scroll));
+        g.p.inv.push(heal);
+        assert!(!g.can_carry(&heal), "the stack is full");
+        g.bonus.belt = 0;
+        g.p.inv.pop();
+        assert!(!g.can_carry(&heal), "no belt, no stacking");
+
+        // Picking up from the floor follows the same rule.
+        g.bonus.belt = 1;
+        let (px, py) = (g.p.x, g.p.y);
+        g.level.items.retain(|it| (it.x, it.y) != (px, py));
+        for it in [mana, heal, scroll] {
+            g.level.items.push(FloorItem { x: px, y: py, item: it });
+        }
+        g.do_action(Action::PickupAll);
+        assert_eq!(g.p.inv.iter().filter(|&&i| i == heal).count(), 2);
+        assert_eq!(g.items_here().len(), 2, "mana and scroll stay behind");
+    }
+
+    #[test]
+    fn backtick_sorts_the_pack_by_type() {
+        let mut g = game();
+        let gear = Gear { def: 0, bonus: 0, uniq: None };
+        g.p.inv = vec![
+            Item::Scroll(Scroll::Vision),
+            Item::Potion(Potion::Mana),
+            Item::Armor(gear),
+            Item::Potion(Potion::Healing),
+            Item::Weapon(gear),
+            Item::Potion(Potion::Mana),
+        ];
+        g.sort_inv();
+        assert_eq!(
+            g.p.inv,
+            vec![
+                Item::Weapon(gear),
+                Item::Armor(gear),
+                Item::Potion(Potion::Healing),
+                Item::Potion(Potion::Mana),
+                Item::Potion(Potion::Mana),
+                Item::Scroll(Scroll::Vision),
+            ]
+        );
+    }
+
+    #[test]
+    fn appraisers_eye_compares_with_worn_gear() {
+        let mut prof = crate::profile::Profile::default();
+        for id in ["appraise", "gulp"] {
+            let i = UPGRADES.iter().position(|u| u.id == id).unwrap();
+            assert_eq!(prof.next_cost(i), Some(500));
+            prof.upgrades.insert(id.into(), 1);
+            assert_eq!(prof.next_cost(i), None);
+        }
+        let b = prof.bonuses();
+        assert!(b.appraise && b.gulp);
+
+        let mut g = game();
+        let w = |name: &str| WEAPONS.iter().position(|d| d.name == name).unwrap();
+        let a = |name: &str| ARMORS.iter().position(|d| d.name == name).unwrap();
+        let gear = |def| Gear { def, bonus: 0, uniq: None };
+        g.p.wpn = gear(w("Mace"));
+        let (mace, sword) = (&WEAPONS[w("Mace")], &WEAPONS[w("Long Sword")]);
+        let up = g.upgrade_over_worn(&Item::Weapon(gear(w("Long Sword"))));
+        if sword.dmg.0 + sword.dmg.1 > mace.dmg.0 + mace.dmg.1 {
+            assert_eq!(up, Some((sword.dmg.0 - mace.dmg.0, sword.dmg.1 - mace.dmg.1)));
+        } else {
+            assert_eq!(up, None);
+        }
+        // The same weapon, better enchanted, is better by exactly its bonus.
+        let plus2 = Item::Weapon(Gear { def: w("Mace"), bonus: 2, uniq: None });
+        assert_eq!(g.upgrade_over_worn(&plus2), Some((2, 2)));
+        assert_eq!(g.upgrade_over_worn(&Item::Weapon(gear(w("Mace")))), None);
+        // Armour: how much AC it adds.
+        g.p.arm = gear(a("Leather Armor"));
+        let d = ARMORS[a("Chain Mail")].ac - ARMORS[a("Leather Armor")].ac;
+        assert_eq!(g.upgrade_over_worn(&Item::Armor(gear(a("Chain Mail")))), Some((d, 0)));
+        assert_eq!(g.upgrade_over_worn(&Item::Armor(gear(a("Leather Armor")))), None);
+        assert_eq!(g.upgrade_over_worn(&Item::Potion(Potion::Healing)), None);
+    }
+
+    #[test]
+    fn eager_gulp_drinks_might_and_vigor_underfoot() {
+        let mut g = game();
+        let (px, py) = (g.p.x, g.p.y);
+        let put = |g: &mut Game, k| g.level.items.push(FloorItem { x: px, y: py, item: Item::Potion(k) });
+        g.level.items.retain(|it| (it.x, it.y) != (px, py));
+        put(&mut g, Potion::Might);
+        put(&mut g, Potion::Vigor);
+        put(&mut g, Potion::Healing);
+        // Without the boon, nothing happens.
+        g.after_player_move();
+        assert_eq!(g.items_here().len(), 3);
+        g.bonus.gulp = true;
+        let (dmg, max_hp) = (g.p.extra_dmg, g.p.max_hp);
+        let inv = g.p.inv.len();
+        g.after_player_move();
+        assert_eq!(g.p.extra_dmg, dmg + 1);
+        assert_eq!(g.p.max_hp, max_hp + 5);
+        assert_eq!(g.p.inv.len(), inv, "drunk, not carried");
+        // Other potions stay on the floor for you to pick up.
+        let here = g.items_here();
+        assert_eq!(here.len(), 1);
+        assert_eq!(g.level.items[here[0]].item, Item::Potion(Potion::Healing));
+    }
+
+    #[test]
+    fn blows_sound_like_what_they_strike() {
+        let mat = |n: &str| MONSTERS.iter().find(|d| d.name == n).unwrap().material();
+        assert_eq!(mat("green slime"), Material::Ooze);
+        assert_eq!(mat("skeleton"), Material::Bone);
+        assert_eq!(mat("lich"), Material::Bone);
+        assert_eq!(mat("Prism Guardian"), Material::Crystal);
+        assert_eq!(mat("gargoyle"), Material::Stone);
+        assert_eq!(mat("giant spider"), Material::Shell);
+        assert_eq!(mat("wraith"), Material::Spirit);
+        assert_eq!(mat("fire elemental"), Material::Flame);
+        assert_eq!(mat("hobgoblin"), Material::Armor);
+        assert_eq!(mat("giant rat"), Material::Flesh);
+        assert_eq!(mat("zombie"), Material::Flesh);
+
+        // A strike makes the target's sound (or a miss), never the old clang.
+        let mut g = game();
+        let (x, y) = floor_away(&mut g, 2);
+        let mi = spawn(&mut g, M_SKELETON, x, y);
+        g.level.monsters[mi].hp = 10_000;
+        g.level.monsters[mi].max_hp = 10_000;
+        for _ in 0..30 {
+            g.sounds.clear();
+            g.strike_delay = 0.25;
+            g.player_strike(mi, 1.0, 50, None);
+            let s = g.sounds.iter().find(|s| matches!(s.sfx, Sfx::Impact(_) | Sfx::Miss)).unwrap();
+            assert!(matches!(s.sfx, Sfx::Impact(Material::Bone) | Sfx::Miss));
+            assert!((s.delay - 0.25).abs() < 1e-6, "lands when the arrow does");
+        }
+        assert!(!g.sounds.iter().any(|s| s.sfx == Sfx::Clang));
+    }
+
+    #[test]
+    fn arrows_fly_before_they_land() {
+        let mut g = game();
+        g.level.monsters.clear();
+        let mut thunks = 0;
+        for dir in 0..8 {
+            g.sounds.clear();
+            g.shoot_arrow(dir);
+            assert!(g.sounds.iter().any(|s| s.sfx == Sfx::Arrow && s.delay == 0.0));
+            for s in g.sounds.iter().filter(|s| s.sfx == Sfx::Impact(Material::Wall)) {
+                assert!(s.delay > 0.0);
+                thunks += 1;
+            }
+        }
+        assert!(thunks > 0, "some arrow should hit a wall in range");
+    }
+
+    #[test]
+    fn footsteps_ring_down_long_halls() {
+        let mut g = game();
+        let (px, py) = (g.p.x as f32 + 0.5, g.p.y as f32 + 0.5);
+        g.echo_len = 2.0;
+        let small = g.spatial_for(Sfx::Step, px, py, 0.5).unwrap();
+        g.echo_len = 20.0;
+        let big = g.spatial_for(Sfx::Step, px, py, 0.5).unwrap();
+        assert!(big.echoes.len() > small.echoes.len());
+        assert!(big.reverb > small.reverb);
+        let far = big.echoes.iter().map(|e| e.0).fold(0.0f32, f32::max);
+        assert!(far > 0.15, "a long hall echoes late ({})", far);
+        // Other sounds are left as they were.
+        let swing = g.spatial_for(Sfx::Swing, px, py, 0.5).unwrap();
+        assert_eq!(swing.echoes.len(), g.spatial(px, py, 0.5).unwrap().echoes.len());
+    }
+
+    #[test]
+    fn new_altar_boons_cost_what_they_should() {
+        let mut prof = crate::profile::Profile::default();
+        let gl = UPGRADES.iter().position(|u| u.id == "glint").unwrap();
+        assert_eq!(prof.next_cost(gl), Some(1000));
+        prof.upgrades.insert("glint".into(), 1);
+        assert_eq!(prof.next_cost(gl), None);
+        assert!(prof.bonuses().glint);
+        let py = UPGRADES.iter().position(|u| u.id == "pyre").unwrap();
+        let mut paid = Vec::new();
+        for r in 0..5 {
+            prof.upgrades.insert("pyre".into(), r);
+            paid.push(prof.next_cost(py).unwrap());
+        }
+        assert_eq!(paid, vec![500, 750, 1000, 1250, 1500]);
+        prof.upgrades.insert("pyre".into(), 5);
+        assert_eq!(prof.next_cost(py), None);
+        assert_eq!(prof.bonuses().pyre, 5);
+    }
+
+    #[test]
+    fn last_rites_destroys_corpses_so_they_never_rise() {
+        // Count corpses left by player kills of `kind` out of `n`.
+        fn left(g: &mut Game, kind: usize, n: usize) -> usize {
+            g.level.corpses.clear();
+            for _ in 0..n {
+                let (x, y) = floor_away(g, 3);
+                let mi = spawn(g, kind, x, y);
+                g.damage_monster(mi, 99_999, Src::Player);
+                g.level.monsters.clear();
+            }
+            g.level.corpses.iter().filter(|c| c.kind == kind).count()
+        }
+        let mut g = game();
+        // Without the boon every body stays.
+        assert_eq!(left(&mut g, M_GOBLIN, 200), 200);
+        // Maxed out: about a quarter are burned to ash.
+        g.bonus.pyre = 5;
+        let kept = left(&mut g, M_GOBLIN, 2000);
+        assert!((1350..1650).contains(&kept), "kept {} of 2000", kept);
+        // Skeletons are kicked apart, even with the torch out.
+        g.p.torch_out = true;
+        let kept = left(&mut g, M_SKELETON, 2000);
+        assert!((1350..1650).contains(&kept), "kept {} of 2000", kept);
+        // No flame, no pyre.
+        assert_eq!(left(&mut g, M_GOBLIN, 200), 200);
+        g.p.torch_out = false;
+        // Shift+C turns it off and on again.
+        g.toggle_rites();
+        assert!(g.rites_off);
+        assert_eq!(left(&mut g, M_GOBLIN, 200), 200);
+        g.toggle_rites();
+        assert!(!g.rites_off);
+        // Kills by other monsters are not yours to burn.
+        g.level.corpses.clear();
+        for _ in 0..200 {
+            let (x, y) = floor_away(&mut g, 3);
+            let a = spawn(&mut g, M_ORC, x, y);
+            let aid = g.level.monsters[a].id;
+            let (x, y) = floor_away(&mut g, 3);
+            let b = spawn(&mut g, M_GOBLIN, x, y);
+            g.damage_monster(b, 99_999, Src::Mon(aid));
+            g.level.monsters.clear();
+        }
+        assert_eq!(g.level.corpses.iter().filter(|c| c.kind == M_GOBLIN).count(), 200);
     }
 
     #[test]
@@ -9003,6 +9764,296 @@ mod tests {
         g.level.set(23, 8, Tile::GateClosed);
         g.level.set(23, 9, Tile::Floor);
         assert!(!g.level.can_step(22, 8, 1, 1));
+    }
+
+    #[test]
+    fn nothing_leaps_through_a_closed_gate() {
+        // Charging, pouncing and blinking monsters see you through the bars,
+        // but must open the gate before they can reach you.
+        // (Ghosts are the exception: they drift through solid stone.)
+        for name in ["minotaur", "dire wolf", "Xal'Veth the Drowned", "Asterion the Tormentor"] {
+            let mut g = arena();
+            for y in 2..14 {
+                g.level.set(23, y, Tile::Wall);
+            }
+            g.level.set(23, 8, Tile::GateClosed);
+            g.refresh_view();
+            let mi = spawn(&mut g, kind_of(name), 26, 8);
+            for _ in 0..300 {
+                g.level.set(23, 8, Tile::GateClosed);
+                let m = &mut g.level.monsters[mi];
+                m.x = 26;
+                m.y = 8;
+                m.abil_cd = 0.0;
+                g.p.x = 20;
+                g.p.y = 8;
+                g.p.hp = 10_000;
+                g.p.para_guard = 0.0;
+                g.unique_power(mi, Target::Player);
+                assert!(
+                    g.level.monsters[mi].x >= 23,
+                    "{} got through a closed gate",
+                    name
+                );
+            }
+            // With the gate open the way is clear again.
+            assert!(!g.level.clear_walk(26, 8, 21, 8));
+            g.level.set(23, 8, Tile::DoorOpen);
+            assert!(g.level.clear_walk(26, 8, 21, 8));
+        }
+        // Walking up to it, a monster opens the gate and only then comes on.
+        let mut g = arena();
+        for y in 2..14 {
+            g.level.set(23, y, Tile::Wall);
+        }
+        g.level.set(23, 8, Tile::GateClosed);
+        g.refresh_view();
+        let mi = spawn(&mut g, kind_of("orc"), 24, 8);
+        g.level.monsters[mi].target = Some(Target::Player);
+        g.monster_step_toward(mi, 20, 8, true);
+        assert_eq!(g.level.tile(23, 8), Tile::DoorOpen, "it opens the gate");
+        assert_eq!(g.level.monsters[mi].x, 24, "and stays put that turn");
+    }
+
+    #[test]
+    fn sleepers_snore_until_they_notice_you() {
+        let mut g = arena();
+        let mi = spawn(&mut g, kind_of("orc"), 24, 8);
+        g.level.monsters[mi].awake = false;
+        g.level.monsters[mi].target = None;
+        g.p.facing = 2;
+        g.cam.x = 20.5;
+        g.cam.y = 8.5;
+        g.cam.ang = 0.0;
+        let zs = |g: &Game| {
+            let mut c = crate::canvas::Canvas::new(120, 40);
+            let mut n = 0;
+            for k in 0..12 {
+                c.clear();
+                crate::render::render_game(&mut c, g, k as f32 * 0.3);
+                n += c.cells.iter().filter(|c| c.ch == 'z' || c.ch == 'Z').count();
+            }
+            n
+        };
+        // Other text on screen may hold the letter z; compare with no orc.
+        let asleep = zs(&g);
+        g.level.monsters[mi].awake = true;
+        g.level.monsters[mi].target = Some(Target::Player);
+        let awake = zs(&g);
+        g.level.monsters[mi].alive = false;
+        let none = zs(&g);
+        assert!(asleep > none, "a sleeping orc snores");
+        assert_eq!(awake, none, "awake, the Zs are gone");
+    }
+
+    /// Walls in an arena, splitting it into rooms joined by gaps.
+    fn rooms() -> Game {
+        let mut g = arena();
+        for y in 2..14 {
+            g.level.set(25, y, Tile::Wall);
+        }
+        g.level.set(25, 3, Tile::Floor);
+        g.refresh_view();
+        g
+    }
+
+    /// A level of solid rock with these rectangles (inclusive) carved out.
+    fn carved(rects: &[(i32, i32, i32, i32)], px: i32, py: i32) -> Game {
+        let mut g = game();
+        for y in 0..g.level.h {
+            for x in 0..g.level.w {
+                g.level.set(x, y, Tile::Wall);
+            }
+        }
+        for &(x0, y0, x1, y1) in rects {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    g.level.set(x, y, Tile::Floor);
+                }
+            }
+        }
+        g.level.traps.clear();
+        g.level.items.clear();
+        g.level.corpses.clear();
+        g.level.monsters.clear();
+        g.p.x = px;
+        g.p.y = py;
+        g.refresh_view();
+        g
+    }
+
+    #[test]
+    fn corners_and_doors_muffle_sound() {
+        // Ten tiles straight down a corridor...
+        let g = carved(&[(10, 5, 20, 5)], 10, 5);
+        let straight = g.heard_from(20, 5).unwrap();
+        // ...or ten tiles that turn a corner halfway.
+        let g = carved(&[(10, 5, 15, 5), (15, 5, 15, 10)], 10, 5);
+        let around = g.heard_from(15, 10).unwrap();
+        assert!(around > straight, "a corner muffles ({} vs {})", around, straight);
+        // A closed door in the way muffles more.
+        let mut g = carved(&[(10, 5, 20, 5)], 10, 5);
+        g.level.set(15, 5, Tile::DoorClosed);
+        g.refresh_view();
+        assert_eq!(g.heard_from(20, 5), None, "muffled past the edge of hearing");
+        g.bonus.hearing = 1;
+        g.refresh_view();
+        assert!(g.heard_from(20, 5).unwrap() >= straight + 3);
+        // And where it seems to come from is the corner, not through the rock.
+        let g = carved(&[(10, 5, 15, 5), (15, 5, 15, 10)], 10, 5);
+        let (ax, ay) = g.sound_corner(15, 10);
+        assert!(g.level.los(10, 5, ax as i32, ay as i32));
+        assert_eq!(ax as i32, 15);
+    }
+
+    #[test]
+    fn listened_sound_fills_its_room_then_runs_toward_you() {
+        // You at the west end of a corridor; a hall to the east with the
+        // sound in its far corner; a dead-end passage off the hall's south side.
+        let mut g = carved(&[(20, 7, 29, 7), (30, 3, 38, 9), (31, 10, 31, 14)], 20, 7);
+        g.bonus.hearing = 2;
+        spawn(&mut g, kind_of("orc"), 37, 4);
+        g.listen();
+        assert_eq!(g.pings.len(), 1);
+        let wave = &g.pings[0].wave;
+        let has = |x: i32, y: i32| wave.iter().any(|&(wx, wy, _)| (wx, wy) == (x, y));
+        assert!(has(36, 4) && has(33, 6), "it fills the hall around it");
+        assert!(has(37, 2) || has(38, 2) || has(39, 4), "and rings off the hall's walls");
+        for x in 21..=29 {
+            assert!(has(x, 7), "and runs down the corridor toward you ({} missing)", x);
+        }
+        assert!(!has(31, 14), "but not down the dead end away from you");
+        // Further along the way, the sound has come further.
+        let at = |x: i32, y: i32| wave.iter().find(|&&(wx, wy, _)| (wx, wy) == (x, y)).unwrap().2;
+        assert!(at(22, 7) > at(28, 7) && at(28, 7) > at(36, 4));
+    }
+
+    #[test]
+    fn keen_hearing_costs_and_ranges() {
+        let mut prof = crate::profile::Profile::default();
+        let i = UPGRADES.iter().position(|u| u.id == "hearing").unwrap();
+        assert_eq!(prof.next_cost(i), Some(450));
+        prof.upgrades.insert("hearing".into(), 1);
+        assert_eq!(prof.next_cost(i), Some(750));
+        prof.upgrades.insert("hearing".into(), 2);
+        assert_eq!(prof.next_cost(i), None);
+        assert_eq!(prof.bonuses().hearing, 2);
+        let mut g = game();
+        let base = g.hear_radius();
+        g.bonus.hearing = 1;
+        assert!(g.hear_radius() > base);
+        assert_eq!(compass(5.0, 0.0), "to the east");
+        assert_eq!(compass(0.0, -5.0), "to the north");
+        assert_eq!(compass(-4.0, 4.0), "to the south-west");
+    }
+
+    #[test]
+    fn unseen_fights_are_heard_not_seen() {
+        let mut g = rooms();
+        // Two foes fighting behind the wall, close by along the corridor.
+        let a = spawn(&mut g, kind_of("orc"), 27, 6);
+        let b = spawn(&mut g, kind_of("dire wolf"), 28, 6);
+        assert!(!g.level.is_visible(27, 6));
+        let bid = g.level.monsters[b].id;
+        g.level.monsters[b].hp = 10_000;
+        g.turns = 1000;
+        g.msgs.clear();
+        for _ in 0..40 {
+            g.monster_melee(a, Target::Mon(bid));
+        }
+        let heard: Vec<_> = g.msgs.iter().filter(|m| m.text.contains("sounds of a fight")).collect();
+        assert!(!heard.is_empty(), "a fight close by is heard");
+        assert!(heard.iter().all(|m| !m.text.contains("orc") && !m.text.contains("wolf")), "but not who");
+        assert!(!g.msgs.iter().any(|m| m.text.contains("hits the dire wolf")), "or seen");
+        // Far off, nothing at all.
+        g.level.monsters.clear();
+        let (fx, fy) = (38, 13);
+        g.level.set(fx, fy, Tile::Floor);
+        for y in 2..14 {
+            g.level.set(37, y, Tile::Wall);
+        }
+        g.refresh_view();
+        let a = spawn(&mut g, kind_of("orc"), 38, 12);
+        let b = spawn(&mut g, kind_of("dire wolf"), 38, 13);
+        let bid = g.level.monsters[b].id;
+        g.level.monsters[b].hp = 10_000;
+        if g.heard_from(38, 12).is_none() {
+            g.msgs.clear();
+            g.turns += 1000;
+            for _ in 0..40 {
+                g.monster_melee(a, Target::Mon(bid));
+            }
+            assert!(!g.msgs.iter().any(|m| m.text.contains("sounds of a fight")));
+        }
+    }
+
+    #[test]
+    fn listening_picks_out_hidden_sounds_once_in_a_while() {
+        let mut g = rooms();
+        let hidden = spawn(&mut g, kind_of("orc"), 28, 8);
+        let seen = spawn(&mut g, kind_of("goblin"), 22, 8);
+        assert!(!g.level.is_visible(28, 8) && g.level.is_visible(22, 8));
+        let _ = (hidden, seen);
+        // Without rank 2 you cannot.
+        g.bonus.hearing = 1;
+        assert_eq!(g.listen(), None);
+        g.bonus.hearing = 2;
+        assert_eq!(g.listen(), Some(100.0), "listening takes a turn");
+        assert_eq!(g.pings.len(), 1, "only what you cannot see");
+        let p = &g.pings[0];
+        assert_eq!((p.x, p.y), (28, 8));
+        let true_d = g.heard_from(28, 8).unwrap();
+        assert!((p.dist - true_d).abs() <= 1, "a rough guess at the distance");
+        assert!(g.level.los(g.p.x, g.p.y, p.ax as i32, p.ay as i32), "heard from the gap it comes through");
+        assert!(p.wave.iter().any(|&(x, y, _)| g.level.tile(x, y) == Tile::Wall), "it rings off the walls");
+        // Ten turn cooldown.
+        assert_eq!(g.listen(), None);
+        g.time += 900.0;
+        assert_eq!(g.listen(), None);
+        g.time += 100.0;
+        assert_eq!(g.listen(), Some(100.0));
+        // Pings fade.
+        g.update(Ping::LIFE + 0.1, false);
+        assert!(g.pings.is_empty());
+        // A sleeper is heard only close by.
+        g.level.monsters.clear();
+        let m = spawn(&mut g, kind_of("orc"), 28, 8);
+        g.level.monsters[m].awake = false;
+        g.time += 1000.0;
+        g.listen();
+        let close = g.heard_from(28, 8).unwrap() <= g.hear_radius() / 2;
+        assert_eq!(g.pings.len(), close as usize);
+    }
+
+    #[test]
+    fn sound_pings_are_drawn_in_both_views() {
+        let mut g = rooms();
+        spawn(&mut g, kind_of("orc"), 28, 8);
+        g.bonus.hearing = 2;
+        g.listen();
+        let label = format!("~{}", g.pings[0].dist);
+        let mut c = crate::canvas::Canvas::new(120, 40);
+        crate::render::render_game(&mut c, &g, 1.0);
+        let text: String = c.cells.iter().map(|c| c.ch).collect();
+        assert!(text.contains(&label), "first person: an arrow and a distance");
+        g.overhead = true;
+        g.pings[0].age = 0.3;
+        c.clear();
+        crate::render::render_game(&mut c, &g, 1.0);
+        assert!(c.cells.iter().any(|c| c.ch == '~'), "overhead: ripples");
+    }
+
+    #[test]
+    fn overhead_hides_effects_you_cannot_see() {
+        let mut g = rooms();
+        g.overhead = true;
+        g.fx.text(30.5, 10.5, 0.5, "QX9".to_string(), Rgb::WHITE);
+        g.fx.text(21.5, 8.5, 0.5, "QX7".to_string(), Rgb::WHITE);
+        let mut c = crate::canvas::Canvas::new(120, 40);
+        crate::render::render_game(&mut c, &g, 1.0);
+        let text: String = c.cells.iter().map(|c| c.ch).collect();
+        assert!(!text.contains("QX9"), "behind the wall: hidden");
+        assert!(text.contains("QX7"), "in sight: shown");
     }
 
     #[test]

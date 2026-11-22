@@ -201,6 +201,8 @@ pub struct Profile {
     pub upgrades: HashMap<String, u32>,
     pub history: Vec<RunRecord>,
     pub volume: Option<f32>,
+    /// Graphics detail: 0 Auto, 1 High, 2 Low, 3 Minimal (see `perf`).
+    pub detail: Option<u8>,
     /// Lifetime kills of each monster, by name.
     pub bestiary: HashMap<String, u32>,
     /// Highest difficulty unlocked (0 = Normal only).
@@ -243,6 +245,18 @@ pub struct Bonuses {
     pub scavenger: i32,
     /// Necromancer: a fallen thrall can be raised once more.
     pub rebind: bool,
+    /// Appraiser's Eye: better gear is marked in the pack.
+    pub appraise: bool,
+    /// Eager Gulp: Might and Vigor potions are drunk when walked over.
+    pub gulp: bool,
+    /// Potion Belt: extra potions of a kind that share one pack slot.
+    pub belt: i32,
+    /// Keen Hearing: 1 hears further, 2 can listen intently (Shift+Q).
+    pub hearing: i32,
+    /// Glinting Eye: items in sight show on the minimap.
+    pub glint: bool,
+    /// Last Rites: 5% per rank to destroy a corpse on a kill.
+    pub pyre: i32,
     /// Monsters mastered in the bestiary (200+ lifetime kills).
     pub mastered: Vec<String>,
 }
@@ -466,6 +480,12 @@ impl Profile {
             fleet: r("fleet"),
             scavenger: r("scavenger"),
             rebind: r("n_rebind") > 0,
+            glint: r("glint") > 0,
+            hearing: r("hearing"),
+            belt: r("belt"),
+            appraise: r("appraise") > 0,
+            gulp: r("gulp") > 0,
+            pyre: r("pyre"),
             mastered: MONSTERS
                 .iter()
                 .filter(|m| self.kills_of(m.name) >= m.lore().master)

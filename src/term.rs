@@ -8,6 +8,11 @@ use crossterm::{
     terminal,
 };
 use std::io::{self, BufWriter, Stdout, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The terminal has been asked to report every key on its own, left and
+/// right modifiers included (kitty keyboard protocol). Only while needed.
+static KBD_EXACT: AtomicBool = AtomicBool::new(false);
 
 pub struct Term {
     out: BufWriter<Stdout>,
@@ -15,6 +20,9 @@ pub struct Term {
     pw: usize,
     ph: usize,
     pub truecolor: bool,
+    /// Round colours to 16 shades a channel (bare-bones detail), so tiny
+    /// changes such as torch flicker don't make the terminal redraw cells.
+    pub coarse: bool,
 }
 
 impl Term {
@@ -27,10 +35,44 @@ impl Term {
             cursor::Hide,
             terminal::Clear(terminal::ClearType::All)
         )?;
-        Ok(Term { out, prev: Vec::new(), pw: 0, ph: 0, truecolor })
+        Ok(Term { out, prev: Vec::new(), pw: 0, ph: 0, truecolor, coarse: false })
+    }
+
+    /// Can this terminal tell us exactly which keys are held (left or right
+    /// Shift and Ctrl, pressed and released)? Asked once at start-up.
+    pub fn exact_keys_supported() -> bool {
+        terminal::supports_keyboard_enhancement().unwrap_or(false)
+    }
+
+    /// Switch exact key reporting on or off. With it on, modifier keys arrive
+    /// as key events of their own and every key reports its release.
+    pub fn set_exact_keys(on: bool) {
+        use crossterm::event::{
+            KeyboardEnhancementFlags as F, PopKeyboardEnhancementFlags,
+            PushKeyboardEnhancementFlags,
+        };
+        if on == KBD_EXACT.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut o = io::stdout();
+        if on {
+            let _ = execute!(
+                o,
+                PushKeyboardEnhancementFlags(
+                    F::DISAMBIGUATE_ESCAPE_CODES
+                        | F::REPORT_EVENT_TYPES
+                        | F::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                        | F::REPORT_ALTERNATE_KEYS
+                )
+            );
+        } else {
+            let _ = execute!(o, PopKeyboardEnhancementFlags);
+        }
+        KBD_EXACT.store(on, Ordering::Relaxed);
     }
 
     pub fn restore() {
+        Self::set_exact_keys(false);
         let mut o = io::stdout();
         let _ = execute!(o, style::ResetColor, cursor::Show, terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
@@ -55,7 +97,12 @@ impl Term {
     #[inline]
     fn key(&self, c: Rgb) -> Rgb {
         if self.truecolor {
-            c
+            if self.coarse {
+                let q = |v: u8| (v & 0xF0) | (v >> 4);
+                Rgb(q(c.0), q(c.1), q(c.2))
+            } else {
+                c
+            }
         } else {
             Rgb(to256(c), 0, 0)
         }

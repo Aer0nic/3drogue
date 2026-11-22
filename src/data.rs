@@ -23,6 +23,43 @@ pub enum VoiceKind {
     Cackle,
     Demon,
     Human,
+    /// Wet bubbling gloops (slimes).
+    Gurgle,
+    /// Rapid clicking mandibles and legs (spiders, centipedes, scorpions).
+    Chitter,
+    /// Stone grinding on stone (gargoyles, golems of rock and glass).
+    Grind,
+    /// A roaring whoosh of flame full of popping embers (fire creatures).
+    Crackle,
+    /// Ringing, glassy tones that shatter on death (crystal golems).
+    Chime,
+    /// Soft puffs of spores and a creak of fibrous flesh (fungus folk).
+    Spore,
+}
+
+/// What a blow or an arrow strikes, for the sound it makes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Material {
+    /// Meat and hide: a wet, squelching smack.
+    Flesh,
+    /// Jelly: a deeper, sloppier squelch.
+    Ooze,
+    /// Dry bone: a dull, hollow thud with a crack.
+    Bone,
+    /// Chitin: a brittle crunch.
+    Shell,
+    /// Rock and volcanic glass: a heavy, dead thud with grit.
+    Stone,
+    /// Living crystal: a bright glassy ring.
+    Crystal,
+    /// Mail, plate and scale: a muffled iron thunk.
+    Armor,
+    /// Spirits: a hollow rush, as if through cold mist.
+    Spirit,
+    /// Living flame: a sizzling puff.
+    Flame,
+    /// An arrow striking a stone wall.
+    Wall,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -478,6 +515,29 @@ pub const M_WOLF: usize = 8;
 pub const M_GUARDIAN: usize = 42;
 pub const M_WARDEN: usize = 18;
 
+impl MonsterDef {
+    /// What this creature is made of, for the sound of striking it.
+    pub fn material(&self) -> Material {
+        match self.voice {
+            VoiceKind::Gurgle => Material::Ooze,
+            VoiceKind::Chime => Material::Crystal,
+            VoiceKind::Grind => Material::Stone,
+            VoiceKind::Crackle => Material::Flame,
+            VoiceKind::Wail => Material::Spirit,
+            VoiceKind::Rattle => Material::Bone,
+            VoiceKind::Chitter => Material::Shell,
+            // Liches are dry bones under their robes.
+            VoiceKind::Chant if self.death == DeathKind::Undead => Material::Bone,
+            _ => match self.name {
+                "hobgoblin" | "Vorth, Warden of GRAZZARK" | "pit fiend" | "basilisk" => {
+                    Material::Armor
+                }
+                _ => Material::Flesh,
+            },
+        }
+    }
+}
+
 pub static MONSTERS: &[MonsterDef] = &[
     MonsterDef {
         name: "giant rat",
@@ -619,7 +679,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         xp: 15,
         faction: Faction::Vermin,
         size: 0.45,
-        voice: VoiceKind::Hiss,
+        voice: VoiceKind::Chitter,
         depth: (3, 7),
         poison: true,
         art: ART_SPIDER,
@@ -1073,7 +1133,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         xp: 190,
         faction: Faction::Vermin,
         size: 0.7,
-        voice: VoiceKind::Hiss,
+        voice: VoiceKind::Chitter,
         depth: (99, 99),
         poison: true,
         revive: (0.0, 0.0),
@@ -1096,7 +1156,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         xp: 240,
         faction: Faction::Greenskin,
         size: 1.2,
-        voice: VoiceKind::Roar,
+        voice: VoiceKind::Grind,
         depth: (99, 99),
         crush: true,
         revive: (0.0, 0.0),
@@ -1121,7 +1181,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         faction: Faction::Demon,
         size: 0.8,
         float: 0.15,
-        voice: VoiceKind::Cackle,
+        voice: VoiceKind::Crackle,
         depth: (99, 99),
         revive: (0.0, 0.0),
         sight: 9,
@@ -1212,7 +1272,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         xp: 4,
         faction: Faction::Vermin,
         size: 0.3,
-        voice: VoiceKind::Hiss,
+        voice: VoiceKind::Chitter,
         depth: (1, 5),
         poison: true,
         revive: (40.0, 80.0),
@@ -1232,7 +1292,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         xp: 4,
         faction: Faction::Vermin,
         size: 0.4,
-        voice: VoiceKind::Moan,
+        voice: VoiceKind::Gurgle,
         depth: (1, 4),
         revive: (30.0, 70.0),
         sight: 5,
@@ -1253,7 +1313,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         xp: 8,
         faction: Faction::Vermin,
         size: 0.6,
-        voice: VoiceKind::Hiss,
+        voice: VoiceKind::Spore,
         depth: (2, 6),
         poison: true,
         revive: (50.0, 100.0),
@@ -1304,7 +1364,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         xp: 18,
         faction: Faction::Vermin,
         size: 0.45,
-        voice: VoiceKind::Hiss,
+        voice: VoiceKind::Chitter,
         depth: (3, 8),
         poison: true,
         revive: (60.0, 120.0),
@@ -1367,7 +1427,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         faction: Faction::Dark,
         size: 0.8,
         float: 0.1,
-        voice: VoiceKind::Screech,
+        voice: VoiceKind::Grind,
         depth: (5, 9),
         revive: (0.0, 0.0),
         death: DeathKind::Crushed,
@@ -1387,7 +1447,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         xp: 36,
         faction: Faction::Undead,
         size: 0.85,
-        voice: VoiceKind::Wail,
+        voice: VoiceKind::Moan,
         depth: (5, 9),
         revive: (20.0, 50.0),
         death: DeathKind::Undead,
@@ -1441,7 +1501,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         faction: Faction::Demon,
         size: 0.9,
         float: 0.05,
-        voice: VoiceKind::Demon,
+        voice: VoiceKind::Crackle,
         depth: (7, 10),
         revive: (40.0, 80.0),
         death: DeathKind::Demon,
@@ -1522,7 +1582,7 @@ pub static MONSTERS: &[MonsterDef] = &[
         xp: 120,
         faction: Faction::Dark,
         size: 1.1,
-        voice: VoiceKind::Chant,
+        voice: VoiceKind::Chime,
         depth: (99, 99),
         ranged: Some(RangedAtk {
             verb: "hurls a shard of crystal",
@@ -2739,6 +2799,21 @@ pub static UPGRADES: &[UpgradeDef] = &[
     boon("laststand", "Last Stand", "Below 25% health: +15% damage and +1 AC per rank", 3, 80),
     boon("fleet", "Fleet Foot", "Walking takes 10% less time per rank", 2, 120),
     boon("scavenger", "Scavenger", "Start each descent with one random scroll per rank", 3, 50),
+    boon("appraise", "Appraiser's Eye", "Weapons and armour better than yours are marked with a green ^ in your pack, showing how much they add", 1, 500),
+    boon("gulp", "Eager Gulp", "Walk over a Potion of Might or Vigor and you drink it on the spot", 1, 500),
+    UpgradeDef {
+        ranks: &[150, 300],
+        ..boon("belt", "Potion Belt", "Each rank lets one more potion of the same kind share a pack slot", 2, 150)
+    },
+    UpgradeDef {
+        ranks: &[450, 750],
+        ..boon("hearing", "Keen Hearing", "Rank 1: you hear fights and footsteps from further off. Rank 2: Shift+Q to listen intently (1 turn, 10 turn cooldown) and see where sounds come from", 2, 450)
+    },
+    boon("glint", "Glinting Eye", "Items you can see show on the minimap, just as on the full map", 1, 1000),
+    UpgradeDef {
+        ranks: &[500, 750, 1000, 1250, 1500],
+        ..boon("pyre", "Last Rites", "+5% chance per rank on a kill to burn the corpse with your torch (or kick a skeleton to shards) so it never rises. Shift+C toggles", 5, 500)
+    },
     UpgradeDef { id: "class_ranger", name: "Unlock: Ranger", desc: "New class: archer with a wolf companion", max: 1, cost: 400, skill: None, cat: UCat::Class, ranks: &[] },
     UpgradeDef { id: "class_necro", name: "Unlock: Necromancer", desc: "New class: raise the dead, drain life", max: 1, cost: 700, skill: None, cat: UCat::Class, ranks: &[] },
     cskill("w_wind", 0, Skill::SecondWind, 350),
