@@ -8,6 +8,7 @@ use crate::data::*;
 use crate::entity::{Faction, Monster};
 use crate::game::*;
 use crate::map::*;
+use crate::anim::{death_pose, live_pose, Live, Pose};
 use std::f32::consts::PI;
 
 pub const HUD_H: i32 = 7;
@@ -1269,6 +1270,236 @@ fn wall_tex(style: u8, tile: Tile, u: f32, v: f32, mx: i32, my: i32, wc: &WallCt
     }
 }
 
+/// Where the first-person camera is, for drawing solid objects in the view.
+struct ChestView {
+    cam: (f32, f32),
+    dir: (f32, f32),
+    plane: (f32, f32),
+    horizon: f32,
+    proj: f32,
+    vx: i32,
+    vy: i32,
+    vw: i32,
+    vh: i32,
+}
+
+/// An axis-aligned box in the world: (min x, min y, min z), (max x, max y, max z).
+type Aabb = ([f32; 3], [f32; 3]);
+
+/// The nearest point where a ray from `o` along `d` enters box `b`:
+/// (distance, axis of the face struck, whether it is the face on the far, max side).
+fn ray_box(o: [f32; 3], d: [f32; 3], b: &Aabb) -> Option<(f32, usize, bool)> {
+    let mut tn = f32::MIN;
+    let mut tf = f32::MAX;
+    let mut axis = 0;
+    let mut maxside = false;
+    for k in 0..3 {
+        if d[k].abs() < 1e-6 {
+            if o[k] < b.0[k] || o[k] > b.1[k] {
+                return None;
+            }
+            continue;
+        }
+        let t1 = (b.0[k] - o[k]) / d[k];
+        let t2 = (b.1[k] - o[k]) / d[k];
+        let (lo, hi, far_side) = if t1 < t2 { (t1, t2, false) } else { (t2, t1, true) };
+        if lo > tn {
+            tn = lo;
+            axis = k;
+            maxside = far_side;
+        }
+        tf = tf.min(hi);
+    }
+    if tn > tf || tn < 0.05 {
+        return None;
+    }
+    Some((tn, axis, maxside))
+}
+
+/// A treasure chest, drawn as a real box so it looks right from any side:
+/// the brass lock on its front, iron bands over the lid, plain boards behind.
+/// An opened chest shows its dark, empty inside, with the lid thrown back.
+fn draw_chest(
+    c: &mut Canvas,
+    g: &Game,
+    v: &ChestView,
+    ch: &Chest,
+    zbuf: &[f32],
+    barred: &dyn Fn(i32, i32, f32) -> bool,
+    t: f32,
+) {
+    const HW: f32 = 0.36; // half its width
+    const HD: f32 = 0.24; // half its depth, front to back
+    const BODY: f32 = 0.30; // where the lid meets the body
+    const TOP: f32 = 0.44;
+    let facing = g.level.chest_facing(ch.x, ch.y) as usize;
+    let (fx, fy) = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)][facing];
+    // Pushed back against the wall behind it.
+    let cx = ch.x as f32 + 0.5 - fx * 0.1;
+    let cy = ch.y as f32 + 0.5 - fy * 0.1;
+    // Extents along the world axes for a footprint `d` deep and `w` wide,
+    // offset `off` toward the front.
+    let span = |d0: f32, d1: f32, z0: f32, z1: f32| -> Aabb {
+        let (ax0, ax1) = if fx != 0.0 {
+            let (a, b) = (cx + fx * d0, cx + fx * d1);
+            (a.min(b), a.max(b))
+        } else {
+            (cx - HW, cx + HW)
+        };
+        let (ay0, ay1) = if fy != 0.0 {
+            let (a, b) = (cy + fy * d0, cy + fy * d1);
+            (a.min(b), a.max(b))
+        } else {
+            (cy - HW, cy + HW)
+        };
+        ([ax0, ay0, z0], [ax1, ay1, z1])
+    };
+    let boxes: Vec<Aabb> = if ch.open {
+        vec![span(-HD, HD, 0.0, BODY), span(-HD - 0.02, -HD + 0.05, BODY, BODY + 0.4)]
+    } else {
+        vec![span(-HD, HD, 0.0, TOP)]
+    };
+    // Screen bounds from the corners of everything.
+    let (dirx, diry) = v.dir;
+    let (plx, ply) = v.plane;
+    let inv = 1.0 / (plx * diry - dirx * ply);
+    let (mut c0, mut c1, mut r0, mut r1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    let mut behind = false;
+    let mut any_front = false;
+    for b in &boxes {
+        for k in 0..8 {
+            let wx = if k & 1 == 0 { b.0[0] } else { b.1[0] };
+            let wy = if k & 2 == 0 { b.0[1] } else { b.1[1] };
+            let wz = if k & 4 == 0 { b.0[2] } else { b.1[2] };
+            let (rx, ry) = (wx - v.cam.0, wy - v.cam.1);
+            let tx = inv * (diry * rx - dirx * ry);
+            let ty = inv * (-ply * rx + plx * ry);
+            if ty <= 0.05 {
+                behind = true;
+                continue;
+            }
+            any_front = true;
+            let col = v.vw as f32 / 2.0 * (1.0 + tx / ty);
+            let row = v.horizon + v.proj / ty * (0.5 - wz);
+            c0 = c0.min(col);
+            c1 = c1.max(col);
+            r0 = r0.min(row);
+            r1 = r1.max(row);
+        }
+    }
+    if !any_front {
+        return;
+    }
+    let (c0, c1, r0, r1) = if behind {
+        (0, v.vw, 0, v.vh)
+    } else {
+        (
+            (c0.floor() as i32).max(0),
+            (c1.ceil() as i32 + 1).min(v.vw),
+            (r0.floor() as i32).max(0),
+            (r1.ceil() as i32 + 1).min(v.vh),
+        )
+    };
+    let l = light_at(g, ch.x as f32 + 0.5, ch.y as f32 + 0.5, t);
+    if lum(l) < 0.07 {
+        return;
+    }
+    let l = [l[0].min(1.5), l[1].min(1.5), l[2].min(1.5)];
+    let wood = Rgb(124, 76, 36);
+    let iron = Rgb(100, 100, 108);
+    let brass = Rgb(226, 182, 74);
+    let o = [v.cam.0, v.cam.1, 0.5];
+    for col in c0..c1 {
+        let cam_x = 2.0 * (col as f32 + 0.5) / v.vw as f32 - 1.0;
+        let rd = [dirx + plx * cam_x, diry + ply * cam_x];
+        for row in r0..r1 {
+            let vz = -((row as f32 + 0.5) - v.horizon) / v.proj;
+            let d = [rd[0], rd[1], vz];
+            let mut best: Option<(f32, usize, bool, usize)> = None;
+            for (bi, b) in boxes.iter().enumerate() {
+                if let Some((tn, ax, mx)) = ray_box(o, d, b) {
+                    if best.map_or(true, |bb| tn < bb.0) {
+                        best = Some((tn, ax, mx, bi));
+                    }
+                }
+            }
+            let Some((tn, ax, maxside, bi)) = best else { continue };
+            if tn >= zbuf[col as usize] || barred(col, row, tn) {
+                continue;
+            }
+            let (hx, hy, hz) = (o[0] + d[0] * tn, o[1] + d[1] * tn, o[2] + d[2] * tn);
+            // Local coordinates: `u` across its width, `w` front (+) to back (-).
+            let (lx, ly) = (hx - cx, hy - cy);
+            let w = lx * fx + ly * fy;
+            let u = if fx != 0.0 { ly } else { lx };
+            let au = u.abs() / HW;
+            // Which face: the top, the front, the back, or a side.
+            let face = if ax == 2 {
+                if maxside { 0 } else { 4 }
+            } else {
+                let n = if maxside { 1.0 } else { -1.0 };
+                let along_facing = (ax == 0 && fx != 0.0) || (ax == 1 && fy != 0.0);
+                if along_facing {
+                    let toward = n * if ax == 0 { fx } else { fy };
+                    if toward > 0.0 { 1 } else { 2 }
+                } else {
+                    3
+                }
+            };
+            let shade = [1.0, 0.85, 0.62, 0.72, 0.5][face];
+            // Across the face you are looking at: its width for the front,
+            // back and top, its depth for the ends.
+            let across = if face == 3 { w.abs() / HD } else { au };
+            let band = (0.55..0.68).contains(&across);
+            let edge = across > 0.88;
+            let lid = bi == 1;
+            let (glyph, col_rgb, bgk) = if ch.open && bi == 0 && face == 0 {
+                // Looking down into the emptied chest.
+                (' ', Rgb(30, 18, 10), 1.0)
+            } else if lid && face == 1 {
+                // The underside of the lid thrown back.
+                (if band { '|' } else { ' ' }, if band { iron } else { wood.scale(0.7) }, 0.55)
+            } else if face == 0 {
+                // The lid's top: boards running front to back, iron straps across.
+                let seam = ((w / HD + 1.0) * 2.5).fract() < 0.12;
+                if band || edge {
+                    ('=', iron, 0.55)
+                } else if seam {
+                    ('-', wood.scale(0.6), 0.55)
+                } else {
+                    (' ', wood.scale(1.0 - (w / HD).powi(2) * 0.2), 0.6)
+                }
+            } else {
+                let seam_z = !lid && (BODY - 0.025..BODY + 0.02).contains(&hz) && !ch.open;
+                let plank = ((hz / 0.1).fract() < 0.15) && !lid;
+                let lock = face == 1 && !lid && u.abs() < 0.07 && (0.18..0.34).contains(&hz);
+                if lock {
+                    let hole = u.abs() < 0.025 && (0.22..0.27).contains(&hz);
+                    (if hole { '.' } else { 'o' }, if hole { Rgb(20, 14, 6) } else { brass }, 0.5)
+                } else if seam_z {
+                    ('_', Rgb(40, 26, 14), 0.4)
+                } else if band || edge {
+                    ('|', iron, 0.55)
+                } else if plank {
+                    ('_', wood.scale(0.55), 0.6)
+                } else {
+                    (' ', wood, 0.6)
+                }
+            };
+            let lit = col_rgb.scale(shade).lit(l);
+            c.set(v.vx + col, v.vy + row, glyph, lit.lerp(Rgb::WHITE, 0.08), lit.scale(bgk));
+        }
+    }
+}
+
+/// A chest on the maps: brass-bound brown, dull once it has been emptied.
+fn chest_color(lv: &Level, x: i32, y: i32) -> Rgb {
+    match lv.chest_at(x, y) {
+        Some(i) if lv.chests[i].open => Rgb(110, 80, 50),
+        _ => Rgb(215, 160, 70),
+    }
+}
+
 /// A ward prism, hanging in the air.
 const ART_PRISM: &[&str] = &[
     r"   /\   ",
@@ -1288,12 +1519,6 @@ pub fn prismatic(t: f32, phase: f32) -> Rgb {
     let k = t * 0.9 + phase;
     let c = |o: f32| (165.0 + 90.0 * (k + o).sin()) as u8;
     Rgb(c(0.0), c(2.1), c(4.2))
-}
-
-fn art_char(art: &[&str], r: usize, c: usize) -> char {
-    art.get(r)
-        .and_then(|line| line.chars().nth(c))
-        .unwrap_or(' ')
 }
 
 fn art_width(art: &[&str]) -> usize {
@@ -1319,6 +1544,8 @@ struct Spr {
     /// offsets the animation so sleepers don't snore in unison.
     sleep: Option<f32>,
     d2: f32,
+    /// This frame's blink, stride, lunge or death throes.
+    pose: Pose,
 }
 
 /// Aura colour for champions (gold) and uniques (violet).
@@ -1375,6 +1602,7 @@ pub fn render_game(c: &mut Canvas, g: &Game, t: f32) {
                 (e / VIEW_SWOOP).clamp(0.0, 1.0),
                 to_over,
             );
+            crate::overlay::screen_overlays(c, g, 0, vy, w, vh, t);
             post_effects(c, g, 0, vy, w, vh, t);
             draw_topbar(c, g, w, t);
             draw_hud(c, g, h - HUD_H, w, t);
@@ -1384,8 +1612,11 @@ pub fn render_game(c: &mut Canvas, g: &Game, t: f32) {
     // With the torch blown out there is no map to read, only the dark.
     if g.overhead && !g.p.torch_out {
         render_overhead(c, g, 0, vy, w, vh, t);
+        crate::overlay::screen_overlays(c, g, 0, vy, w, vh, t);
     } else {
         render_fp(c, g, 0, vy, w, vh, t);
+        // Webs, flames and gas fill the view, but never hide the minimap.
+        crate::overlay::screen_overlays(c, g, 0, vy, w, vh, t);
         if !g.p.torch_out {
             let mw = 23.min(w / 4);
             let mh = 11.min(vh / 3);
@@ -1793,11 +2024,12 @@ fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
                 }
             }
             if !minimal && lv.inb(tx, ty) {
-                let bl = lv.blood[lv.idx(tx, ty)];
+                let bi = lv.idx(tx, ty);
+                let bl = lv.blood[bi];
                 if bl > 0.0
                     && hashf((fx * 5.0).floor() as i32, (fy * 5.0).floor() as i32) < bl * 0.3
                 {
-                    base = Rgb(130, 12, 12);
+                    base = crate::data::stain_colors(lv.stain_at(bi)).0;
                     forced = Some(if hashf(tx * 3, ty * 5) < 0.5 {
                         '%'
                     } else {
@@ -1980,28 +2212,49 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
     let mut sprs: Vec<Spr> = Vec::new();
     let d2 = |x: f32, y: f32| (x - camx0).powi(2) + (y - camy0).powi(2);
     for corpse in &lv.corpses {
+        // Still falling: the body shows once its death has played out.
+        if g
+            .fx
+            .dying
+            .iter()
+            .any(|d| d.kind == corpse.kind && d.x == corpse.x && d.y == corpse.y)
+        {
+            continue;
+        }
         let def = &MONSTERS[corpse.kind];
         let undead = def.death == DeathKind::Undead;
         let (x, y) = (corpse.x as f32 + 0.5, corpse.y as f32 + 0.5);
+        // A dead Mimic lies gaping, just as it died.
+        let mimic = corpse.kind == M_MIMIC;
         sprs.push(Spr {
             x,
             y,
-            art: if undead { ART_BONES } else { ART_CORPSE },
+            art: if mimic {
+                ART_MIMIC_DEAD
+            } else if undead {
+                ART_BONES
+            } else {
+                ART_CORPSE
+            },
             glyph: '%',
-            color: if undead {
+            color: if mimic {
+                def.color.scale(0.8)
+            } else if undead {
                 Rgb(200, 195, 175)
             } else {
                 def.color.lerp(Rgb(120, 15, 15), 0.6)
             },
             eye: Rgb::BLACK,
-            size: 0.14,
+            size: if mimic { def.size } else { 0.14 },
             float: 0.0,
             flash: 0.0,
             glow: false,
             aura: None,
             throb: false,
             sleep: None,
-            d2: d2(x, y),
+            // The Mimic's gaping body lies over whatever it spilled.
+            d2: d2(x, y) - if mimic { 0.01 } else { 0.0 },
+            pose: Pose::default(),
         });
     }
     for it in &lv.items {
@@ -2023,6 +2276,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             throb: false,
             sleep: None,
             d2: d2(x, y),
+            pose: Pose::default(),
         });
     }
     for m in &lv.monsters {
@@ -2045,6 +2299,15 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
         } else {
             0.0
         };
+        let moving = ((m.x as f32 - m.rx).powi(2) + (m.y as f32 - m.ry).powi(2)).sqrt();
+        let pose = live_pose(&Live {
+            kind: m.kind,
+            id: m.id,
+            awake: m.awake,
+            atk: m.atk,
+            moving,
+            t,
+        });
         sprs.push(Spr {
             x,
             y,
@@ -2060,6 +2323,38 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             throb: m.overlord,
             sleep: (!m.awake).then_some(m.id as f32 * 0.37),
             d2: d2(x, y),
+            pose,
+        });
+    }
+    // Monsters dying: they play out their deaths, then lie as corpses.
+    for d in &g.fx.dying {
+        let def = &MONSTERS[d.kind];
+        let (x, y) = (d.rx + 0.5, d.ry + 0.5);
+        let k = d.age / crate::anim::DEATH_TIME;
+        let mut color = def.color;
+        if d.kind == M_GUARDIAN {
+            color = prismatic(t, d.id as f32);
+        }
+        if d.ally {
+            color = color.lerp(Rgb(120, 255, 140), 0.3);
+        }
+        sprs.push(Spr {
+            x,
+            y,
+            art: def.art,
+            glyph: def.glyph,
+            // Life drains out of the colour as it goes down.
+            color: color.lerp(color.scale(0.6), k.min(1.0)),
+            eye: def.eye.scale((1.0 - k * 1.5).max(0.0)),
+            size: def.size,
+            float: def.float,
+            flash: 0.0,
+            glow: false,
+            aura: None,
+            throb: false,
+            sleep: None,
+            d2: d2(x, y),
+            pose: death_pose(d.kind, d.id, k, d.corpse, d.rite == Some(false)),
         });
     }
     // The ward prism, or the shards left of it.
@@ -2081,6 +2376,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                 throb: false,
                 sleep: None,
                 d2: d2(x, y),
+            pose: Pose::default(),
             });
         } else {
             let shield = w.state == WardState::Shielded;
@@ -2103,6 +2399,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                 throb: shield,
                 sleep: None,
                 d2: d2(x, y),
+            pose: Pose::default(),
             });
         }
     }
@@ -2110,6 +2407,15 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
     for f in &g.figments {
         let def = &MONSTERS[f.kind];
         let (x, y) = (f.rx + 0.5, f.ry + 0.5);
+        let moving = ((f.x as f32 - f.rx).powi(2) + (f.y as f32 - f.ry).powi(2)).sqrt();
+        let fpose = live_pose(&Live {
+            kind: f.kind,
+            id: f.id,
+            awake: true,
+            atk: 0.0,
+            moving,
+            t,
+        });
         let bob = if def.float > 0.0 {
             (t * 6.0 + f.id as f32).sin() * 0.05
         } else {
@@ -2130,9 +2436,31 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             throb: false,
             sleep: None,
             d2: d2(x, y),
+            pose: fpose,
         });
     }
     sprs.sort_by(|a, b| b.d2.partial_cmp(&a.d2).unwrap_or(std::cmp::Ordering::Equal));
+    // Treasure chests (and the Mimics among them) are solid boxes, drawn in
+    // the same far-to-near order as the sprites.
+    let mut chests: Vec<(f32, Chest)> = lv
+        .chests
+        .iter()
+        .map(|ch| (d2(ch.x as f32 + 0.5, ch.y as f32 + 0.5), *ch))
+        .filter(|(dd, _)| *dd < 30.0 * 30.0)
+        .collect();
+    chests.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut next_chest = 0;
+    let view = ChestView {
+        cam: (camx0, camy0),
+        dir: (dirx, diry),
+        plane: (plx, ply),
+        horizon,
+        proj,
+        vx,
+        vy,
+        vw,
+        vh,
+    };
     let inv = 1.0 / (plx * diry - dirx * ply);
     let project = |wx: f32, wy: f32| -> (f32, f32) {
         let rx = wx - camx0;
@@ -2158,6 +2486,11 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
         }
     };
     for s in &sprs {
+        while next_chest < chests.len() && chests[next_chest].0 >= s.d2 {
+            let ch = chests[next_chest].1;
+            draw_chest(c, g, &view, &ch, &zbuf, &barred, t);
+            next_chest += 1;
+        }
         let (tx, ty) = project(s.x, s.y);
         if ty <= 0.2 {
             continue;
@@ -2167,12 +2500,16 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
         let l = light_at(g, s.x, s.y, t);
         let lu = lum(l);
         let dark = lu < 0.07 && !s.glow;
-        let ah = s.art.len().max(1) as f32;
-        let aw = art_width(s.art) as f32;
+        let pose = &s.pose;
+        let art = pose.art.unwrap_or(s.art);
+        let ah = art.len().max(1) as f32;
         let h_rows = s.size * scale;
-        let bottom = horizon + scale * 0.5 - s.float * scale;
-        let top = bottom - h_rows;
+        let bottom = horizon + scale * 0.5 - (s.float + pose.lift) * scale;
         if h_rows < 1.3 {
+            // Too far off to show any shape: a dying one just winks out.
+            if pose.fade > 0.5 {
+                continue;
+            }
             let col = scx as i32;
             let row = (bottom - 0.5) as i32;
             if col >= 0
@@ -2201,13 +2538,41 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             continue;
         }
         let k = h_rows / ah;
-        let w_cols = aw * k;
-        let left = scx - w_cols / 2.0;
-        let c0 = (left.floor() as i32).max(0);
-        let c1 = ((left + w_cols).ceil() as i32).min(vw);
-        let r0 = (top.floor() as i32).max(0);
-        let r1 = (bottom.ceil() as i32).min(vh);
+        let art = &crate::anim::Grid::new(art);
+        // The art, read through this frame's pose: screen cell to art cell.
+        let at = |col: i32, row: i32| -> Option<crate::anim::Cell> {
+            let ax = (col as f32 + 0.5 - scx) / k;
+            let ay = (bottom - (row as f32 + 0.5)) / k;
+            crate::anim::sample(art, pose, ax, ay)
+        };
+        let (side, up, down) = crate::anim::reach(art, pose);
+        let c0 = ((scx - side * k).floor() as i32).max(0);
+        let c1 = ((scx + side * k).ceil() as i32).min(vw);
+        let r0 = ((bottom - up * k).floor() as i32).max(0);
+        let r1 = ((bottom + down * k).ceil() as i32).min(vh);
+        // Read the posed art once for every cell it (and its halo) can touch.
+        let pad = if s.aura.is_some() {
+            (k * 0.8).ceil().max(1.0) as i32 + if s.throb { 1 } else { 0 }
+        } else {
+            0
+        };
+        let (bx0, by0) = (c0 - pad, r0 - pad);
+        let (bw, bh) = ((c1 + pad - bx0).max(0) as usize, (r1 + pad - by0).max(0) as usize);
+        let cells: Vec<Option<crate::anim::Cell>> = (0..bw * bh)
+            .map(|i| at(bx0 + (i % bw) as i32, by0 + (i / bw) as i32))
+            .collect();
+        let cell_at = |col: i32, row: i32| -> Option<crate::anim::Cell> {
+            let (i, j) = (col - bx0, row - by0);
+            if i < 0 || j < 0 || i as usize >= bw || j as usize >= bh {
+                return None;
+            }
+            cells[j as usize * bw + i as usize]
+        };
         let lit = s.color.lit([l[0].min(1.6), l[1].min(1.6), l[2].min(1.6)]);
+        let lit = match pose.tint {
+            Some((tc, a)) => lit.lerp(tc, a),
+            None => lit,
+        };
         let shown = if s.glow {
             s.color.lerp(Rgb::WHITE, 0.2 + 0.2 * pulse)
         } else {
@@ -2216,12 +2581,34 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
         if let Some(a) = s.aura {
             // A flickering halo hugging the outline of the sprite. It glows,
             // so it shows even in total darkness.
-            let solid = |col: i32, row: i32| -> bool {
-                let fc = (col as f32 + 0.5 - left) / k;
-                let fr = (row as f32 + 0.5 - top) / k;
-                fc >= 0.0 && fr >= 0.0 && art_char(s.art, fr as usize, fc as usize) != ' '
+            // Which cells lie within `pad` of the body: a box dilation, done
+            // across and then down.
+            let mut across = vec![false; bw * bh];
+            for j in 0..bh {
+                let mut last: i32 = -1_000_000;
+                for i in 0..bw {
+                    if cells[j * bw + i].is_some() {
+                        last = i as i32;
+                    }
+                    across[j * bw + i] = i as i32 - last <= pad;
+                }
+                let mut next: i32 = 1_000_000;
+                for i in (0..bw).rev() {
+                    if cells[j * bw + i].is_some() {
+                        next = i as i32;
+                    }
+                    across[j * bw + i] |= next - i as i32 <= pad;
+                }
+            }
+            let near_at = |col: i32, row: i32| -> bool {
+                let (i, j) = (col - bx0, row - by0);
+                if i < 0 || j < 0 || i as usize >= bw || j as usize >= bh {
+                    return false;
+                }
+                let lo = (j - pad).max(0) as usize;
+                let hi = ((j + pad) as usize).min(bh - 1);
+                (lo..=hi).any(|jj| across[jj * bw + i as usize])
             };
-            let pad = (k * 0.8).ceil().max(1.0) as i32 + if s.throb { 1 } else { 0 };
             // Overlords: a slow, heavy heartbeat of light.
             let beat = if s.throb {
                 (0.5 + 0.5 * (t * 5.0).sin()).powf(2.0)
@@ -2233,19 +2620,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                     continue;
                 }
                 for row in (r0 - pad).max(0)..(r1 + pad).min(vh) {
-                    if solid(col, row) || barred(col, row, ty) {
-                        continue;
-                    }
-                    let mut near = false;
-                    'n: for oy in -pad..=pad {
-                        for ox in -pad..=pad {
-                            if solid(col + ox, row + oy) {
-                                near = true;
-                                break 'n;
-                            }
-                        }
-                    }
-                    if !near {
+                    if cell_at(col, row).is_some() || barred(col, row, ty) || !near_at(col, row) {
                         continue;
                     }
                     let hsh = hash2(col * 31 + (t * 9.0) as i32, row * 17 + (t * 7.0) as i32);
@@ -2283,11 +2658,17 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             if ty >= zbuf[col as usize] {
                 continue;
             }
-            let ac = ((col as f32 + 0.5 - left) / k) as usize;
             for row in r0..r1 {
-                let ar = ((row as f32 + 0.5 - top) / k) as usize;
-                let ch = art_char(s.art, ar, ac);
-                if ch == ' ' || barred(col, row, ty) {
+                let Some((ch, own)) = cell_at(col, row) else { continue };
+                if barred(col, row, ty) {
+                    continue;
+                }
+                if let Some(oc) = own {
+                    // Teeth, tongue and throat keep their own colours, lit like the rest.
+                    if !dark {
+                        let oc = oc.lit([l[0].min(1.4), l[1].min(1.4), l[2].min(1.4)]);
+                        c.set(vx + col, vy + row, ch, oc, oc.scale(0.25));
+                    }
                     continue;
                 }
                 if ch == '§' {
@@ -2304,6 +2685,10 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                 }
             }
         }
+    }
+
+    for &(_, ch) in &chests[next_chest..] {
+        draw_chest(c, g, &view, &ch, &zbuf, &barred, t);
     }
 
     // ---------- sleepers: Zs drifting up from the heads of monsters that are
@@ -2780,6 +3165,17 @@ fn draw_torch_hand(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32,
     }
 }
 
+/// What colour a found trap shows on the maps, by what it does.
+fn trap_color(k: TrapKind) -> Rgb {
+    match k {
+        TrapKind::Spikes => Rgb(220, 220, 230),
+        TrapKind::Gas => Rgb(140, 240, 80),
+        TrapKind::Fire => Rgb(255, 120, 30),
+        TrapKind::Alarm => Rgb(255, 220, 70),
+        TrapKind::Maw => Rgb(240, 60, 80),
+    }
+}
+
 fn draw_minimap(c: &mut Canvas, g: &Game, x0: i32, y0: i32, w: i32, h: i32) {
     if w < 7 || h < 5 {
         return;
@@ -2808,8 +3204,17 @@ fn draw_minimap(c: &mut Canvas, g: &Game, x0: i32, y0: i32, w: i32, h: i32) {
                 Tile::GateClosed => ('#', Rgb(150, 150, 160)),
                 Tile::Ward => ('^', Rgb(200, 160, 255)),
                 Tile::Crystal => ('#', Rgb(120, 230, 255)),
+                Tile::Chest => ('=', chest_color(lv, tx, ty)),
             };
             c.set(x0 + i, y0 + j, ch, col.scale(k), bg);
+        }
+    }
+    // Traps you have found.
+    for tr in lv.traps.iter().filter(|tr| tr.revealed) {
+        let (i, j) = (tr.x - px + w / 2, tr.y - py + h / 2);
+        if i >= 0 && i < w && j >= 0 && j < h && lv.explored[lv.idx(tr.x, tr.y)] {
+            let k = if lv.is_visible(tr.x, tr.y) { 1.0 } else { 0.6 };
+            c.set(x0 + i, y0 + j, '^', trap_color(tr.kind).scale(k), bg);
         }
     }
     // Glinting Eye: items in sight, as the full map shows them.
@@ -2985,6 +3390,7 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
                     Rgb(120, 230, 255).lerp(Rgb(230, 140, 255), pulse),
                     true,
                 ),
+                Tile::Chest => ('[', ']', chest_color(lv, tx, ty), false),
             };
             let stairs = matches!(tile, Tile::StairsUp | Tile::StairsDown);
             let mut fg = if stairs {
@@ -3005,8 +3411,9 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
             if tile == Tile::Floor || tile == Tile::DoorOpen {
                 let bl = lv.blood[i];
                 if bl > 0.0 && vis {
-                    fg = fg.lerp(Rgb(160, 15, 15), (bl * 0.4).min(0.8));
-                    bg = bg.lerp(Rgb(60, 0, 0), (bl * 0.3).min(0.6));
+                    let (sf, sb) = crate::data::stain_colors(lv.stain_at(i));
+                    fg = fg.lerp(sf.scale(1.2), (bl * 0.4).min(0.8));
+                    bg = bg.lerp(sb, (bl * 0.3).min(0.6));
                     if bl > 1.0 {
                         ch2 = ',';
                     }
@@ -3243,6 +3650,115 @@ fn post_effects(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t:
     }
     if g.p.invis > 0 {
         c.tint_region(vx, vy, vw, vh, Rgb(40, 40, 110), 0.18);
+    }
+    if g.p.grit && g.p.blind > 0 && !g.grit_landing() {
+        // Strongest while the grit is fresh, easing on the last turn.
+        let s = (g.p.blind as f32 / 2.0).min(1.0);
+        blur_region(c, vx, vy, vw, vh, s, t);
+    }
+}
+
+/// How much of a cell its glyph covers, so a blur can treat a cell as one
+/// colour: a space shows only its background, a full block only ink.
+fn ink(ch: char) -> f32 {
+    match ch {
+        ' ' => 0.0,
+        '.' | ',' | '\'' | '`' | '·' => 0.12,
+        '░' => 0.25,
+        '▒' => 0.5,
+        '▓' => 0.75,
+        '█' => 1.0,
+        '▀' | '▄' | '▌' | '▐' => 0.5,
+        _ => 0.35,
+    }
+}
+
+/// Grit in the eyes: colours bleed into their neighbours, fine detail
+/// smears into soft shapes, and the picture swims a little as the eyes water.
+fn blur_region(c: &mut Canvas, vx: i32, vy: i32, vw: i32, vh: i32, s: f32, t: f32) {
+    let x0 = vx.max(0);
+    let y0 = vy.max(0);
+    let x1 = (vx + vw).min(c.w as i32);
+    let y1 = (vy + vh).min(c.h as i32);
+    let (w, h) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
+    if w == 0 || h == 0 || s <= 0.0 {
+        return;
+    }
+    let src: Vec<crate::canvas::Cell> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| c.get(x0 + x as i32, y0 + y as i32))
+        .collect();
+    // Each cell as the single colour the eye sees from a distance.
+    let flat: Vec<[f32; 3]> = src
+        .iter()
+        .map(|cl| {
+            let k = ink(cl.ch);
+            let m = cl.bg.lerp(cl.fg, k);
+            [m.0 as f32, m.1 as f32, m.2 as f32]
+        })
+        .collect();
+    // Box blur, wider across than down: terminal cells are about twice as
+    // tall as they are wide.
+    let rx = 1 + (2.0 * s).round() as i32;
+    let ry = 1;
+    let mut tmp = vec![[0.0f32; 3]; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f32; 3];
+            let mut n = 0.0;
+            for dx in -rx..=rx {
+                let xx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                let v = flat[y * w + xx];
+                acc[0] += v[0];
+                acc[1] += v[1];
+                acc[2] += v[2];
+                n += 1.0;
+            }
+            tmp[y * w + x] = [acc[0] / n, acc[1] / n, acc[2] / n];
+        }
+    }
+    let mut soft = vec![[0.0f32; 3]; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f32; 3];
+            let mut n = 0.0;
+            for dy in -ry..=ry {
+                let yy = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                let v = tmp[yy * w + x];
+                acc[0] += v[0];
+                acc[1] += v[1];
+                acc[2] += v[2];
+                n += 1.0;
+            }
+            soft[y * w + x] = [acc[0] / n, acc[1] / n, acc[2] / n];
+        }
+    }
+    let rgb = |v: [f32; 3]| Rgb(v[0] as u8, v[1] as u8, v[2] as u8);
+    // The eyes water: a slow sideways swim, so glyphs ghost from a neighbour.
+    let swim = (t * 1.7).sin() * 0.5 + (t * 2.9).sin() * 0.5;
+    let ghost = if swim > 0.35 { 1 } else if swim < -0.35 { -1 } else { 0 };
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let cell = src[i];
+            let b = rgb(soft[i]);
+            // Double vision: an empty cell catches a faint ghost of its
+            // neighbour's glyph; real glyphs stay where they are.
+            let gx = (x as i32 + ghost).clamp(0, w as i32 - 1) as usize;
+            let gcell = src[y * w + gx];
+            let (ch, fg) = if s > 0.6 && ink(cell.ch) == 0.0 && ink(gcell.ch) > 0.0 {
+                (gcell.ch, gcell.fg.lerp(b, 0.5))
+            } else {
+                (cell.ch, cell.fg)
+            };
+            c.set(
+                x0 + x as i32,
+                y0 + y as i32,
+                ch,
+                fg.lerp(b, 0.55 * s),
+                cell.bg.lerp(b, 0.85 * s),
+            );
+        }
     }
 }
 
@@ -3649,7 +4165,7 @@ pub const HELP_LINES: &[&str] = &[
     "  Shift+R     toggle TURN-BASED / REAL-TIME combat",
     "  Shift+M     switch between first-person and overhead play",
     "  Shift+C     Last Rites on / off (a Soul Altar boon)",
-    "  Shift+Q     listen intently (Keen Hearing, a Soul Altar boon)",
+    "  Shift+Q     listen intently (Keen Hearing): beside a chest, a Mimic creaks",
     "  Tab or M    show the full map of the floor",
     "  L           message log (last 100 turns)  T  relight a blown-out torch",
     "  - / +       volume                     Esc      menu",
@@ -3933,6 +4449,7 @@ pub fn draw_map(c: &mut Canvas, g: &Game) {
                 Tile::GateClosed => ('#', Rgb(150, 150, 160)),
                 Tile::Ward => ('^', Rgb(200, 160, 255)),
                 Tile::Crystal => ('#', Rgb(120, 230, 255)),
+                Tile::Chest => ('=', chest_color(lv, tx, ty)),
             };
             for s in 0..sx {
                 let ch2 = if s == 0 || chr == '#' { chr } else { ' ' };
@@ -3948,6 +4465,13 @@ pub fn draw_map(c: &mut Canvas, g: &Game) {
             None
         }
     };
+    for tr in lv.traps.iter().filter(|tr| tr.revealed) {
+        if lv.explored[lv.idx(tr.x, tr.y)] {
+            if let Some((x, y)) = to_scr(tr.x, tr.y) {
+                c.set(x, y, '^', trap_color(tr.kind), bg);
+            }
+        }
+    }
     for it in &lv.items {
         if lv.is_visible(it.x, it.y) {
             if let Some((x, y)) = to_scr(it.x, it.y) {
@@ -3976,7 +4500,7 @@ pub fn draw_map(c: &mut Canvas, g: &Game) {
     }
     c.center(
         ch - 2,
-        "@ you   < up   > down   + door   red: foe   gold: champion   violet: unique",
+        "@ you   < up   > down   + door   ^ trap   red: foe   gold: champion   violet: unique",
         Rgb(150, 140, 120),
     );
     c.center(ch - 1, "M / Esc: close", Rgb(120, 120, 140));

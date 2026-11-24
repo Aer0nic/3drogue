@@ -924,6 +924,10 @@ pub fn draw_bestiary(c: &mut Canvas, sel: usize, prof: &Profile, t: f32) {
         "depth 10, guarding the Amulet".to_string()
     } else if m.unique > 0 {
         format!("depth {} only (a unique)", m.unique)
+    } else if m.name == "Mimic" {
+        format!("depths {}-10, posing as a treasure chest", crate::game::MIMIC_DEPTH)
+    } else if m.depth.0 >= 99 {
+        "ward rooms, torn out of a struck prism".to_string()
     } else {
         format!("depths {}-{}", m.depth.0, m.depth.1)
     };

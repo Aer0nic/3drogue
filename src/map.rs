@@ -78,6 +78,8 @@ pub enum Tile {
     Ward,
     /// A wall of crystal raised by the Prism Guardian to seal its room.
     Crystal,
+    /// A treasure chest (see `Level::chests`). Bump it to open it.
+    Chest,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -88,6 +90,16 @@ pub enum WardState {
     Shielded,
     /// Crumbled: only shards remain.
     Broken,
+}
+
+/// A treasure chest standing against a wall. Some of them are Mimics, and
+/// nothing about one tells you so, except the creak you hear if you listen.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
+pub struct Chest {
+    pub x: i32,
+    pub y: i32,
+    pub open: bool,
+    pub mimic: bool,
 }
 
 /// One of the four ward prisms that strengthen the Warden.
@@ -291,6 +303,10 @@ pub struct Level {
     pub explored: Vec<bool>,
     pub visible: Vec<bool>,
     pub blood: Vec<f32>,
+    /// What each stain is made of (see `data::stain_colors`): blood, slime, rot...
+    /// Older saves have none, and read as plain blood.
+    #[serde(default)]
+    pub stain: Vec<u8>,
     pub light: Vec<[f32; 3]>,
     pub torches: Vec<Torch>,
     pub rooms: Vec<Rect>,
@@ -322,12 +338,46 @@ pub struct Level {
     /// A ward prism, if one stands on this floor.
     #[serde(default)]
     pub ward: Option<Ward>,
+    /// Treasure chests on this floor (and Mimics pretending to be them).
+    #[serde(default)]
+    pub chests: Vec<Chest>,
     /// Crystal walls sealing the ward's room, with what they replaced.
     #[serde(default)]
     pub crystal: Vec<(i32, i32, Tile)>,
 }
 
 impl Level {
+    pub fn chest_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.chests.iter().position(|c| c.x == x && c.y == y)
+    }
+
+    /// Which way a chest at (x,y) faces: away from the wall it stands
+    /// against (0 = east, 1 = south, 2 = west, 3 = north).
+    pub fn chest_facing(&self, x: i32, y: i32) -> u8 {
+        let dirs = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+        for (k, &(dx, dy)) in dirs.iter().enumerate() {
+            // The wall is behind it, so it faces the other way.
+            if self.tile(x - dx, y - dy).opaque() {
+                return k as u8;
+            }
+        }
+        (((x * 7 + y * 13) % 4 + 4) % 4) as u8
+    }
+
+    /// What the stain at this cell is made of.
+    pub fn stain_at(&self, i: usize) -> u8 {
+        self.stain.get(i).copied().unwrap_or(0)
+    }
+
+    pub fn set_stain(&mut self, i: usize, kind: u8) {
+        if self.stain.len() != self.blood.len() {
+            self.stain.resize(self.blood.len(), 0);
+        }
+        if let Some(s) = self.stain.get_mut(i) {
+            *s = kind;
+        }
+    }
+
     pub fn blank(depth: u32) -> Level {
         let n = (MAP_W * MAP_H) as usize;
         Level {
@@ -344,6 +394,7 @@ impl Level {
             explored: vec![false; n],
             visible: vec![false; n],
             blood: vec![0.0; n],
+            stain: vec![0; n],
             light: vec![[0.0; 3]; n],
             torches: Vec::new(),
             rooms: Vec::new(),
@@ -361,6 +412,7 @@ impl Level {
             features: Vec::new(),
             sinews: Vec::new(),
             ward: None,
+            chests: Vec::new(),
             crystal: Vec::new(),
         }
     }
@@ -598,7 +650,7 @@ impl Level {
                     continue;
                 }
                 let cost = match self.tile(nx, ny) {
-                    Tile::Wall | Tile::Sinew | Tile::Crystal | Tile::Ward => continue,
+                    Tile::Wall | Tile::Sinew | Tile::Crystal | Tile::Ward | Tile::Chest => continue,
                     Tile::DoorClosed | Tile::GateClosed => 3,
                     _ => 1,
                 };

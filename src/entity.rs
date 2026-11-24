@@ -12,6 +12,8 @@ pub enum Faction {
     Undead,
     Dark,
     Demon,
+    /// A Mimic: it hunts only the player.
+    Mimic,
 }
 
 /// Would a member of faction `a` attack a member of faction `b`?
@@ -23,6 +25,9 @@ pub fn hostile(a: Faction, b: Faction) -> bool {
     match (a, b) {
         (Player, Ally) | (Ally, Player) => false,
         (Player, _) | (_, Player) => true,
+        // A Mimic only ever wants the hand that opened it; your thralls may still fight it.
+        (Ally, Mimic) => true,
+        (Mimic, _) | (_, Mimic) => false,
         (Ally, _) | (_, Ally) => true,
         (Demon, _) | (_, Demon) => true,
         (Undead, Vermin) | (Vermin, Undead) => false,
@@ -105,6 +110,9 @@ pub struct Monster {
     pub ry: f32,
     pub flash: f32,
     pub lunge: (f32, f32, f32),
+    /// 1 the moment it attacks, running down to 0: drives its attack animation.
+    #[serde(default)]
+    pub atk: f32,
 }
 
 impl Monster {
@@ -142,6 +150,7 @@ impl Monster {
             ry: y as f32,
             flash: 0.0,
             lunge: (0.0, 0.0, 0.0),
+            atk: 0.0,
         }
     }
 
@@ -187,6 +196,7 @@ impl Monster {
         d.faction == Faction::Undead
             || d.death == DeathKind::Undead
             || self.kind == M_GUARDIAN
+            || self.kind == crate::data::M_MIMIC
             || d.unique > 0
             || (d.boss && self.ward_weaken < 3)
     }

@@ -4,6 +4,7 @@
 //! its Warden, and climb back to the surface alive. Death earns soul points
 //! that buy permanent upgrades on the Soul Altar.
 
+mod anim;
 mod audio;
 mod canvas;
 mod color;
@@ -14,6 +15,7 @@ mod game;
 mod launch;
 mod perf;
 mod map;
+mod overlay;
 mod profile;
 mod render;
 mod screens;
@@ -1648,6 +1650,8 @@ mod tests {
             Sfx::Blink,
             Sfx::Stomp,
             Sfx::Menu,
+            Sfx::GritThrow,
+            Sfx::GritHit,
         ];
         for v in voices {
             for m in moods {

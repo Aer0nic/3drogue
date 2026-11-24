@@ -42,6 +42,10 @@ pub enum Sfx {
     Arrow,
     /// A blow or an arrow landing on something made of this.
     Impact(Material),
+    /// A handful of grit flung through the air: a quick, sandy swish.
+    GritThrow,
+    /// Grit spattering across your face.
+    GritHit,
     Bolt,
     Heal,
     LevelUp,
@@ -671,6 +675,35 @@ fn monster_voice<R: Rng>(kind: VoiceKind, mood: Mood, sr: f32, rng: &mut R) -> V
             mix_into(&mut a, &creak, 0, 0.35);
             a
         }
+        VoiceKind::Mimic => {
+            // Old hinges and swollen boards creaking under a slow, hungry
+            // weight. Roused or striking, the lid slams down on teeth.
+            let count = match mood {
+                Mood::Idle => rng.gen_range(2..4),
+                Mood::Die => 4,
+                _ => 1,
+            };
+            let mut a = repeat_calls(rng, sr, count, (0.08, 0.25), |rng| {
+                let p = VP { pitch: rr(rng, 55.0, 90.0) * pm, dur: rr(rng, 0.35, 0.7) * dm, glide: rr(rng, -0.3, 0.4), vib: 0.25, vib_rate: rr(rng, 2.0, 5.0), noise: 0.08, formant: 850.0, formant2: 1900.0, rough: 1.0, q: 0.3 };
+                vocal(&p, sr, rng)
+            });
+            if mood != Mood::Idle {
+                // The slam: a hollow wooden clap and a wet crunch.
+                let clap = bell(sr, rr(rng, 140.0, 190.0), 0.25, &[(1.0, 1.0), (2.3, 0.5), (4.1, 0.2)], 0.05);
+                let at = if mood == Mood::Alert { (0.25 * sr) as usize } else { 0 };
+                mix_into(&mut a, &clap, at, 1.0);
+                let thump = tone(sr, 0.25, 110.0, 45.0, 0.06);
+                mix_into(&mut a, &thump, at, 0.9);
+                let wet = filtered_noise(sr, rng, 0.2, 1400.0, 500.0, 0.7, 0.003, 1);
+                mix_into(&mut a, &wet, at + (0.02 * sr) as usize, 0.5);
+            }
+            if die {
+                // Boards splitting.
+                let crack = clicks(sr, rng, 30, 0.6, 600.0, 2400.0);
+                mix_into(&mut a, &crack, 0, 0.7);
+            }
+            a
+        }
     };
     normalize(&mut out, if mood == Mood::Idle { 0.5 } else { 0.85 });
     out
@@ -959,6 +992,34 @@ fn synth<R: Rng>(sfx: Sfx, sr: f32, rng: &mut R) -> Vec<f32> {
             a
         }
         Sfx::Impact(m) => impact(m, sr, rng),
+        Sfx::GritThrow => {
+            // The arm whipping through: a breathy swish that rises then falls...
+            let dur = rr(rng, 0.24, 0.3);
+            let n = (dur * sr) as usize;
+            let mut f = Svf::new();
+            let mut a = Vec::with_capacity(n);
+            for i in 0..n {
+                let x = i as f32 / n as f32;
+                let fc = 700.0 + 3800.0 * (PI * x).sin();
+                let (_, b, _) = f.process(nz(rng), fc, 0.45, sr);
+                a.push(b * (PI * x).sin().powf(1.3));
+            }
+            // ...and the sand itself hissing as the cloud spreads out.
+            let hiss = filtered_noise(sr, rng, 0.35, 7000.0, 4500.0, 0.3, 0.04, 2);
+            mix_into(&mut a, &hiss, (0.08 * sr) as usize, 0.35);
+            let sand = clicks(sr, rng, 26, 0.3, 3000.0, 7000.0);
+            mix_into(&mut a, &sand, (0.06 * sr) as usize, 0.18);
+            normalize(&mut a, 0.6);
+            a
+        }
+        Sfx::GritHit => {
+            // A dry, scratchy spatter, close and all around.
+            let mut a = clicks(sr, rng, 70, 0.22, 2500.0, 8000.0);
+            let puff = filtered_noise(sr, rng, 0.18, 3000.0, 1200.0, 0.4, 0.003, 1);
+            mix_into(&mut a, &puff, 0, 0.6);
+            normalize(&mut a, 0.55);
+            a
+        }
         Sfx::Bolt => {
             let p = VP { pitch: rr(rng, 1200.0, 1500.0), dur: 0.35, glide: -0.85, vib: 0.08, vib_rate: 25.0, noise: 0.1, formant: 1500.0, formant2: 3000.0, rough: 0.0, q: 0.4 };
             let mut a = vocal(&p, sr, rng);
@@ -1564,8 +1625,8 @@ mod music_tests {
         assert!(p10 > 0.9 && p1 > 0.5, "frantic all the way up");
         assert!(h1 > h5 && h5 > h10, "more hope with each floor climbed");
         assert!(d1 < 0.01);
-        assert!(std::ptr::eq(at(1, true).scale(), &DORIAN));
-        assert!(std::ptr::eq(at(10, true).scale(), &LOCRIAN));
+        assert_eq!(at(1, true).scale(), &DORIAN);
+        assert_eq!(at(10, true).scale(), &LOCRIAN);
     }
 
     #[test]

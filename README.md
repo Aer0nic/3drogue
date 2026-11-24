@@ -47,7 +47,24 @@ G pick up · I inventory (backtick `` ` `` sorts it by type) · P drink a healin
 - **Raycast ASCII 3D view**: textured walls with a different style per depth
   band, floor and ceiling casting, coloured flickering torch light, dynamic
   light from spells, and scaled ASCII monster sprites whose eyes glow in the dark.
-- **Effects**: particles (blood, bones, sparks, embers, smoke), projectile
+- **Screen effects**: a gas trap jets green plumes up the view, a fire trap
+  sends flames racing round its edges, spikes stab up from below, a maw snaps
+  shut on you in rows of fangs, an alarm pulses red and amber, and a deathly
+  chill frosts the edges over. Traps you have found show on the minimap and the
+  full map as a `^` coloured by kind.
+- **Animated monsters**: creatures with eyelids blink now and then (and keep
+  their eyes shut asleep; the dead and the stony never blink). Each kind
+  attacks in its own way: jaws gape and snap (Mimics, wolves, bears, spiders),
+  slimes stretch out at you, the walking dead flail their arms, fliers swoop,
+  fighters lean into a swing. They walk, hop, scuttle, slither or glide, and
+  they die in character: zombies crumple, imps drop out of the air, giants
+  topple, skeletons clatter into a heap, wraiths thin into mist, bugs flip onto
+  their backs, slimes splat, and a Mimic falls open with its tongue lolling over
+  its fangs. The corpse appears only when the death is done, and a body taken by
+  Last Rites burns or shatters as it lands instead.
+- **Effects**: particles (blood, bones, sparks, embers, smoke; each creature
+  bleeds what it is made of: slimes splash green, skeletons shed bone chips,
+  gargoyles chip stone, the Prism Guardian sprays glittering shards), projectile
   trails, explosions, screen shake, damage flashes, low-health vignette,
   floating damage numbers, an animated held weapon and torch, and a melt
   transition between levels.
@@ -84,12 +101,15 @@ G pick up · I inventory (backtick `` ` `` sorts it by type) · P drink a healin
   Last Rites (burn or shatter your kills so they never rise), Appraiser's Eye
   (better gear marked in your pack), Eager Gulp (drink Might and Vigor on the spot),
   Potion Belt (stack potions of a kind in one pack slot), Keen Hearing (hear further;
-  then listen with Shift+Q to see where hidden sounds come from),
+  then listen with Shift+Q to see where hidden sounds come from, or to hear a Mimic creak
+  inside a chest),
   Deep Pockets and more), class unlocks, and two extra skills for each class.
   The Hall of the Dead records your past runs.
 - **Difficulties**: Normal, Hard, Difficult and Chaotic. Escaping with the
   Amulet unlocks the next one. Higher difficulties give monsters more health and
-  damage, and multiply the soul points you earn. Normal pays 20% fewer.
+  damage, make ailments (poison, blindness, webs and grabs, paralysis, frost,
+  curses) last longer (up to twice as long on Chaotic, where poison also does double damage),
+  and multiply the soul points you earn. Normal pays 20% fewer.
 - **Bestiary**: every monster you slay is recorded across runs. 1 kill reveals
   its name, 10 its basic stats, 100 its lore, haunts and full stats. At 200 kills
   you master it: +1.5% crit chance and +2% crit damage against it in every run.
@@ -107,12 +127,24 @@ G pick up · I inventory (backtick `` ` `` sorts it by type) · P drink a healin
   become an overlord thrall (1.5%, +0.5% per 5 levels). Overlord thralls roar
   foes into flight and raise short-lived skeleton minions, each on a 25-50 turn
   cooldown. Thralls heal a little slower than you.
+- **Treasure chests** turn up now and then against a wall: bump one to heave the
+  lid open for a piece of good gear and a few more things, with a small chance of
+  a unique. They are drawn as real boxes, so you see the lock, the iron bands and
+  the lid from whichever side you come at them. From depth 3, some are **Mimics**:
+  a Mimic looks exactly like a chest (no sleeping Zs, it never stirs) until you try
+  to open it, then bites hard and hops slowly after you, hunting only you. Listen
+  (Shift+Q) beside a chest first: a Mimic creaks. A slain Mimic spills a chest's
+  hoard with a good chance of a unique.
 - **Every monster has a special power on a timer**: minotaurs and cave bears
   charge and hurl you back, wraiths sap your life, myconids burst into
-  paralysing spore clouds, spiders web you in place, zombies and wights grab
+  spore clouds (your muscles seize: every action takes two and a half times as
+  long until the spores wear off), spiders spit webs that pin you in place (the
+  web hangs across the corners of your view, frays and snaps strand by strand
+  as you work free, and the last threads drop away when you tear loose), zombies and wights grab
   you, slimes split, shamans heal their kin, ogres and the Warden shake the
   ground, trolls throw boulders, basilisks petrify with a gaze, banshees shriek,
-  goblins throw grit in your eyes, rats and wolves call their pack, and more.
+  goblins throw grit in your eyes (your sight shrinks, the view blurs and doubles, and your blows and arrows
+  miss more often until you blink it clear; spells still land), rats and wolves call their pack, and more.
   Monsters use these powers on each other when they fight, too. Paralysis
   always leaves a short grace period, so it can never chain.
 - **15 floor themes** dealt out per run. Near the surface (depths 1-3): cellars,

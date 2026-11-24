@@ -35,6 +35,8 @@ pub enum VoiceKind {
     Chime,
     /// Soft puffs of spores and a creak of fibrous flesh (fungus folk).
     Spore,
+    /// Old wood creaking on its hinges, and a wet slam of a lid full of teeth.
+    Mimic,
 }
 
 /// What a blow or an arrow strikes, for the sound it makes.
@@ -510,7 +512,20 @@ const ART_GUARDIAN: &[&str] = &[
     r"  _/\/  \/\_  ",
 ];
 
+/// A treasure chest that bites (see `Chest::mimic`).
+const ART_MIMIC: &[&str] = &[
+    r"  __________  ",
+    r" /\/\/\/\/\/\ ",
+    r" | §      § | ",
+    r" |\/\/\/\/\/| ",
+    r" |##~~~~~~##| ",
+    r" |##______##| ",
+    r"  ''      ''  ",
+];
+
 pub const M_WOLF: usize = 8;
+/// The Mimic: never placed as a monster, only hidden in a chest.
+pub const M_MIMIC: usize = 43;
 /// The Prism Guardian, torn out of a ward prism when you strike it.
 pub const M_GUARDIAN: usize = 42;
 pub const M_WARDEN: usize = 18;
@@ -534,6 +549,95 @@ impl MonsterDef {
                 }
                 _ => Material::Flesh,
             },
+        }
+    }
+}
+
+/// What spills out of a creature when it is struck or slain.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bleed {
+    /// Red blood.
+    Blood,
+    /// Dark, clotted rot from the walking dead.
+    Rot,
+    /// Green jelly from slimes.
+    Slime,
+    /// Pale yellow-green ichor and chitin flecks from bugs.
+    Ichor,
+    /// Puffs of spores and sap from fungus folk.
+    Spores,
+    /// Bone chips and dust, no blood at all.
+    Bone,
+    /// Stone chips and grit.
+    Stone,
+    /// Glittering shards of crystal.
+    Crystal,
+    /// Cold wisps of mist.
+    Spirit,
+    /// Embers and sparks.
+    Ember,
+    /// Burning infernal ichor.
+    Demon,
+}
+
+/// Floor stains: which colour a splash leaves behind.
+pub const STAIN_BLOOD: u8 = 0;
+pub const STAIN_SLIME: u8 = 1;
+pub const STAIN_ROT: u8 = 2;
+pub const STAIN_ICHOR: u8 = 3;
+pub const STAIN_DEMON: u8 = 4;
+
+impl Bleed {
+    /// The stain this leaves on the floor, if any.
+    pub fn stain(self) -> Option<u8> {
+        match self {
+            Bleed::Blood => Some(STAIN_BLOOD),
+            Bleed::Rot => Some(STAIN_ROT),
+            Bleed::Slime => Some(STAIN_SLIME),
+            Bleed::Ichor => Some(STAIN_ICHOR),
+            Bleed::Demon => Some(STAIN_DEMON),
+            Bleed::Spores
+            | Bleed::Bone
+            | Bleed::Stone
+            | Bleed::Crystal
+            | Bleed::Spirit
+            | Bleed::Ember => None,
+        }
+    }
+}
+
+/// A floor stain's colours: (the splash itself, the dark tint under it).
+pub fn stain_colors(k: u8) -> (Rgb, Rgb) {
+    match k {
+        STAIN_SLIME => (Rgb(70, 170, 40), Rgb(10, 50, 5)),
+        STAIN_ROT => (Rgb(75, 50, 25), Rgb(25, 15, 5)),
+        STAIN_ICHOR => (Rgb(165, 170, 60), Rgb(40, 45, 5)),
+        STAIN_DEMON => (Rgb(190, 80, 15), Rgb(55, 15, 0)),
+        _ => (Rgb(130, 12, 12), Rgb(60, 0, 0)),
+    }
+}
+
+impl MonsterDef {
+    pub fn bleed(&self) -> Bleed {
+        match self.material() {
+            Material::Ooze => Bleed::Slime,
+            Material::Bone => Bleed::Bone,
+            Material::Stone => Bleed::Stone,
+            Material::Crystal => Bleed::Crystal,
+            Material::Spirit => Bleed::Spirit,
+            Material::Flame => Bleed::Ember,
+            Material::Shell => Bleed::Ichor,
+            Material::Flesh | Material::Armor | Material::Wall => {
+                if self.voice == VoiceKind::Spore {
+                    Bleed::Spores
+                } else if self.death == DeathKind::Demon {
+                    Bleed::Demon
+                } else if self.death == DeathKind::Undead {
+                    Bleed::Rot
+                } else {
+                    Bleed::Blood
+                }
+            }
         }
     }
 }
@@ -1600,6 +1704,30 @@ pub static MONSTERS: &[MonsterDef] = &[
         abil: &[MAbil::Guard],
         ..BASE
     },
+    MonsterDef {
+        name: "Mimic",
+        glyph: 'D',
+        color: Rgb(150, 95, 45),
+        eye: Rgb(255, 230, 120),
+        hp: 55,
+        hit: 8,
+        dmg: (6, 14),
+        ac: 4,
+        // It has to hop after you on the bottom of its box.
+        speed: 170.0,
+        xp: 90,
+        faction: Faction::Mimic,
+        size: 0.6,
+        voice: VoiceKind::Mimic,
+        depth: (99, 99),
+        revive: (0.0, 0.0),
+        sight: 14,
+        death: DeathKind::Beast,
+        art: ART_MIMIC,
+        // Its sticky lid clamps down on whatever it bites.
+        abil: &[MAbil::Grab],
+        ..BASE
+    },
 ];
 
 /// How likely a monster is to be chosen at `depth`: highest in the middle of
@@ -1680,6 +1808,7 @@ pub static MONSTER_LORE: &[&str] = &[
     "A great grey lizard with a crown of horns and a gaze that numbs the limbs. Its bite is venomous, and its hide is thick enough to turn a sword.",
     "A towering demon of the deepest pits, armoured in black scale. It crushes bone with its fists and spits gouts of hellfire at anything it cannot reach.",
     "A golem of living crystal that bursts out of a ward prism when it is struck. It seals the room behind walls of crystal, hurls razor shards, and shields the ward for as long as it stands. Break it, and the ward breaks with it.",
+    "A hungry thing that wears the shape of a treasure chest, down to the brass lock. It waits without moving, without breathing, until a greedy hand lifts the lid, and then it never stops hunting that hand. It is slow, hopping after its prey on the bottom of its box, but it bites through mail. Put an ear to a chest before you open it: a Mimic creaks.",
 ];
 
 impl MAbil {
@@ -2307,6 +2436,20 @@ const ART_WEAPON: &[&str] = &[r"     /", r"    / ", r" \ /  ", r"  X   ", r" / \
 const ART_ARMOR: &[&str] = &[r"/\___/\", r"|#####|", r" |###| ", r" |___| "];
 const ART_RING: &[&str] = &[r" .-. ", r"( § )", r" '-' "];
 const ART_AMULET: &[&str] = &[r" .-~-. ", r"(     )", r" \   / ", r"  (§)  "];
+/// A slain Mimic: lid flung back, fangs bared, tongue lolling out over the front.
+/// Marked cells: † upper fangs, ‡ lower fangs, ¤ tongue, ¦ the dark of its throat.
+pub const ART_MIMIC_DEAD: &[&str] = &[
+    r"  .--------.  ",
+    r"  |=x====x=|  ",
+    r"  |\/\/\/\/|  ",
+    r"  |††††††††|  ",
+    r" |¦¦¦¦¤¤¦¦¦¦| ",
+    r" |‡‡‡‡¤¤‡‡‡‡| ",
+    r" |##__¤¤__##| ",
+    r" |##  ¤¤  ##| ",
+    r"  ''  ¤¤  ''  ",
+    r"      \/      ",
+];
 pub const ART_CORPSE: &[&str] = &[r"    ,%%%,    ", r" _,(%%%%%),_ "];
 pub const ART_BONES: &[&str] = &[r"  o   ,=-,  ", r"='-%=--o-'=-"];
 
@@ -2876,6 +3019,11 @@ pub struct DiffDef {
     pub dmg: f32,
     /// Soul point multiplier.
     pub souls: f32,
+    /// How much longer poison, blindness, webs, paralysis, frost and curses
+    /// hold you.
+    pub effects: f32,
+    /// Health poison eats each turn (fractions build up turn to turn).
+    pub poison: f32,
     pub color: Rgb,
 }
 
@@ -2886,30 +3034,38 @@ pub static DIFFICULTIES: [DiffDef; 4] = [
         hp: 1.0,
         dmg: 1.0,
         souls: 0.8,
+        effects: 1.0,
+        poison: 0.5,
         color: Rgb(170, 220, 170),
     },
     DiffDef {
         name: "Hard",
-        desc: "Monsters have 30% more health and deal 20% more damage.",
+        desc: "Monsters have 30% more health and deal 20% more damage. Ailments last 25% longer and poison bites harder.",
         hp: 1.3,
         dmg: 1.2,
         souls: 1.5,
+        effects: 1.25,
+        poison: 0.65,
         color: Rgb(240, 210, 110),
     },
     DiffDef {
         name: "Difficult",
-        desc: "Monsters have 60% more health and deal 40% more damage.",
+        desc: "Monsters have 60% more health and deal 40% more damage. Ailments last 50% longer and poison bites harder.",
         hp: 1.6,
         dmg: 1.4,
         souls: 2.0,
+        effects: 1.5,
+        poison: 0.8,
         color: Rgb(255, 140, 70),
     },
     DiffDef {
         name: "Chaotic",
-        desc: "Monsters have double health and deal 70% more damage.",
+        desc: "Monsters have double health and deal 70% more damage. Ailments last twice as long and poison does double damage.",
         hp: 2.0,
         dmg: 1.7,
         souls: 3.0,
+        effects: 2.0,
+        poison: 1.0,
         color: Rgb(255, 60, 90),
     },
 ];

@@ -2,6 +2,7 @@
 //! floating combat text, dynamic lights, screen flash and shake.
 
 use crate::color::Rgb;
+use crate::data::Bleed;
 use rand::Rng;
 use std::f32::consts::TAU;
 
@@ -28,7 +29,8 @@ pub enum BoltEnd {
     Sparks(Rgb),
     Explosion(Rgb),
     Ice,
-    Blood,
+    /// An arrow strikes a creature: it sprays whatever that creature bleeds.
+    Wound(Bleed),
     Magic(Rgb),
 }
 
@@ -100,8 +102,82 @@ pub struct DoorAnim {
 /// How long a door takes to open.
 pub const DOOR_TIME: f32 = 0.6;
 
+/// Something that plays across the whole view rather than in the world:
+/// gas welling up from a trap, flames whooshing round you, and so on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScreenKind {
+    /// Noxious green gas jetting up from the floor.
+    Gas,
+    /// A puff of pale spores breathed in.
+    Spores,
+    /// Fire roaring up and sweeping round the edges.
+    Fire,
+    /// Spikes stabbing up from below.
+    Spikes,
+    /// A fanged maw snapping shut from above and below.
+    Maw,
+    /// An alarm: pulses of light beating in from the edges.
+    Alarm,
+    /// Frost creeping in from the edges.
+    Frost,
+}
+
+pub struct ScreenFx {
+    pub kind: ScreenKind,
+    pub age: f32,
+    pub dur: f32,
+    /// Varies the shapes from one effect to the next.
+    pub seed: u32,
+}
+
+impl ScreenFx {
+    /// How far along it is, 0..1.
+    pub fn k(&self) -> f32 {
+        (self.age / self.dur).clamp(0.0, 1.0)
+    }
+}
+
+/// Strands of a web falling away from the view: every web strand whose
+/// break point lies in `lo..hi` drops, `age` seconds after it snapped.
+pub struct WebFall {
+    pub age: f32,
+    pub lo: f32,
+    pub hi: f32,
+}
+
+/// How long torn strands take to fall out of the view.
+pub const WEB_FALL: f32 = 1.6;
+
+/// A monster playing out its death. Its corpse (if it leaves one) is hidden
+/// until this finishes.
+pub struct Dying {
+    pub kind: usize,
+    pub id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub rx: f32,
+    pub ry: f32,
+    pub age: f32,
+    /// It leaves a body behind (bosses and uniques do not).
+    pub corpse: bool,
+    /// Last Rites will take the body when the death is done: Some(true) to
+    /// shatter bones, Some(false) to burn flesh.
+    pub rite: Option<bool>,
+    pub ally: bool,
+}
+
 pub struct Fx {
     pub doors: Vec<DoorAnim>,
+    pub dying: Vec<Dying>,
+    pub screen: Vec<ScreenFx>,
+    /// Seconds since a web splatted over the view (it spreads out at first).
+    pub web_age: f32,
+    /// A tug against the web: it shudders, then settles.
+    pub web_jolt: f32,
+    /// Strands torn loose and falling.
+    pub web_falls: Vec<WebFall>,
+    /// Varies the web's pattern from one webbing to the next.
+    pub web_seed: u32,
     pub parts: Vec<Particle>,
     pub bolts: Vec<Bolt>,
     pub texts: Vec<FloatText>,
@@ -115,6 +191,12 @@ impl Fx {
     pub fn new() -> Fx {
         Fx {
             doors: Vec::new(),
+            dying: Vec::new(),
+            screen: Vec::new(),
+            web_age: 0.0,
+            web_jolt: 0.0,
+            web_falls: Vec::new(),
+            web_seed: 0,
             parts: Vec::new(),
             bolts: Vec::new(),
             texts: Vec::new(),
@@ -127,6 +209,9 @@ impl Fx {
 
     pub fn clear(&mut self) {
         self.doors.clear();
+        self.dying.clear();
+        self.screen.clear();
+        self.web_falls.clear();
         self.parts.clear();
         self.bolts.clear();
         self.texts.clear();
@@ -142,6 +227,19 @@ impl Fx {
     }
 
     pub fn update(&mut self, dt: f32) {
+        for s in self.screen.iter_mut() {
+            s.age += dt;
+        }
+        for d in self.dying.iter_mut() {
+            d.age += dt;
+        }
+        self.screen.retain(|s| s.age < s.dur);
+        self.web_age += dt;
+        self.web_jolt = (self.web_jolt - dt * 2.5).max(0.0);
+        for f in self.web_falls.iter_mut() {
+            f.age += dt;
+        }
+        self.web_falls.retain(|f| f.age < WEB_FALL);
         for d in self.doors.iter_mut() {
             d.age += dt;
         }
@@ -201,7 +299,7 @@ impl Fx {
                 BoltEnd::Sparks(c) => self.sparks(x, y, 0.5, c),
                 BoltEnd::Explosion(c) => self.explosion(x, y, c),
                 BoltEnd::Ice => self.ice(x, y),
-                BoltEnd::Blood => self.blood(x, y, 0.5, 8),
+                BoltEnd::Wound(b) => self.wound(x, y, 0.5, 8, b),
                 BoltEnd::Magic(c) => {
                     self.burst(x, y, 0.5, 16, c, &['*', '+', '.'], 2.0, 0.6, 0.0, true);
                     self.light(
@@ -298,6 +396,97 @@ impl Fx {
             3.0,
             false,
         );
+    }
+
+/// A wound: what sprays out when a creature is struck.
+    pub fn wound(&mut self, x: f32, y: f32, z: f32, n: usize, b: Bleed) {
+        let drip = [',', '.', '\'', ';', '~'];
+        match b {
+            Bleed::Blood => self.blood(x, y, z, n),
+            Bleed::Rot => self.burst(x, y, z, n, Rgb(85, 60, 30), &drip, 1.2, 0.9, 3.0, false),
+            Bleed::Slime => {
+                self.burst(x, y, z, n + 2, Rgb(90, 200, 50), &['o', ',', '.', '~', '\''], 1.4, 1.0, 3.5, false)
+            }
+            Bleed::Ichor => {
+                self.burst(x, y, z, n, Rgb(180, 185, 70), &drip, 1.6, 0.9, 3.0, false);
+                self.burst(x, y, z, n / 3, Rgb(70, 55, 40), &['\'', '`', '-'], 1.8, 0.6, 3.0, false);
+            }
+            Bleed::Spores => {
+                self.burst(x, y, z, n, Rgb(200, 190, 140), &['.', '\'', '`', 'o'], 0.8, 1.4, -0.2, false);
+                self.burst(x, y, z, n / 2, Rgb(150, 170, 90), &[',', '.'], 1.2, 0.8, 3.0, false);
+            }
+            Bleed::Bone => self.burst(
+                x, y, z, n, Rgb(225, 220, 195), &['\'', ',', '.', '`', '-'], 1.8, 0.6, 3.5, false,
+            ),
+            Bleed::Stone => {
+                self.burst(x, y, z, n, Rgb(135, 130, 125), &['.', ',', '\'', '`', ':'], 2.0, 0.6, 4.0, false);
+                self.burst(x, y, z, n / 2, Rgb(90, 85, 80), &['.', '\''], 0.6, 0.9, 0.3, false);
+            }
+            Bleed::Crystal => {
+                let mut rng = rand::thread_rng();
+                for _ in 0..n {
+                    let c = [Rgb(170, 240, 255), Rgb(220, 170, 255), Rgb(255, 255, 255), Rgb(150, 255, 200)]
+                        [rng.gen_range(0..4)];
+                    self.burst(x, y, z, 1, c, &['*', '\'', '/', '\\', '+'], 2.2, 0.55, 3.0, true);
+                }
+                self.light(x, y, [0.8, 1.1, 1.4], 1.4, 0.25);
+            }
+            Bleed::Spirit => {
+                self.burst(x, y, z, n, Rgb(150, 185, 230), &['~', '.', '\'', 'o'], 0.9, 0.9, -0.4, true)
+            }
+            Bleed::Ember => {
+                self.burst(x, y, z, n, Rgb(255, 150, 40), &['*', '.', '\'', '+'], 1.8, 0.6, -0.5, true);
+                self.light(x, y, [1.4, 0.7, 0.2], 1.4, 0.25);
+            }
+            Bleed::Demon => self.ichor(x, y, z, n, Rgb(255, 120, 30)),
+        }
+    }
+
+/// What is left in the air when a creature is slain.
+    pub fn remains(&mut self, x: f32, y: f32, b: Bleed) {
+        match b {
+            Bleed::Blood => self.blood(x, y, 0.5, 22),
+            Bleed::Rot => {
+                self.wound(x, y, 0.5, 18, b);
+                self.bones(x, y);
+            }
+            Bleed::Slime => {
+                self.wound(x, y, 0.4, 36, b);
+                self.rise(x, y, 10, Rgb(110, 210, 70), &['o', '.', '\''], 0.8);
+            }
+            Bleed::Ichor => self.wound(x, y, 0.4, 24, b),
+            Bleed::Spores => {
+                self.rise(x, y, 34, Rgb(200, 195, 150), &['.', '\'', '`', 'o', '*'], 1.6);
+                self.wound(x, y, 0.5, 10, b);
+            }
+            Bleed::Bone => self.bones(x, y),
+            Bleed::Stone => {
+                self.wound(x, y, 0.6, 30, b);
+                self.burst(x, y, 0.5, 8, Rgb(120, 115, 110), &['#', '%'], 1.4, 0.9, 4.0, false);
+                self.rise(x, y, 14, Rgb(95, 90, 85), &['.', '\'', '~'], 1.4);
+                self.shake = self.shake.max(0.35);
+            }
+            Bleed::Crystal => {
+                self.wound(x, y, 0.6, 40, b);
+                self.ring(x, y, 28, 3.0, Rgb(190, 240, 255), &['*', '+', '\''], 0.7);
+                self.light(x, y, [1.4, 1.8, 2.2], 3.0, 0.6);
+                self.flash(Rgb(190, 230, 255), 0.3);
+            }
+            Bleed::Spirit => {
+                self.mist(x, y, Rgb(150, 185, 230));
+                self.wound(x, y, 0.6, 12, b);
+            }
+            Bleed::Ember => {
+                self.wound(x, y, 0.5, 30, b);
+                self.rise(x, y, 20, Rgb(255, 120, 30), &['*', '.', '\''], 1.0);
+                self.light(x, y, [1.8, 0.9, 0.3], 2.5, 0.6);
+            }
+            Bleed::Demon => {
+                self.ichor(x, y, 0.5, 20, Rgb(255, 110, 20));
+                self.burst(x, y, 0.4, 20, Rgb(80, 70, 70), &['o', '~', '.'], 0.6, 1.5, -0.3, false);
+                self.light(x, y, [1.5, 0.6, 0.2], 2.0, 0.5);
+            }
+        }
     }
 
     pub fn sparks(&mut self, x: f32, y: f32, z: f32, c: Rgb) {
@@ -496,6 +685,28 @@ impl Fx {
             life,
             max: life,
         });
+    }
+
+    /// Start an effect across the whole view.
+    pub fn screen(&mut self, kind: ScreenKind, dur: f32) {
+        let seed = rand::thread_rng().gen();
+        self.screen.retain(|s| s.kind != kind);
+        self.screen.push(ScreenFx { kind, age: 0.0, dur, seed });
+    }
+
+    /// A fresh web lands over the view.
+    pub fn web_splat(&mut self) {
+        self.web_age = 0.0;
+        self.web_jolt = 0.6;
+        self.web_seed = rand::thread_rng().gen();
+    }
+
+    /// Strands with break points in `lo..hi` snap and fall away.
+    pub fn web_tear(&mut self, lo: f32, hi: f32) {
+        if hi > lo {
+            self.web_falls.push(WebFall { age: 0.0, lo, hi });
+            self.web_jolt = 1.0;
+        }
     }
 
     pub fn flash(&mut self, c: Rgb, amt: f32) {
