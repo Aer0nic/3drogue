@@ -355,7 +355,7 @@ fn gas(c: &mut Canvas, v: View, s: &ScreenFx, spores: bool) {
             if !spores || h < d * 0.7 {
                 c.set(x, y, ch, ink.scale(0.6 + 0.4 * d), bg);
             } else {
-                c.set(x, y, cell.ch, cell.fg.lerp(ink, d * 0.3), bg);
+                c.set_raw(x, y, cell.ch, cell.fg.lerp(ink, d * 0.3), bg);
             }
         }
     }
@@ -596,8 +596,12 @@ fn alarm(c: &mut Canvas, v: View, s: &ScreenFx) {
             let a = (front * 0.55 + edge * 0.45) * fade;
             if a > 0.02 {
                 let cell = c.get(x, y);
-                let ch = if e < 0.03 && (x + y) % 2 == 0 { '!' } else { cell.ch };
-                c.set(x, y, ch, cell.fg.lerp(col, a), cell.bg.lerp(col.scale(0.6), a));
+                let ch = if e < 0.03 && (x + y) % 2 == 0 {
+                    if crate::canvas::solid() { '▮' } else { '!' }
+                } else {
+                    cell.ch
+                };
+                c.set_raw(x, y, ch, cell.fg.lerp(col, a), cell.bg.lerp(col.scale(0.6), a));
             }
         }
     }
@@ -651,7 +655,7 @@ fn seized(c: &mut Canvas, v: View, left: i32, t: f32) {
             if d < rim_w {
                 let a = (1.0 - d / rim_w) * 0.4 * pulse * s;
                 let cell = c.get(x, y);
-                c.set(x, y, cell.ch, cell.fg, cell.bg.lerp(Rgb(110, 55, 130), a));
+                c.set_raw(x, y, cell.ch, cell.fg, cell.bg.lerp(Rgb(110, 55, 130), a));
             }
         }
     }

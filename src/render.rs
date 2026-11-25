@@ -17,6 +17,56 @@ const WALL_RAMP: [char; 9] = ['.', ':', '-', '=', '+', '*', '#', '%', '@'];
 const FLOOR_RAMP: [char; 6] = ['.', '.', ',', ',', ':', ';'];
 const CEIL_RAMP: [char; 5] = ['`', '`', '\'', '-', '~'];
 const ARROWS: [char; 8] = ['^', '/', '>', '\\', 'v', '/', '<', '\\'];
+const SOLID_ARROWS: [char; 8] = ['▲', '◥', '►', '◢', '▼', '◣', '◄', '◤'];
+
+/// The player's facing arrow on the maps.
+fn arrow(facing: u8) -> char {
+    if crate::canvas::solid() {
+        SOLID_ARROWS[facing as usize % 8]
+    } else {
+        ARROWS[facing as usize % 8]
+    }
+}
+
+/// The player's marker on the maps.
+fn player_glyph() -> char {
+    if crate::canvas::solid() { '●' } else { '@' }
+}
+
+/// A map tile. In solid mode a floor speck becomes a dark, flat tile.
+fn map_cell(c: &mut Canvas, x: i32, y: i32, ch: char, fg: Rgb, bg: Rgb) {
+    if crate::canvas::solid() && matches!(ch, '.' | ',' | '\'' | '`') {
+        c.set_raw(x, y, ' ', fg, bg.lerp(fg, 0.08));
+    } else {
+        c.set(x, y, ch, fg, bg);
+    }
+}
+
+/// Solid visuals on the maps: walls are drawn as outlines around rooms and
+/// passages. For a wall tile gives its two cells (the second for maps that
+/// draw two columns a tile), `Some(None)` for rock buried in other rock
+/// (nothing to draw), and `None` when this isn't an outlined wall at all.
+fn map_wall(lv: &Level, tx: i32, ty: i32) -> Option<Option<(char, char)>> {
+    let wallish = |x: i32, y: i32| {
+        !lv.inb(x, y) || matches!(lv.tile(x, y), Tile::Wall | Tile::Crystal)
+    };
+    // A wall that touches open ground, that you have seen.
+    let edge = |x: i32, y: i32| {
+        lv.inb(x, y)
+            && lv.explored[lv.idx(x, y)]
+            && wallish(x, y)
+            && (-1..=1).any(|dy| (-1..=1).any(|dx| !wallish(x + dx, y + dy)))
+    };
+    if !crate::canvas::solid() || !wallish(tx, ty) {
+        return None;
+    }
+    if !edge(tx, ty) {
+        return Some(None);
+    }
+    let (l, r, u, d) = (edge(tx - 1, ty), edge(tx + 1, ty), edge(tx, ty - 1), edge(tx, ty + 1));
+    let c1 = box_char(l, r, u, d).unwrap_or('■');
+    Some(Some((c1, if r { '─' } else { ' ' })))
+}
 
 pub struct Palette {
     pub wall: Rgb,
@@ -1724,7 +1774,7 @@ fn draw_view_swoop(
                 continue;
             }
             let cell = src.get(sx as i32, sy as i32);
-            c.set(x, vy + y, cell.ch, cell.fg.scale(fade), cell.bg.scale(fade));
+            c.set_raw(x, vy + y, cell.ch, cell.fg.scale(fade), cell.bg.scale(fade));
         }
     }
 }
@@ -1735,6 +1785,136 @@ fn draw_view_swoop(
 const DARK: Cell = Cell { ch: ' ', fg: Rgb::BLACK, bg: Rgb::BLACK };
 
 /// Everything one column of the first-person view needs to know.
+// Solid visuals: line markers written by the raycaster, joined up into box
+// lines by `resolve_lines` once the whole view is cast. The hint says which
+// way the groove runs when it can't be told from its neighbours.
+const LH: char = '\u{E000}';
+const LV: char = '\u{E001}';
+const LU: char = '\u{E002}';
+const LD1: char = '\u{E003}';
+const LD2: char = '\u{E004}';
+
+#[inline]
+fn is_line(ch: char) -> bool {
+    ('\u{E000}'..='\u{E004}').contains(&ch)
+}
+
+/// How dark plain stone is in solid mode, as a share of its lit colour.
+const SOLID_FACE: f32 = 0.14;
+
+/// Solid visuals for one textured surface cell. Grooves, seams and mortar
+/// (line-like texture glyphs) become line markers; glowing marks keep a
+/// solid glyph; plain surface is near-black, or a filled panel for doors.
+fn solid_cell(forced: Option<char>, c0: Rgb, mult: f32, fill: bool) -> Cell {
+    let dark = c0.scale(SOLID_FACE);
+    // Grooves are shaded dark in ASCII; drawn as lines they need the light
+    // of the surface around them.
+    let lc = c0.scale((1.25 / mult.max(0.3)).max(1.25));
+    let Some(ch) = forced else {
+        return if fill {
+            Cell { ch: ' ', fg: c0, bg: c0.scale(0.5) }
+        } else {
+            Cell { ch: ' ', fg: lc, bg: dark }
+        };
+    };
+    let hint = match ch {
+        '_' | '-' | '=' | '~' => Some(LH),
+        '|' | '(' | ')' | '!' => Some(LV),
+        '/' => Some(LD1),
+        '\\' => Some(LD2),
+        '.' | ',' | ':' | '\'' | '"' | '`' if mult < 1.0 => Some(LU),
+        _ => None,
+    };
+    match hint {
+        Some(h) => Cell { ch: h, fg: lc, bg: if fill { c0.scale(0.3) } else { dark } },
+        None if ch == ' ' => Cell { ch: ' ', fg: lc, bg: dark },
+        None => Cell { ch: crate::canvas::solid_glyph(ch), fg: c0, bg: dark },
+    }
+}
+
+/// A light box-drawing line joining the given neighbours.
+fn box_char(l: bool, r: bool, u: bool, d: bool) -> Option<char> {
+    Some(match (l, r, u, d) {
+        (true, true, true, true) => '┼',
+        (true, true, true, false) => '┴',
+        (true, true, false, true) => '┬',
+        (true, false, true, true) => '┤',
+        (false, true, true, true) => '├',
+        (false, true, false, true) => '┌',
+        (true, false, false, true) => '┐',
+        (false, true, true, false) => '└',
+        (true, false, true, false) => '┘',
+        (true, true, false, false) | (true, false, false, false) | (false, true, false, false) => '─',
+        (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => '│',
+        _ => return None,
+    })
+}
+
+/// Turn the raycaster's line markers (a grid of `cols` columns of `rows`
+/// cells, column by column) into joined-up box lines. Thick grooves close
+/// to the eye are thinned to one cell first, so they draw as single lines.
+fn resolve_lines(buf: &mut [Cell], cols: usize, rows: usize) {
+    let at = |b: &[Cell], i: i32, r: i32| -> char {
+        if i < 0 || r < 0 || i as usize >= cols || r as usize >= rows {
+            ' '
+        } else {
+            b[i as usize * rows + r as usize].ch
+        }
+    };
+    let mut keep = vec![false; cols * rows];
+    for i in 0..cols as i32 {
+        for r in 0..rows as i32 {
+            let ch = at(buf, i, r);
+            if !is_line(ch) {
+                continue;
+            }
+            let below = is_line(at(buf, i, r + 1));
+            let right = is_line(at(buf, i + 1, r));
+            let left = at(buf, i - 1, r);
+            keep[i as usize * rows + r as usize] = match ch {
+                LH => !(below && matches!(at(buf, i, r + 1), LH | LU)),
+                LV => !matches!(left, LV | LU),
+                LU => !(below && right),
+                _ => true,
+            };
+        }
+    }
+    let k = |i: i32, r: i32| -> bool {
+        i >= 0 && r >= 0 && (i as usize) < cols && (r as usize) < rows && keep[i as usize * rows + r as usize]
+    };
+    for i in 0..cols as i32 {
+        for r in 0..rows as i32 {
+            let idx = i as usize * rows + r as usize;
+            let ch = buf[idx].ch;
+            if !is_line(ch) {
+                continue;
+            }
+            if !keep[idx] {
+                buf[idx].ch = ' ';
+                continue;
+            }
+            let glyph = match ch {
+                LD1 => '╱',
+                LD2 => '╲',
+                _ => box_char(k(i - 1, r), k(i + 1, r), k(i, r - 1), k(i, r + 1)).unwrap_or(
+                    if k(i + 1, r - 1) || k(i - 1, r + 1) {
+                        '╱'
+                    } else if k(i - 1, r - 1) || k(i + 1, r + 1) {
+                        '╲'
+                    } else {
+                        match ch {
+                            LH => '─',
+                            LV => '│',
+                            _ => '·',
+                        }
+                    },
+                ),
+            };
+            buf[idx].ch = glyph;
+        }
+    }
+}
+
 struct Fp<'a> {
     g: &'a Game,
     wc: WallCtx,
@@ -1755,12 +1935,14 @@ struct Fp<'a> {
     t: f32,
     /// Bare-bones detail: flat lighting and no texture noise on floors and ceilings.
     minimal: bool,
+    /// Solid visuals: lines on dark stone instead of ASCII shading.
+    solid: bool,
 }
 
 /// Cast the ray for screen column `col` and shade its walls, floor and
 /// ceiling into `out` (one cell per row). Returns the wall distance for the
 /// sprite depth buffer, and any gate the ray looked through.
-fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
+fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>, (i32, i32, i32)) {
     let Fp {
         g,
         ref wc,
@@ -1780,6 +1962,7 @@ fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
         vw,
         t,
         minimal,
+        solid,
     } = *f;
     let lv = &g.level;
     let vh = out.len() as i32;
@@ -1906,7 +2089,11 @@ fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
                             .unwrap_or(pal.wall)
                             .lit(lf)
                             .scale(mult * gh.side_f * 1.1);
-                        out[row as usize] = Cell { ch: forced.unwrap_or('|'), fg: c0, bg: c0.scale(0.3) };
+                        out[row as usize] = if solid {
+                            solid_cell(Some(forced.unwrap_or('|')), c0, mult, gh.anim.is_some())
+                        } else {
+                            Cell { ch: forced.unwrap_or('|'), fg: c0, bg: c0.scale(0.3) }
+                        };
                     } else {
                         out[row as usize] = DARK;
                     }
@@ -1932,9 +2119,15 @@ fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
                             (180.0 * tr.color[2].min(1.0)) as u8,
                         );
                         let col_f = base.lerp(Rgb(255, 255, 200), heat * 0.6);
-                        torch_cell = Some((fc, col_f, col_f.scale(0.35)));
+                        torch_cell = Some(if solid {
+                            // A solid tongue of flame: the light in the dark.
+                            (' ', col_f, col_f.scale(0.75))
+                        } else {
+                            (fc, col_f, col_f.scale(0.35))
+                        });
                     } else if (0.36f32..0.52).contains(&v) {
-                        torch_cell = Some(('|', Rgb(120, 80, 40), Rgb(30, 20, 10)));
+                        torch_cell =
+                            Some((if solid { LV } else { '|' }, Rgb(120, 80, 40), Rgb(30, 20, 10)));
                     }
                 }
             }
@@ -1954,6 +2147,19 @@ fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
                     bg = Rgb::BLACK;
                 } else {
                     let c0 = base.lit(lf).scale(mult * side_f * 1.1);
+                    if solid {
+                        // The top and foot of every wall are outlined.
+                        let edge = yf - top < 1.0 || bot - yf < 1.0;
+                        let door = tile == Tile::DoorClosed;
+                        let cell = if edge && !door && forced.is_none() {
+                            let lc = base.lit(lf).scale(side_f * 1.3);
+                            Cell { ch: LH, fg: lc, bg: lc.scale(SOLID_FACE) }
+                        } else {
+                            solid_cell(forced, c0, mult, door)
+                        };
+                        out[row as usize] = cell;
+                        continue;
+                    }
                     ch = forced
                         .unwrap_or(WALL_RAMP[(bri.sqrt() / 1.15 * 8.99).min(8.0) as usize]);
                     fg = c0;
@@ -1976,7 +2182,8 @@ fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
             let mut emit = Rgb::BLACK;
             let su = (u2 * 2.0).fract();
             let sv = (v2 * 2.0).fract();
-            if su < 0.07 || sv < 0.07 {
+            let grout = su < 0.07 || sv < 0.07;
+            if grout {
                 mult = 0.45;
             } else {
                 mult =
@@ -2049,6 +2256,12 @@ fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
                 bg = Rgb::BLACK;
             } else {
                 let c0 = base.lit(l).scale(mult).add(emit);
+                if solid {
+                    // Flagstones: dark slabs with the grout between them drawn as lines.
+                    let f = forced.or(if grout { Some('.') } else { None });
+                    out[row as usize] = solid_cell(f, c0, mult.min(0.99), false);
+                    continue;
+                }
                 ch = forced.unwrap_or(FLOOR_RAMP[((bri / 1.3) * 5.99).min(5.0) as usize]);
                 fg = c0;
                 bg = c0.scale(0.28);
@@ -2072,6 +2285,10 @@ fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
                 bg = Rgb::BLACK;
             } else {
                 let c0 = pal.ceil.lit(l).scale(mult * 1.2);
+                if solid {
+                    out[row as usize] = solid_cell(beam.then_some('.'), c0, mult, false);
+                    continue;
+                }
                 ch = if beam {
                     '='
                 } else {
@@ -2083,7 +2300,7 @@ fn cast_column(f: &Fp, col: i32, out: &mut [Cell]) -> (f32, Option<GateHit>) {
         }
         out[row as usize] = Cell { ch, fg, bg };
     }
-    (zb, gate)
+    (zb, gate, (mapx, mapy, side))
 }
 
 /// Lighting for bare-bones detail: the level's light at the nearest tile and
@@ -2172,13 +2389,14 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
         vw,
         t,
         minimal: detail == crate::perf::Detail::Minimal,
+        solid: crate::canvas::solid(),
     };
     let vwu = vw.max(0) as usize;
     let vhu = vh.max(0) as usize;
     let ncast = vwu.div_ceil(step);
     if vhu > 0 && ncast > 0 {
         let mut buf = vec![DARK; ncast * vhu];
-        let mut res: Vec<(f32, Option<GateHit>)> = vec![(1e9, None); ncast];
+        let mut res: Vec<(f32, Option<GateHit>, (i32, i32, i32))> = vec![(1e9, None, (0, 0, 0)); ncast];
         let threads = crate::perf::threads().min(ncast);
         if threads > 1 && ncast * vhu >= 5000 {
             let per = ncast.div_ceil(threads);
@@ -2197,12 +2415,59 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
                 *r = cast_column(&fp, (i * step) as i32, o);
             }
         }
+        let solid = fp.solid;
+        if solid {
+            // Outline wall corners and the edges of nearer walls: wherever the
+            // wall face turns or one wall stands in front of another.
+            let rows_of = |zb: f32| {
+                let lh = proj / zb;
+                let top = (horizon - lh * 0.5 - 0.5).ceil().max(0.0) as i32;
+                let bot = ((horizon + lh * 0.5 - 0.5).floor() as i32).min(vhu as i32 - 1);
+                (top, bot)
+            };
+            for i in 0..ncast.saturating_sub(1) {
+                let (a, b) = (&res[i], &res[i + 1]);
+                if a.0 >= 1e8 || b.0 >= 1e8 {
+                    continue;
+                }
+                let turn = a.2 .2 != b.2 .2;
+                let step_back = (a.0 - b.0).abs() > 0.2 * a.0.min(b.0);
+                if !turn && !step_back {
+                    continue;
+                }
+                let n = if b.0 < a.0 { i + 1 } else { i };
+                let (top, bot) = rows_of(res[n].0);
+                for r in top.max(0)..=bot {
+                    let cell = &mut buf[n * vhu + r as usize];
+                    if cell.ch == ' ' || is_line(cell.ch) {
+                        cell.ch = LV;
+                    }
+                }
+            }
+            resolve_lines(&mut buf, ncast, vhu);
+        }
         for col in 0..vwu {
             let i = col / step;
             zbuf[col] = res[i].0;
             gates[col] = res[i].1;
             for (row, cell) in buf[i * vhu..(i + 1) * vhu].iter().enumerate() {
-                c.set(vx + col as i32, vy + row as i32, cell.ch, cell.fg, cell.bg);
+                let (x, y) = (vx + col as i32, vy + row as i32);
+                if solid {
+                    // At lower detail one cast fills several columns: only
+                    // lines running sideways carry on across them.
+                    let ch = if col % step == 0 {
+                        cell.ch
+                    } else if matches!(cell.ch, '─' | '┬' | '┴' | '┼' | '├' | '┌' | '└') {
+                        '─'
+                    } else if is_line(cell.ch) || "│┤┐┘╱╲·".contains(cell.ch) {
+                        ' '
+                    } else {
+                        cell.ch
+                    };
+                    c.set_raw(x, y, ch, cell.fg, cell.bg);
+                } else {
+                    c.set(x, y, cell.ch, cell.fg, cell.bg);
+                }
             }
         }
     }
@@ -2759,7 +3024,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
             for (i, chr) in name.chars().enumerate() {
                 let xx = x0 + i as i32;
                 if xx >= 0 && xx < vw {
-                    c.set(vx + xx, vy + row - 1, chr, mc.scale(0.9), Rgb(10, 5, 5));
+                    c.set_raw(vx + xx, vy + row - 1, chr, mc.scale(0.9), Rgb(10, 5, 5));
                 }
             }
         }
@@ -2855,7 +3120,7 @@ pub fn render_fp(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: i32, t
         for (i, chr) in ft.text.chars().enumerate() {
             let xx = x0 + i as i32;
             if xx >= 0 && xx < vw {
-                c.set(
+                c.set_raw(
                     vx + xx,
                     vy + row,
                     chr,
@@ -3206,7 +3471,12 @@ fn draw_minimap(c: &mut Canvas, g: &Game, x0: i32, y0: i32, w: i32, h: i32) {
                 Tile::Crystal => ('#', Rgb(120, 230, 255)),
                 Tile::Chest => ('=', chest_color(lv, tx, ty)),
             };
-            c.set(x0 + i, y0 + j, ch, col.scale(k), bg);
+            let ch = match map_wall(lv, tx, ty) {
+                Some(None) => continue,
+                Some(Some((c1, _))) => c1,
+                None => ch,
+            };
+            map_cell(c, x0 + i, y0 + j, ch, col.scale(k), bg);
         }
     }
     // Traps you have found.
@@ -3244,10 +3514,10 @@ fn draw_minimap(c: &mut Canvas, g: &Game, x0: i32, y0: i32, w: i32, h: i32) {
             }
         }
     }
-    c.set(
+    c.set_raw(
         x0 + w / 2,
         y0 + h / 2,
-        ARROWS[g.p.facing as usize],
+        arrow(g.p.facing as u8),
         Rgb(255, 255, 120),
         Rgb(60, 50, 0),
     );
@@ -3294,7 +3564,16 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
                 [0.16, 0.18, 0.28]
             };
             let tile = lv.tile(tx, ty);
+            let outline = map_wall(lv, tx, ty);
+            if let Some(None) = outline {
+                continue;
+            }
             let (c1, c2, base, solid) = match tile {
+                Tile::Wall | Tile::Crystal if outline.is_some() => {
+                    let (a, b) = outline.flatten().unwrap_or(('■', ' '));
+                    let col = if tile == Tile::Crystal { Rgb(120, 230, 255) } else { pal.wall };
+                    (a, b, col, true)
+                }
                 Tile::Wall => {
                     let h = hash2(tx, ty);
                     if corrupt > 0.0 && hashf(tx * 7 + 3, ty * 11 + 5) * 0.6 < corrupt * 1.3 - 0.45
@@ -3403,7 +3682,10 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
             if !vis && !stairs {
                 fg = base.lerp(Rgb(70, 80, 120), 0.6).scale(0.45);
             }
-            let mut bg = if solid {
+            let mut bg = if outline.is_some() {
+                // Solid visuals: outlined walls stand on the dark.
+                fg.scale(0.08)
+            } else if solid {
                 fg.scale(0.35)
             } else {
                 fg.scale(0.12)
@@ -3428,11 +3710,15 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
                 ch1 = ['*', '^', '&'][k as usize];
                 fg = Rgb(255, 200, 90).lerp(Rgb(255, 90, 20), (k as f32) / 3.0);
             }
+            // Solid mode fills the whole floor tile, not just its left half.
+            if crate::canvas::solid() && ch2 == ' ' && matches!(ch1, '.' | ',' | '\'') {
+                ch2 = ch1;
+            }
             if sx >= 0 && sx < vw && sy >= 0 && sy < vh {
-                c.set(vx + sx, vy + sy, ch1, fg, bg);
+                map_cell(c, vx + sx, vy + sy, ch1, fg, bg);
             }
             if sx + 1 >= 0 && sx + 1 < vw && sy >= 0 && sy < vh {
-                c.set(vx + sx + 1, vy + sy, ch2, fg, bg);
+                map_cell(c, vx + sx + 1, vy + sy, ch2, fg, bg);
             }
         }
     }
@@ -3569,11 +3855,11 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
         Rgb(255, 255, 200)
     };
     if psx < vw && psy < vh {
-        c.set(vx + psx, vy + psy, '@', pcol, Rgb(60, 50, 20));
+        c.set_raw(vx + psx, vy + psy, player_glyph(), pcol, Rgb(60, 50, 20));
         c.put(
             vx + psx + 1,
             vy + psy,
-            ARROWS[g.p.facing as usize],
+            arrow(g.p.facing as u8),
             Rgb(255, 220, 90),
         );
     }
@@ -3610,7 +3896,9 @@ pub fn render_overhead(c: &mut Canvas, g: &Game, vx: i32, vy: i32, vw: i32, vh: 
         let (sx, sy) = to_screen(ft.x - 0.5, ft.y - 0.5 - ft.z * 1.5);
         let a = ft.life.clamp(0.0, 1.0);
         for (i, chr) in ft.text.chars().enumerate() {
-            put(c, sx + i as i32, sy, chr, ft.color.scale(0.4 + 0.6 * a));
+            if sx + i as i32 >= 0 && sx + (i as i32) < vw && sy >= 0 && sy < vh {
+                c.put_raw(vx + sx + i as i32, vy + sy, chr, ft.color.scale(0.4 + 0.6 * a));
+            }
         }
     }
 }
@@ -3751,7 +4039,7 @@ fn blur_region(c: &mut Canvas, vx: i32, vy: i32, vw: i32, vh: i32, s: f32, t: f3
             } else {
                 (cell.ch, cell.fg)
             };
-            c.set(
+            c.set_raw(
                 x0 + x as i32,
                 y0 + y as i32,
                 ch,
@@ -3764,12 +4052,14 @@ fn blur_region(c: &mut Canvas, vx: i32, vy: i32, vw: i32, vh: i32, s: f32, t: f3
 
 fn bar(c: &mut Canvas, x: i32, y: i32, w: i32, frac: f32, full: Rgb, empty: Rgb) {
     let n = ((frac.clamp(0.0, 1.0)) * w as f32).round() as i32;
+    // Solid visuals: a heavy line for what's left, a thin one for what's gone.
+    let (on, off) = if crate::canvas::solid() { ('━', '─') } else { ('#', '-') };
     for i in 0..w {
         if i < n {
             let k = 0.75 + 0.25 * (i as f32 / w as f32);
-            c.put(x + i, y, '#', full.scale(k));
+            c.put_raw(x + i, y, on, full.scale(k));
         } else {
-            c.put(x + i, y, '-', empty);
+            c.put_raw(x + i, y, off, empty);
         }
     }
 }
@@ -4203,10 +4493,11 @@ pub fn draw_help(c: &mut Canvas) {
     }
 }
 
-pub const PAUSE_ITEMS: [&str; 7] = [
+pub const PAUSE_ITEMS: [&str; 8] = [
     "Resume",
     "How to play",
     "Detail",
+    "Visuals",
     "Music",
     "Sound",
     "Abandon run (earn soul points)",
@@ -4220,7 +4511,8 @@ pub fn draw_pause(c: &mut Canvas, sel: usize, detail: &str, music: f32, sfx: f32
     let h = 12;
     let bar = |v: f32| {
         let n = (v * 10.0).round().clamp(0.0, 10.0) as usize;
-        format!("< {}{} {:>3}% >", "#".repeat(n), "-".repeat(10 - n), (v * 100.0).round() as i32)
+        let (on, off) = if crate::canvas::solid() { ("━", "─") } else { ("#", "-") };
+        format!("< {}{} {:>3}% >", on.repeat(n), off.repeat(10 - n), (v * 100.0).round() as i32)
     };
     let x0 = (c.w as i32 - w) / 2;
     let y0 = (c.h as i32 - h) / 2;
@@ -4232,6 +4524,11 @@ pub fn draw_pause(c: &mut Canvas, sel: usize, detail: &str, music: f32, sfx: f32
         let it = match *it {
             "Detail" => {
                 label = format!("Detail: < {} >", detail);
+                label.as_str()
+            }
+            "Visuals" => {
+                let mode = if crate::canvas::solid() { "Solid" } else { "ASCII" };
+                label = format!("Visuals: < {} >", mode);
                 label.as_str()
             }
             "Music" => {
@@ -4468,8 +4765,20 @@ pub fn draw_map(c: &mut Canvas, g: &Game) {
                 Tile::Chest => ('=', chest_color(lv, tx, ty)),
             };
             for s in 0..sx {
-                let ch2 = if s == 0 || chr == '#' { chr } else { ' ' };
-                c.set(x0 + i * sx + s, y0 + j, ch2, col.scale(k), bg);
+                // Solid mode fills the whole floor tile, not just its left half.
+                let fill = crate::canvas::solid() && matches!(chr, '.' | '\'');
+                let ch2 = match map_wall(lv, tx, ty) {
+                    Some(None) => continue,
+                    Some(Some((c1, c2))) => if s == 0 { c1 } else { c2 },
+                    None if s == 0 || chr == '#' || fill => chr,
+                    None => ' ',
+                };
+                // Outlines are set as they are: they're already solid lines.
+                if crate::canvas::solid() && "─│┌┐└┘├┤┬┴┼■".contains(ch2) {
+                    c.set_raw(x0 + i * sx + s, y0 + j, ch2, col.scale(k), bg);
+                    continue;
+                }
+                map_cell(c, x0 + i * sx + s, y0 + j, ch2, col.scale(k), bg);
             }
         }
     }
@@ -4503,12 +4812,12 @@ pub fn draw_map(c: &mut Canvas, g: &Game) {
         }
     }
     if let Some((x, y)) = to_scr(g.p.x, g.p.y) {
-        c.set(x, y, '@', Rgb(255, 255, 120), Rgb(60, 50, 0));
+        c.set_raw(x, y, player_glyph(), Rgb(255, 255, 120), Rgb(60, 50, 0));
         if sx == 2 {
-            c.set(
+            c.set_raw(
                 x + 1,
                 y,
-                ARROWS[g.p.facing as usize],
+                arrow(g.p.facing as u8),
                 Rgb(255, 220, 90),
                 Rgb(60, 50, 0),
             );
@@ -4516,7 +4825,11 @@ pub fn draw_map(c: &mut Canvas, g: &Game) {
     }
     c.center(
         ch - 2,
-        "@ you   < up   > down   + door   ^ trap   red: foe   gold: champion   violet: unique",
+        if crate::canvas::solid() {
+            "● you   ◄ up   ► down   ┼ door   ▲ trap   red: foe   gold: champion   violet: unique"
+        } else {
+            "@ you   < up   > down   + door   ^ trap   red: foe   gold: champion   violet: unique"
+        },
         Rgb(150, 140, 120),
     );
     c.center(ch - 1, "M / Esc: close", Rgb(120, 120, 140));

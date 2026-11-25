@@ -261,6 +261,7 @@ impl App {
         if let (Some(d), false) = (self.profile.detail, self.detail_from_cli) {
             self.gov.set(perf::Setting::from_u8(d));
         }
+        canvas::set_solid(self.profile.solid.unwrap_or(false));
         self.has_save = game::has_save();
         self.sel = if self.has_save { 0 } else { 1 };
         self.loaded = true;
@@ -562,8 +563,16 @@ impl App {
                         self.gov.set(s);
                         self.profile.detail = Some(s.to_u8());
                     }
+                    // Visuals: swap between ASCII and solid shapes at once.
                     Left | Right | Char('a') | Char('d') | Enter | Char(' ')
-                        if self.pause_sel == 3 || self.pause_sel == 4 =>
+                        if self.pause_sel == 3 =>
+                    {
+                        let on = !canvas::solid();
+                        canvas::set_solid(on);
+                        self.profile.solid = Some(on);
+                    }
+                    Left | Right | Char('a') | Char('d') | Enter | Char(' ')
+                        if self.pause_sel == 4 || self.pause_sel == 5 =>
                     {
                         let d = if matches!(k.code, Left | Char('a')) { -0.1 } else { 0.1 };
                         let (mu, fx) = self.audio.levels();
@@ -572,7 +581,7 @@ impl App {
                             let n = ((v + d) * 10.0).round() / 10.0;
                             if matches!(k.code, Enter | Char(' ')) && n > 1.0 { 0.0 } else { n.clamp(0.0, 1.0) }
                         };
-                        if self.pause_sel == 3 {
+                        if self.pause_sel == 4 {
                             let v = step(mu);
                             self.audio.set_music_volume(v);
                             self.profile.music_volume = Some(v);
@@ -586,7 +595,7 @@ impl App {
                     Enter | Char(' ') => match self.pause_sel {
                         0 => self.overlay = Overlay::None,
                         1 => self.overlay = Overlay::Help,
-                        5 => {
+                        6 => {
                             self.overlay = Overlay::None;
                             g.abandon();
                         }
@@ -1095,7 +1104,7 @@ impl App {
                                 let sy = y - shift;
                                 if sy < m.snap.h as i32 {
                                     let cell = m.snap.get(x as i32, sy);
-                                    c.set(x as i32, y, cell.ch, cell.fg, cell.bg);
+                                    c.set_raw(x as i32, y, cell.ch, cell.fg, cell.bg);
                                 }
                             }
                         }

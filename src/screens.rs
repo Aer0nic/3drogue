@@ -257,6 +257,11 @@ impl Fire {
                 }
                 let f = v as f32 / 36.0;
                 let col = fire_color(f, tint);
+                if crate::canvas::solid() {
+                    // Solid flames: the colour itself, hotter is denser.
+                    c.set_raw(x0 + x as i32, y0 + y as i32, ' ', col, col.scale(0.15 + 0.4 * f));
+                    continue;
+                }
                 let ch = RAMP[((f * 7.99) as usize).min(7)];
                 c.set(x0 + x as i32, y0 + y as i32, ch, col, col.scale(0.35));
             }

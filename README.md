@@ -27,6 +27,13 @@ and 20 frames a second. The game draws text, so the graphics card is used by
 your terminal emulator, not the game: a GPU-accelerated terminal (kitty,
 Alacritty, WezTerm, Ghostty) helps most at large sizes.
 
+**Visuals** (*Visuals* in the Esc menu; saved per profile). *ASCII* is the
+classic look. *Solid* draws the dungeon in clean lines on the dark instead:
+stone is near-black, with mortar, flagstone joints, beams and the outlines of
+walls and corners drawn as joined-up lines; doors and flames are solid shapes;
+monsters and weapons are drawn with solid strokes; and the maps outline rooms
+and passages. Text stays as text. Choosing it again swaps straight back.
+
 ## Controls
 
 | First-person | | Overhead view (Shift+M) | |

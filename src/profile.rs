@@ -207,6 +207,8 @@ pub struct Profile {
     pub sfx_volume: Option<f32>,
     /// Graphics detail: 0 Auto, 1 High, 2 Low, 3 Minimal (see `perf`).
     pub detail: Option<u8>,
+    /// Solid visuals (shapes instead of ASCII art); None = ASCII.
+    pub solid: Option<bool>,
     /// Lifetime kills of each monster, by name.
     pub bestiary: HashMap<String, u32>,
     /// Highest difficulty unlocked (0 = Normal only).
