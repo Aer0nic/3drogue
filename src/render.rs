@@ -4168,7 +4168,7 @@ pub const HELP_LINES: &[&str] = &[
     "  Shift+Q     listen intently (Keen Hearing): beside a chest, a Mimic creaks",
     "  Tab or M    show the full map of the floor",
     "  L           message log (last 100 turns)  T  relight a blown-out torch",
-    "  - / +       volume                     Esc      menu",
+    "  - / +       master volume              Esc      menu",
     "",
     "Monsters fight each other, and victors may become glowing CHAMPIONS.",
     "Each floor may hide a unique monster guarding its signature treasure.",
@@ -4203,18 +4203,25 @@ pub fn draw_help(c: &mut Canvas) {
     }
 }
 
-pub const PAUSE_ITEMS: [&str; 5] = [
+pub const PAUSE_ITEMS: [&str; 7] = [
     "Resume",
     "How to play",
     "Detail",
+    "Music",
+    "Sound",
     "Abandon run (earn soul points)",
     "Save and quit to desktop",
 ];
 
-/// `detail` is the current detail setting, shown beside its menu item.
-pub fn draw_pause(c: &mut Canvas, sel: usize, detail: &str) {
+/// `detail` is the current detail setting, and `music` / `sfx` the volume
+/// levels (0..1), each shown beside its menu item.
+pub fn draw_pause(c: &mut Canvas, sel: usize, detail: &str, music: f32, sfx: f32) {
     let w = 40;
-    let h = 10;
+    let h = 12;
+    let bar = |v: f32| {
+        let n = (v * 10.0).round().clamp(0.0, 10.0) as usize;
+        format!("< {}{} {:>3}% >", "#".repeat(n), "-".repeat(10 - n), (v * 100.0).round() as i32)
+    };
     let x0 = (c.w as i32 - w) / 2;
     let y0 = (c.h as i32 - h) / 2;
     c.frame(x0, y0, w, h, Rgb(200, 120, 90), Rgb(16, 8, 8));
@@ -4222,11 +4229,20 @@ pub fn draw_pause(c: &mut Canvas, sel: usize, detail: &str) {
     for (i, it) in PAUSE_ITEMS.iter().enumerate() {
         let y = y0 + 2 + i as i32;
         let label;
-        let it = if *it == "Detail" {
-            label = format!("Detail: < {} >", detail);
-            label.as_str()
-        } else {
-            it
+        let it = match *it {
+            "Detail" => {
+                label = format!("Detail: < {} >", detail);
+                label.as_str()
+            }
+            "Music" => {
+                label = format!("Music:  {}", bar(music));
+                label.as_str()
+            }
+            "Sound" => {
+                label = format!("Sound:  {}", bar(sfx));
+                label.as_str()
+            }
+            _ => it,
         };
         if i == sel {
             c.text_bg(

@@ -163,7 +163,6 @@ struct App {
     /// terminals that report each key exactly).
     cheat_buf: String,
     held_lshift: bool,
-    held_rctrl: bool,
     exact_keys: bool,
     /// A line shown on the title screen for a few seconds.
     title_note: String,
@@ -212,7 +211,6 @@ impl App {
             detail_from_cli,
             cheat_buf: String::new(),
             held_lshift: false,
-            held_rctrl: false,
             exact_keys: false,
             title_note: String::new(),
             title_note_t: 0.0,
@@ -259,9 +257,7 @@ impl App {
     }
 
     fn after_profile_loaded(&mut self) {
-        if let Some(v) = self.profile.volume {
-            self.audio.set_volume(v);
-        }
+        self.audio.apply_levels(self.profile.volume, self.profile.music_volume, self.profile.sfx_volume);
         if let (Some(d), false) = (self.profile.detail, self.detail_from_cli) {
             self.gov.set(perf::Setting::from_u8(d));
         }
@@ -276,10 +272,10 @@ impl App {
         self.audio.play(Sfx::Menu, &Spatial::center(0.5));
     }
 
-    /// Testing code on the title screen: hold left Shift and right Ctrl and
-    /// type "stewardess" for 99999 soul points. Returns true if the key was
-    /// taken as part of the code. Terminals that report keys exactly must show
-    /// the very keys held; others can only say that Ctrl is down.
+    /// Testing code on the title screen: hold left Shift and type
+    /// "stewardess" for 99999 soul points. Returns true if the key was taken
+    /// as part of the code. Terminals that report keys exactly must show left
+    /// Shift held; others can only say that Shift is down (or send capitals).
     fn title_cheat(&mut self, k: &KeyEvent) -> bool {
         const WORD: &str = "stewardess";
         let KeyCode::Char(ch) = k.code else {
@@ -287,11 +283,11 @@ impl App {
             return false;
         };
         let held = if self.exact_keys {
-            self.held_lshift && self.held_rctrl
+            self.held_lshift
         } else {
-            k.modifiers.contains(KeyModifiers::CONTROL)
+            k.modifiers.contains(KeyModifiers::SHIFT) || ch.is_ascii_uppercase()
         };
-        // Only letters of the word are taken, so Ctrl+C and the rest still work.
+        // Only letters of the word are taken, so every other key still works.
         if !held || !WORD.contains(ch.to_ascii_lowercase()) {
             self.cheat_buf.clear();
             return false;
@@ -566,10 +562,31 @@ impl App {
                         self.gov.set(s);
                         self.profile.detail = Some(s.to_u8());
                     }
+                    Left | Right | Char('a') | Char('d') | Enter | Char(' ')
+                        if self.pause_sel == 3 || self.pause_sel == 4 =>
+                    {
+                        let d = if matches!(k.code, Left | Char('a')) { -0.1 } else { 0.1 };
+                        let (mu, fx) = self.audio.levels();
+                        // Enter / Space step up and wrap back to silence.
+                        let step = |v: f32| {
+                            let n = ((v + d) * 10.0).round() / 10.0;
+                            if matches!(k.code, Enter | Char(' ')) && n > 1.0 { 0.0 } else { n.clamp(0.0, 1.0) }
+                        };
+                        if self.pause_sel == 3 {
+                            let v = step(mu);
+                            self.audio.set_music_volume(v);
+                            self.profile.music_volume = Some(v);
+                        } else {
+                            let v = step(fx);
+                            self.audio.set_sfx_volume(v);
+                            self.profile.sfx_volume = Some(v);
+                            self.click();
+                        }
+                    }
                     Enter | Char(' ') => match self.pause_sel {
                         0 => self.overlay = Overlay::None,
                         1 => self.overlay = Overlay::Help,
-                        3 => {
+                        5 => {
                             self.overlay = Overlay::None;
                             g.abandon();
                         }
@@ -721,7 +738,7 @@ impl App {
                 let v = self.audio.adjust_volume(d);
                 self.profile.volume = Some(v);
                 if self.audio.enabled() {
-                    g.msg(format!("Volume {:.0}%", v * 100.0), GREY);
+                    g.msg(format!("Master volume {:.0}%  (music / sound levels: Esc menu)", v * 100.0), GREY);
                 } else {
                     g.msg("Audio is unavailable (no sound device found).", GREY);
                 }
@@ -1087,7 +1104,8 @@ impl App {
                         Overlay::Inventory => render::draw_inventory(c, g),
                         Overlay::Pause => {
                             c.darken(0.5);
-                            render::draw_pause(c, self.pause_sel, &self.gov.label());
+                            let (mu, fx) = self.audio.levels();
+                            render::draw_pause(c, self.pause_sel, &self.gov.label(), mu, fx);
                         }
                         Overlay::Help => render::draw_help(c),
                         Overlay::Map => render::draw_map(c, g),
@@ -1210,9 +1228,7 @@ fn main() {
     let profile = Profile::default();
     silence_stderr();
     let audio = Audio::new(!no_audio);
-    if let Some(v) = profile.volume {
-        audio.set_volume(v);
-    }
+    audio.apply_levels(profile.volume, profile.music_volume, profile.sfx_volume);
     audio.set_music(MusicMode::Title, 1);
 
     let default_hook = std::panic::take_hook();
@@ -1256,10 +1272,8 @@ fn main() {
                 // Modifier keys on their own only matter to the title code.
                 Ok(Event::Key(KeyEvent { code: KeyCode::Modifier(m), kind, .. })) => {
                     let down = kind != KeyEventKind::Release;
-                    match m {
-                        ModifierKeyCode::LeftShift => app.held_lshift = down,
-                        ModifierKeyCode::RightControl => app.held_rctrl = down,
-                        _ => {}
+                    if m == ModifierKeyCode::LeftShift {
+                        app.held_lshift = down;
                     }
                 }
                 Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => app.on_key(k),
@@ -1279,7 +1293,6 @@ fn main() {
             Term::set_exact_keys(want_exact);
             app.exact_keys = want_exact;
             app.held_lshift = false;
-            app.held_rctrl = false;
             app.cheat_buf.clear();
         }
         let (w, h) = Term::size();

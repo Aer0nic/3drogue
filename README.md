@@ -40,7 +40,7 @@ Alacritty, WezTerm, Ghostty) helps most at large sizes.
 Space/F attack (or shoot) · 1-2 class skills · 3-4 class skills bought at the Soul Altar ·
 G pick up · I inventory (backtick `` ` `` sorts it by type) · P drink a healing potion · `>` `<` Enter use stairs ·
 `.` wait/search · **Shift+R toggles turn-based / real-time** · Shift+M switches first-person / overhead view · Shift+C toggles Last Rites · Shift+Q listens intently (Keen Hearing) · Tab (or M) full map · L message log (last 100 turns) · T relight your torch ·
-`-`/`+` volume · `?` help · Esc menu
+`-`/`+` master volume (music and sound levels in the Esc menu) · `?` help · Esc menu
 
 ## Features
 

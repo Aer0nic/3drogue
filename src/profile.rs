@@ -201,6 +201,10 @@ pub struct Profile {
     pub upgrades: HashMap<String, u32>,
     pub history: Vec<RunRecord>,
     pub volume: Option<f32>,
+    /// Music level 0..1 (None = full).
+    pub music_volume: Option<f32>,
+    /// Sound-effect level 0..1 (None = full).
+    pub sfx_volume: Option<f32>,
     /// Graphics detail: 0 Auto, 1 High, 2 Low, 3 Minimal (see `perf`).
     pub detail: Option<u8>,
     /// Lifetime kills of each monster, by name.

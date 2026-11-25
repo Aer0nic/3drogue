@@ -98,11 +98,15 @@ pub struct Mixer {
     voices: Vec<PlayVoice>,
     music: Music,
     master: f32,
+    /// Music level, 0..1.
+    music_vol: f32,
+    /// Sound-effect level, 0..1.
+    sfx_vol: f32,
 }
 
 impl Mixer {
     fn new(sr: f32) -> Mixer {
-        Mixer { voices: Vec::new(), music: Music::new(sr), master: 0.8 }
+        Mixer { voices: Vec::new(), music: Music::new(sr), master: 0.8, music_vol: 1.0, sfx_vol: 1.0 }
     }
 
     fn fill(&mut self, out: &mut [f32]) {
@@ -111,12 +115,18 @@ impl Mixer {
         }
         let frames = out.len() / 2;
         self.music.render(out, frames);
+        if self.music_vol != 1.0 {
+            for s in out.iter_mut() {
+                *s *= self.music_vol;
+            }
+        }
+        let fx = self.sfx_vol;
         for v in self.voices.iter_mut() {
             let n = v.data.len();
             let mut i = 0;
             while i < frames && v.pos + 1 < n {
-                out[i * 2] += v.data[v.pos];
-                out[i * 2 + 1] += v.data[v.pos + 1];
+                out[i * 2] += v.data[v.pos] * fx;
+                out[i * 2 + 1] += v.data[v.pos + 1] * fx;
                 v.pos += 2;
                 i += 1;
             }
@@ -236,6 +246,45 @@ impl Audio {
             if let Ok(mut mx) = m.lock() {
                 mx.master = v.clamp(0.0, 1.5);
             }
+        }
+    }
+
+    /// Music and sound-effect levels (0..1), in that order.
+    pub fn levels(&self) -> (f32, f32) {
+        if let Some(m) = &self.mixer {
+            if let Ok(mx) = m.lock() {
+                return (mx.music_vol, mx.sfx_vol);
+            }
+        }
+        (1.0, 1.0)
+    }
+
+    pub fn set_music_volume(&self, v: f32) {
+        if let Some(m) = &self.mixer {
+            if let Ok(mut mx) = m.lock() {
+                mx.music_vol = v.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    pub fn set_sfx_volume(&self, v: f32) {
+        if let Some(m) = &self.mixer {
+            if let Ok(mut mx) = m.lock() {
+                mx.sfx_vol = v.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    /// Apply a profile's saved volume levels.
+    pub fn apply_levels(&self, master: Option<f32>, music: Option<f32>, sfx: Option<f32>) {
+        if let Some(v) = master {
+            self.set_volume(v);
+        }
+        if let Some(v) = music {
+            self.set_music_volume(v);
+        }
+        if let Some(v) = sfx {
+            self.set_sfx_volume(v);
         }
     }
 }
